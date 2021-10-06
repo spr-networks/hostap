@@ -1547,6 +1547,10 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 
 			if (sae_check_confirm(sta->sae, var, var_len) < 0) {
 				resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
+
+				wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR,
+					MAC2STR(sta->addr));
+
 				goto reply;
 			}
 			sta->sae->rc = peer_send_confirm;
