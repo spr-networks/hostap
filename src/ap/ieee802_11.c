@@ -562,6 +562,10 @@ static struct wpabuf * auth_build_sae_commit(struct hostapd_data *hapd,
 	password = sae_get_password(hapd, sta, rx_id, &pw, &pt, &pk);
 	if (!password || (use_pt && !pt)) {
 		wpa_printf(MSG_DEBUG, "SAE: No password available");
+
+		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR,
+			MAC2STR(sta->addr));
+
 		return NULL;
 	}
 
