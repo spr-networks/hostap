@@ -3779,7 +3779,7 @@ SM_STEP(WPA_PTK)
 					"no PSK configured for the STA");
 			wpa_auth->dot11RSNA4WayHandshakeFailures++;
 
-			wpa_msg(wpa_auth->conf.msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR,
+			wpa_msg(wpa_auth->conf.msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR " wpa noentry",
 				MAC2STR(sm->addr));
 
 			SM_ENTER(WPA_PTK, DISCONNECT);

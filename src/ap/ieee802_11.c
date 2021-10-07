@@ -563,7 +563,7 @@ static struct wpabuf * auth_build_sae_commit(struct hostapd_data *hapd,
 	if (!password || (use_pt && !pt)) {
 		wpa_printf(MSG_DEBUG, "SAE: No password available");
 
-		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR,
+		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR " sae noentry",
 			MAC2STR(sta->addr));
 
 		return NULL;
@@ -1552,7 +1552,7 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 			if (sae_check_confirm(sta->sae, var, var_len) < 0) {
 				resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
 
-				wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR,
+				wpa_msg(hapd->msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR " sae mismatch",
 					MAC2STR(sta->addr));
 
 				goto reply;
