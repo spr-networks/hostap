@@ -1656,6 +1656,31 @@ hostapd_ctrl_iface_kick_mismatch_psk_sta_iter(struct hostapd_data *hapd,
 			return 0;
 	}
 
+#ifdef CONFIG_SAE
+	struct sae_password_entry *pw;
+	struct sae_password_entry *pw_prior;
+	int pw_match;
+	int vlan_match;
+	int id_match;
+	for (pw = hapd->conf->sae_passwords; pw; pw = pw->next) {
+		if (os_memcmp(sta->addr, pw->peer_addr, ETH_ALEN) == 0) {
+			for (pw_prior = hapd->conf->previous_sae_passwords; pw_prior; pw_prior = pw_prior->next) {
+				if (os_memcmp(sta->addr, pw_prior->peer_addr, ETH_ALEN) == 0) {
+					pw_match = os_strcmp(pw_prior->password, pw->password) == 0;
+					vlan_match = pw_prior->vlan_id == pw->vlan_id;
+					id_match = pw_prior->identifier == pw->identifier;
+					if (pw_match && vlan_match && id_match) {
+						return 0;
+					}
+					break;
+				}
+			}
+			break;
+		}
+	}
+
+#endif
+
 	wpa_printf(MSG_INFO, "STA " MACSTR
 		   " PSK/passphrase no longer valid - disconnect",
 		   MAC2STR(sta->addr));
