@@ -1685,6 +1685,7 @@ hostapd_ctrl_iface_kick_mismatch_psk_sta_iter(struct hostapd_data *hapd,
 		   " PSK/passphrase no longer valid - disconnect",
 		   MAC2STR(sta->addr));
 	reason = WLAN_REASON_PREV_AUTH_NOT_VALID;
+	wpa_auth_pmksa_remove(hapd->wpa_auth, sta->addr);
 	hostapd_drv_sta_deauth(hapd, sta->addr, reason);
 	ap_sta_deauthenticate(hapd, sta, reason);
 
