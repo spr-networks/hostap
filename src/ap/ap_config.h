@@ -104,6 +104,7 @@ struct hostapd_ssid {
 	struct hostapd_wpa_psk *wpa_psk;
 	char *wpa_passphrase;
 	char *wpa_psk_file;
+	char *sae_psk_file;
 	struct sae_pt *pt;
 
 #ifdef CONFIG_WEP
@@ -664,6 +665,7 @@ struct hostapd_bss_config {
 	int sae_pwe;
 	int *sae_groups;
 	struct sae_password_entry *sae_passwords;
+	struct sae_password_entry *previous_sae_passwords;
 
 	char *wowlan_triggers; /* Wake-on-WLAN triggers */
 
@@ -1190,5 +1192,6 @@ int hostapd_sae_pw_id_in_use(struct hostapd_bss_config *conf);
 bool hostapd_sae_pk_in_use(struct hostapd_bss_config *conf);
 bool hostapd_sae_pk_exclusively(struct hostapd_bss_config *conf);
 int hostapd_setup_sae_pt(struct hostapd_bss_config *conf);
+int parse_sae_password(struct hostapd_bss_config *bss, const char *val);
 
 #endif /* HOSTAPD_CONFIG_H */

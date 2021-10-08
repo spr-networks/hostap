@@ -303,6 +303,59 @@ int hostapd_mac_comp(const void *a, const void *b)
 }
 
 
+static void hostapd_config_free_previous_sae_passwords(struct hostapd_bss_config *conf)
+{
+	struct sae_password_entry *pw, *tmp;
+	pw = conf->previous_sae_passwords;
+	conf->previous_sae_passwords = NULL;
+	while (pw) {
+		tmp = pw;
+		pw = pw->next;
+		str_clear_free(tmp->password);
+		os_free(tmp->identifier);
+#ifdef CONFIG_SAE
+		sae_deinit_pt(tmp->pt);
+#endif /* CONFIG_SAE */
+#ifdef CONFIG_SAE_PK
+		sae_deinit_pk(tmp->pk);
+#endif /* CONFIG_SAE_PK */
+		os_free(tmp);
+	}
+}
+
+static int hostapd_config_read_sae_psk(const char *fname,
+				       struct hostapd_bss_config *bss)
+{
+#ifdef CONFIG_SAE
+	FILE *f;
+	char buf[128];
+
+	if (!fname)
+		return 0;
+
+	f = fopen(fname, "r");
+	if (!f) {
+		wpa_printf(MSG_ERROR, "SAE PSK file '%s' not found.", fname);
+		return -1;
+	}
+
+	hostapd_config_free_previous_sae_passwords(bss);
+	bss->previous_sae_passwords = bss->sae_passwords;
+	bss->sae_passwords = NULL;
+
+	while (fgets(buf, sizeof(buf), f)) {
+		if (buf[0] == '#')
+			continue;
+
+		if (parse_sae_password(bss, buf) < 0) {
+			wpa_printf(MSG_ERROR, "SAE failed to parse sae entry", fname);
+			return -1;
+		}
+	}
+
+#endif
+	return 0;
+}
 static int hostapd_config_read_wpa_psk(const char *fname,
 				       struct hostapd_ssid *ssid)
 {
@@ -514,6 +567,11 @@ int hostapd_setup_wpa_psk(struct hostapd_bss_config *conf)
 {
 	struct hostapd_ssid *ssid = &conf->ssid;
 
+	if (hostapd_config_read_sae_psk(ssid->sae_psk_file, conf) < 0) {
+		wpa_printf(MSG_DEBUG, "Failed to read sae_psk_file");
+		return -1;
+	}
+
 	if (hostapd_setup_sae_pt(conf) < 0)
 		return -1;
 
@@ -530,7 +588,14 @@ int hostapd_setup_wpa_psk(struct hostapd_bss_config *conf)
 		ssid->wpa_psk->group = 1;
 	}
 
-	return hostapd_config_read_wpa_psk(ssid->wpa_psk_file, &conf->ssid);
+	if (hostapd_config_read_wpa_psk(ssid->wpa_psk_file, &conf->ssid) < 0) {
+		wpa_printf(MSG_DEBUG, "Failed to read wpa_psk_file");
+		return -1;
+	}
+
+
+	return 0;
+
 }
 
 
