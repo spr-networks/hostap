@@ -348,7 +348,7 @@ static int hostapd_config_read_sae_psk(const char *fname,
 			continue;
 
 		if (parse_sae_password(bss, buf) < 0) {
-			wpa_printf(MSG_ERROR, "SAE failed to parse sae entry", fname);
+			wpa_printf(MSG_ERROR, "SAE failed to parse sae entry %s", fname);
 			return -1;
 		}
 	}
