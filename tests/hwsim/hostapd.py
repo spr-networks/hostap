@@ -508,7 +508,7 @@ class Hostapd:
             raise Exception("Failed to initiate DPP Authentication")
 
     def dpp_pkex_init(self, identifier, code, role=None, key=None, curve=None,
-                      extra=None, use_id=None):
+                      extra=None, use_id=None, ver=None):
         if use_id is None:
             id1 = self.dpp_bootstrap_gen(type="pkex", key=key, curve=curve)
         else:
@@ -517,6 +517,8 @@ class Hostapd:
         if identifier:
             cmd += "identifier=%s " % identifier
         cmd += "init=1 "
+        if ver is not None:
+            cmd += "ver=" + str(ver) + " "
         if role:
             cmd += "role=%s " % role
         if extra:

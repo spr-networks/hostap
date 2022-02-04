@@ -5066,14 +5066,14 @@ def _test_ap_wps_http_timeout(dev, apdev):
     sock.connect(addr)
     sock.send(b"G")
 
-    class DummyServer(StreamRequestHandler):
+    class StubServer(StreamRequestHandler):
         def handle(self):
-            logger.debug("DummyServer - start 31 sec wait")
+            logger.debug("StubServer - start 31 sec wait")
             time.sleep(31)
-            logger.debug("DummyServer - wait done")
+            logger.debug("StubServer - wait done")
 
     logger.debug("Start WPS ER")
-    server, sock2 = wps_er_start(dev[0], DummyServer, max_age=40,
+    server, sock2 = wps_er_start(dev[0], StubServer, max_age=40,
                                  wait_m_search=True)
 
     logger.debug("Start server to accept, but not complete, HTTP connection from WPS ER")
@@ -10131,8 +10131,8 @@ def test_ap_wps_tkip(dev, apdev):
     if "FAIL" not in hapd.request("WPS_PBC"):
         raise Exception("WPS unexpectedly enabled")
 
-def test_ap_wps_conf_dummy_cred(dev, apdev):
-    """WPS PIN provisioning with configured AP using dummy cred"""
+def test_ap_wps_conf_stub_cred(dev, apdev):
+    """WPS PIN provisioning with configured AP using stub cred"""
     ssid = "test-wps-conf"
     hapd = hostapd.add_ap(apdev[0],
                           {"ssid": ssid, "eap_server": "1", "wps_state": "2",
@@ -10142,7 +10142,7 @@ def test_ap_wps_conf_dummy_cred(dev, apdev):
     dev[0].scan_for_bss(apdev[0]['bssid'], freq="2412")
     dev[0].dump_monitor()
     try:
-        hapd.set("wps_testing_dummy_cred", "1")
+        hapd.set("wps_testing_stub_cred", "1")
         dev[0].request("WPS_PIN " + apdev[0]['bssid'] + " 12345670")
         for i in range(1, 3):
             ev = dev[0].wait_event(["WPS-CRED-RECEIVED"], timeout=15)
@@ -10150,7 +10150,7 @@ def test_ap_wps_conf_dummy_cred(dev, apdev):
                 raise Exception("WPS credential %d not received" % i)
         dev[0].wait_connected(timeout=30)
     finally:
-        hapd.set("wps_testing_dummy_cred", "0")
+        hapd.set("wps_testing_stub_cred", "0")
 
 def test_ap_wps_rf_bands(dev, apdev):
     """WPS and wps_rf_bands configuration"""
@@ -10599,3 +10599,10 @@ def test_ap_wps_registrar_init_errors(dev, apdev):
         with alloc_fail(hapd, count, func):
             if "FAIL" not in hapd.request("ENABLE"):
                 raise Exception("ENABLE succeeded unexpectedly")
+
+def test_ap_wps_config_without_wps(dev, apdev):
+    """AP configuration attempt using wps_config when WPS is disabled"""
+    ssid = "test-wps-init-config"
+    hapd = hostapd.add_ap(apdev[0], {"ssid": ssid})
+    if "FAIL" not in hapd.request("WPS_CONFIG " + binascii.hexlify(ssid.encode()).decode() + " WPA2PSK CCMP " + binascii.hexlify(b"12345678").decode()):
+        raise Exception("WPS_CONFIG command succeeded unexpectedly")

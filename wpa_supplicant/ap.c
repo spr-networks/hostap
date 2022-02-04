@@ -196,6 +196,8 @@ wpa_supplicant_find_hw_mode(struct wpa_supplicant *wpa_s,
 }
 
 
+#ifdef CONFIG_P2P
+
 static int get_max_oper_chwidth_6ghz(int chwidth)
 {
 	switch (chwidth) {
@@ -255,6 +257,8 @@ static void wpas_conf_ap_he_6ghz(struct wpa_supplicant *wpa_s,
 	    get_max_oper_chwidth_6ghz(ssid->max_oper_chwidth) >= 80)
 		wpas_conf_ap_vht(wpa_s, ssid, conf, mode);
 }
+
+#endif /* CONFIG_P2P */
 
 
 int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
@@ -319,7 +323,9 @@ int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
 
 		if (mode && is_6ghz_freq(ssid->frequency) &&
 		    conf->hw_mode == HOSTAPD_MODE_IEEE80211A) {
+#ifdef CONFIG_P2P
 			wpas_conf_ap_he_6ghz(wpa_s, mode, ssid, conf);
+#endif /* CONFIG_P2P */
 		} else if (!no_ht && mode && mode->ht_capab) {
 			wpa_printf(MSG_DEBUG,
 				   "Enable HT support (p2p_group=%d 11a=%d ht40_hw_capab=%d ssid->ht40=%d)",
@@ -376,7 +382,7 @@ int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
 					HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET;
 
 			/*
-			 * white-list capabilities that won't cause issues
+			 * include capabilities that won't cause issues
 			 * to connecting stations, while leaving the current
 			 * capabilities intact (currently disabled SMPS).
 			 */
@@ -595,7 +601,10 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 		bss->sae_passwords = pw;
 	}
 
-	bss->sae_pwe = wpa_s->conf->sae_pwe;
+	if (ssid->sae_pwe != DEFAULT_SAE_PWE)
+		bss->sae_pwe = ssid->sae_pwe;
+	else
+		bss->sae_pwe = wpa_s->conf->sae_pwe;
 #endif /* CONFIG_SAE */
 
 	if (wpa_s->conf->go_interworking) {
@@ -894,12 +903,18 @@ static void wpas_ap_configured_cb(void *ctx)
 		return;
 	}
 
+	if (wpa_s->current_ssid) {
+		int acs = 0;
+
 #ifdef CONFIG_ACS
-	if (wpa_s->current_ssid && wpa_s->current_ssid->acs) {
-		wpa_s->assoc_freq = wpa_s->ap_iface->freq;
-		wpa_s->current_ssid->frequency = wpa_s->ap_iface->freq;
-	}
+		acs = wpa_s->current_ssid->acs;
 #endif /* CONFIG_ACS */
+		if (acs || (wpa_s->assoc_freq && wpa_s->ap_iface->freq &&
+			    (int) wpa_s->assoc_freq != wpa_s->ap_iface->freq)) {
+			wpa_s->assoc_freq = wpa_s->ap_iface->freq;
+			wpa_s->current_ssid->frequency = wpa_s->ap_iface->freq;
+		}
+	}
 
 	wpa_supplicant_set_state(wpa_s, WPA_COMPLETED);
 
@@ -1194,6 +1209,7 @@ void ap_mgmt_rx(void *ctx, struct rx_mgmt *rx_mgmt)
 	struct wpa_supplicant *wpa_s = ctx;
 	struct hostapd_frame_info fi;
 	os_memset(&fi, 0, sizeof(fi));
+	fi.freq = rx_mgmt->freq;
 	fi.datarate = rx_mgmt->datarate;
 	fi.ssi_signal = rx_mgmt->ssi_signal;
 	ieee802_11_mgmt(wpa_s->ap_iface->bss[0], rx_mgmt->frame,

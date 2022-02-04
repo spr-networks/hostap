@@ -51,6 +51,7 @@ struct mesh_conf {
 	int dot11MeshRetryTimeout; /* msec */
 	int dot11MeshConfirmTimeout; /* msec */
 	int dot11MeshHoldingTimeout; /* msec */
+	int mesh_fwding;
 };
 
 #define MAX_STA_COUNT 2007
@@ -698,6 +699,7 @@ struct hostapd_bss_config {
 
 #define MESH_ENABLED BIT(0)
 	int mesh;
+	int mesh_fwding;
 
 	u8 radio_measurements[RRM_CAPABILITIES_IE_LEN];
 
@@ -896,6 +898,8 @@ struct hostapd_bss_config {
 
 	u8 ext_capa_mask[EXT_CAPA_MAX_LEN];
 	u8 ext_capa[EXT_CAPA_MAX_LEN];
+
+	u8 rnr;
 };
 
 /**
@@ -953,6 +957,7 @@ struct hostapd_config {
 	struct wpa_freq_range_list acs_freq_list;
 	u8 acs_freq_list_present;
 	int acs_exclude_dfs;
+	u8 min_tx_power;
 	enum hostapd_hw_mode hw_mode; /* HOSTAPD_MODE_IEEE80211A, .. */
 	int acs_exclude_6ghz_non_psc;
 	enum {

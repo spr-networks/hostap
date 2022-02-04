@@ -5160,7 +5160,7 @@ static int wpa_driver_nl80211_sta_add(void *priv,
 			/*
 			 * cfg80211 validates that AID is non-zero, so we have
 			 * to make this a non-zero value for the TDLS case where
-			 * a dummy STA entry is used for now and for a station
+			 * a stub STA entry is used for now and for a station
 			 * that is still not associated.
 			 */
 			wpa_printf(MSG_DEBUG, "  * aid=1 (%s workaround)",
@@ -10475,6 +10475,9 @@ static int nl80211_put_mesh_config(struct nl_msg *msg,
 	if (((params->flags & WPA_DRIVER_MESH_CONF_FLAG_AUTO_PLINKS) &&
 	     nla_put_u8(msg, NL80211_MESHCONF_AUTO_OPEN_PLINKS,
 			params->auto_plinks)) ||
+	    ((params->flags & WPA_DRIVER_MESH_CONF_FLAG_FORWARDING) &&
+	     nla_put_u8(msg, NL80211_MESHCONF_FORWARDING,
+			params->forwarding)) ||
 	    ((params->flags & WPA_DRIVER_MESH_CONF_FLAG_MAX_PEER_LINKS) &&
 	     nla_put_u16(msg, NL80211_MESHCONF_MAX_PEER_LINKS,
 			 params->max_peer_links)) ||
@@ -12092,6 +12095,7 @@ static int nl80211_dpp_listen(void *priv, bool enable)
 
 
 #ifdef CONFIG_TESTING_OPTIONS
+
 static int testing_nl80211_register_frame(void *priv, u16 type,
 					  const u8 *match, size_t match_len,
 					  bool multicast)
@@ -12105,6 +12109,33 @@ static int testing_nl80211_register_frame(void *priv, u16 type,
 	return nl80211_register_frame(bss, handle, type, match, match_len,
 				      multicast);
 }
+
+
+static int testing_nl80211_radio_disable(void *priv, int disabled)
+{
+	struct i802_bss *bss = priv;
+	struct wpa_driver_nl80211_data *drv = bss->drv;
+
+	/* For now, this is supported only partially in station mode with
+	 * SME-in-wpa_supplicant case where the NL80211_ATTR_LOCAL_STATE_CHANGE
+	 * attribute can be used to avoid sending out the Deauthentication frame
+	 * to the currently associated AP. */
+
+	if (!disabled)
+		return 0;
+
+	if (!(drv->capa.flags & WPA_DRIVER_FLAGS_SME))
+		return -1;
+
+	if (!drv->associated)
+		return 0;
+
+	return wpa_driver_nl80211_mlme(drv, drv->bssid,
+				       NL80211_CMD_DEAUTHENTICATE,
+				       WLAN_REASON_PREV_AUTH_NOT_VALID, 1,
+				       drv->first_bss);
+}
+
 #endif /* CONFIG_TESTING_OPTIONS */
 
 
@@ -12248,5 +12279,6 @@ const struct wpa_driver_ops wpa_driver_nl80211_ops = {
 #endif /* CONFIG_DPP */
 #ifdef CONFIG_TESTING_OPTIONS
 	.register_frame = testing_nl80211_register_frame,
+	.radio_disable = testing_nl80211_radio_disable,
 #endif /* CONFIG_TESTING_OPTIONS */
 };

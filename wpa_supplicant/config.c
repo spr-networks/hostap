@@ -2527,6 +2527,7 @@ static const struct parse_data ssid_fields[] = {
 #ifdef CONFIG_MESH
 	{ INT_RANGE(mode, 0, 5) },
 	{ INT_RANGE(no_auto_peer, 0, 1) },
+	{ INT_RANGE(mesh_fwding, 0, 1) },
 	{ INT_RANGE(mesh_rssi_threshold, -255, 1) },
 #else /* CONFIG_MESH */
 	{ INT_RANGE(mode, 0, 4) },
@@ -2855,6 +2856,10 @@ void wpa_config_free_cred(struct wpa_cred *cred)
 	os_free(cred->client_cert);
 	os_free(cred->private_key);
 	str_clear_free(cred->private_key_passwd);
+	os_free(cred->engine_id);
+	os_free(cred->ca_cert_id);
+	os_free(cred->cert_id);
+	os_free(cred->key_id);
 	os_free(cred->imsi);
 	str_clear_free(cred->milenage);
 	for (i = 0; i < cred->num_domain; i++)
@@ -3107,6 +3112,7 @@ void wpa_config_set_network_defaults(struct wpa_ssid *ssid)
 	ssid->dot11MeshRetryTimeout = DEFAULT_MESH_RETRY_TIMEOUT;
 	ssid->dot11MeshConfirmTimeout = DEFAULT_MESH_CONFIRM_TIMEOUT;
 	ssid->dot11MeshHoldingTimeout = DEFAULT_MESH_HOLDING_TIMEOUT;
+	ssid->mesh_fwding = DEFAULT_MESH_FWDING;
 	ssid->mesh_rssi_threshold = DEFAULT_MESH_RSSI_THRESHOLD;
 #endif /* CONFIG_MESH */
 #ifdef CONFIG_HT_OVERRIDES
@@ -3140,6 +3146,7 @@ void wpa_config_set_network_defaults(struct wpa_ssid *ssid)
 #endif /* CONFIG_VHT_OVERRIDES */
 	ssid->proactive_key_caching = -1;
 	ssid->ieee80211w = MGMT_FRAME_PROTECTION_DEFAULT;
+	ssid->sae_pwe = DEFAULT_SAE_PWE;
 #ifdef CONFIG_MACSEC
 	ssid->mka_priority = DEFAULT_PRIO_NOT_KEY_SERVER;
 #endif /* CONFIG_MACSEC */
@@ -3617,6 +3624,11 @@ int wpa_config_set_cred(struct wpa_cred *cred, const char *var,
 		return 0;
 	}
 
+	if (os_strcmp(var, "engine") == 0) {
+		cred->engine = atoi(value);
+		return 0;
+	}
+
 	val = wpa_config_parse_string(value, &len);
 	if (val == NULL ||
 	    (os_strcmp(var, "excluded_ssid") != 0 &&
@@ -3669,6 +3681,30 @@ int wpa_config_set_cred(struct wpa_cred *cred, const char *var,
 	if (os_strcmp(var, "private_key_passwd") == 0) {
 		str_clear_free(cred->private_key_passwd);
 		cred->private_key_passwd = val;
+		return 0;
+	}
+
+	if (os_strcmp(var, "engine_id") == 0) {
+		os_free(cred->engine_id);
+		cred->engine_id = val;
+		return 0;
+	}
+
+	if (os_strcmp(var, "ca_cert_id") == 0) {
+		os_free(cred->ca_cert_id);
+		cred->ca_cert_id = val;
+		return 0;
+	}
+
+	if (os_strcmp(var, "cert_id") == 0) {
+		os_free(cred->cert_id);
+		cred->cert_id = val;
+		return 0;
+	}
+
+	if (os_strcmp(var, "key_id") == 0) {
+		os_free(cred->key_id);
+		cred->key_id = val;
 		return 0;
 	}
 
@@ -4348,6 +4384,7 @@ struct wpa_config * wpa_config_alloc_empty(const char *ctrl_interface,
 	config->user_mpm = DEFAULT_USER_MPM;
 	config->max_peer_links = DEFAULT_MAX_PEER_LINKS;
 	config->mesh_max_inactivity = DEFAULT_MESH_MAX_INACTIVITY;
+	config->mesh_fwding = DEFAULT_MESH_FWDING;
 	config->dot11RSNASAERetransPeriod =
 		DEFAULT_DOT11_RSNA_SAE_RETRANS_PERIOD;
 	config->fast_reauth = DEFAULT_FAST_REAUTH;
@@ -4910,33 +4947,21 @@ static int wpa_config_process_ap_vendor_elements(
 	struct wpa_config *config, int line, const char *pos)
 {
 	struct wpabuf *tmp;
-	int len = os_strlen(pos) / 2;
-	u8 *p;
 
-	if (!len) {
+	if (!*pos) {
 		wpabuf_free(config->ap_vendor_elements);
 		config->ap_vendor_elements = NULL;
 		return 0;
 	}
 
-	tmp = wpabuf_alloc(len);
-	if (tmp) {
-		p = wpabuf_put(tmp, len);
-
-		if (hexstr2bin(pos, p, len)) {
-			wpa_printf(MSG_ERROR, "Line %d: invalid "
-				   "ap_vendor_elements", line);
-			wpabuf_free(tmp);
-			return -1;
-		}
-
-		wpabuf_free(config->ap_vendor_elements);
-		config->ap_vendor_elements = tmp;
-	} else {
-		wpa_printf(MSG_ERROR, "Cannot allocate memory for "
-			   "ap_vendor_elements");
+	tmp = wpabuf_parse_bin(pos);
+	if (!tmp) {
+		wpa_printf(MSG_ERROR, "Line %d: invalid ap_vendor_elements",
+			   line);
 		return -1;
 	}
+	wpabuf_free(config->ap_vendor_elements);
+	config->ap_vendor_elements = tmp;
 
 	return 0;
 }
@@ -5073,6 +5098,7 @@ static const struct global_parse_data global_fields[] = {
 	{ INT(user_mpm), 0 },
 	{ INT_RANGE(max_peer_links, 0, 255), 0 },
 	{ INT(mesh_max_inactivity), 0 },
+	{ INT_RANGE(mesh_fwding, 0, 1), 0 },
 	{ INT(dot11RSNASAERetransPeriod), 0 },
 #endif /* CONFIG_MESH */
 	{ INT(disable_scan_offload), 0 },

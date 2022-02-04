@@ -568,10 +568,10 @@ static int wpa_supplicant_ctrl_iface_set(struct wpa_supplicant *wpa_s,
 				   (wps_version_number & 0xf0) >> 4,
 				   wps_version_number & 0x0f);
 		}
-	} else if (os_strcasecmp(cmd, "wps_testing_dummy_cred") == 0) {
-		wps_testing_dummy_cred = atoi(value);
-		wpa_printf(MSG_DEBUG, "WPS: Testing - dummy_cred=%d",
-			   wps_testing_dummy_cred);
+	} else if (os_strcasecmp(cmd, "wps_testing_stub_cred") == 0) {
+		wps_testing_stub_cred = atoi(value);
+		wpa_printf(MSG_DEBUG, "WPS: Testing - stub_cred=%d",
+			   wps_testing_stub_cred);
 	} else if (os_strcasecmp(cmd, "wps_corrupt_pkhash") == 0) {
 		wps_corrupt_pkhash = atoi(value);
 		wpa_printf(MSG_DEBUG, "WPS: Testing - wps_corrupt_pkhash=%d",
@@ -3793,47 +3793,6 @@ static int wpa_supplicant_ctrl_iface_add_cred(struct wpa_supplicant *wpa_s,
 }
 
 
-static int wpas_ctrl_remove_cred(struct wpa_supplicant *wpa_s,
-				 struct wpa_cred *cred)
-{
-	struct wpa_ssid *ssid;
-	char str[20];
-	int id;
-
-	if (cred == NULL) {
-		wpa_printf(MSG_DEBUG, "CTRL_IFACE: Could not find cred");
-		return -1;
-	}
-
-	id = cred->id;
-	if (wpa_config_remove_cred(wpa_s->conf, id) < 0) {
-		wpa_printf(MSG_DEBUG, "CTRL_IFACE: Could not find cred");
-		return -1;
-	}
-
-	wpa_msg(wpa_s, MSG_INFO, CRED_REMOVED "%d", id);
-
-	/* Remove any network entry created based on the removed credential */
-	ssid = wpa_s->conf->ssid;
-	while (ssid) {
-		if (ssid->parent_cred == cred) {
-			int res;
-
-			wpa_printf(MSG_DEBUG, "Remove network id %d since it "
-				   "used the removed credential", ssid->id);
-			res = os_snprintf(str, sizeof(str), "%d", ssid->id);
-			if (os_snprintf_error(sizeof(str), res))
-				str[sizeof(str) - 1] = '\0';
-			ssid = ssid->next;
-			wpa_supplicant_ctrl_iface_remove_network(wpa_s, str);
-		} else
-			ssid = ssid->next;
-	}
-
-	return 0;
-}
-
-
 static int wpa_supplicant_ctrl_iface_remove_cred(struct wpa_supplicant *wpa_s,
 						 char *cmd)
 {
@@ -3844,13 +3803,7 @@ static int wpa_supplicant_ctrl_iface_remove_cred(struct wpa_supplicant *wpa_s,
 	 * "provisioning_sp=<FQDN> */
 	if (os_strcmp(cmd, "all") == 0) {
 		wpa_printf(MSG_DEBUG, "CTRL_IFACE: REMOVE_CRED all");
-		cred = wpa_s->conf->cred;
-		while (cred) {
-			prev = cred;
-			cred = cred->next;
-			wpas_ctrl_remove_cred(wpa_s, prev);
-		}
-		return 0;
+		return wpas_remove_all_creds(wpa_s);
 	}
 
 	if (os_strncmp(cmd, "sp_fqdn=", 8) == 0) {
@@ -3866,7 +3819,7 @@ static int wpa_supplicant_ctrl_iface_remove_cred(struct wpa_supplicant *wpa_s,
 					if (os_strcmp(prev->domain[i], cmd + 8)
 					    != 0)
 						continue;
-					wpas_ctrl_remove_cred(wpa_s, prev);
+					wpas_remove_cred(wpa_s, prev);
 					break;
 				}
 			}
@@ -3883,7 +3836,7 @@ static int wpa_supplicant_ctrl_iface_remove_cred(struct wpa_supplicant *wpa_s,
 			cred = cred->next;
 			if (prev->provisioning_sp &&
 			    os_strcmp(prev->provisioning_sp, cmd + 16) == 0)
-				wpas_ctrl_remove_cred(wpa_s, prev);
+				wpas_remove_cred(wpa_s, prev);
 		}
 		return 0;
 	}
@@ -3892,7 +3845,7 @@ static int wpa_supplicant_ctrl_iface_remove_cred(struct wpa_supplicant *wpa_s,
 	wpa_printf(MSG_DEBUG, "CTRL_IFACE: REMOVE_CRED id=%d", id);
 
 	cred = wpa_config_get_cred(wpa_s->conf, id);
-	return wpas_ctrl_remove_cred(wpa_s, cred);
+	return wpas_remove_cred(wpa_s, cred);
 }
 
 
@@ -4826,7 +4779,9 @@ static int wpa_supplicant_ctrl_iface_get_capability(
 
 #ifdef CONFIG_DPP
 	if (os_strcmp(field, "dpp") == 0) {
-#ifdef CONFIG_DPP2
+#ifdef CONFIG_DPP3
+		res = os_snprintf(buf, buflen, "DPP=3");
+#elif defined(CONFIG_DPP2)
 		res = os_snprintf(buf, buflen, "DPP=2");
 #else /* CONFIG_DPP2 */
 		res = os_snprintf(buf, buflen, "DPP=1");
@@ -5924,7 +5879,7 @@ static struct p2ps_provision * p2p_parse_asp_provision_cmd(const char *cmd)
 	for (i = 0; p2ps_prov->cpt_priority[i]; i++)
 		p2ps_prov->cpt_mask |= p2ps_prov->cpt_priority[i];
 
-	/* force conncap with tstCap (no sanity checks) */
+	/* force conncap with tstCap (no validity checks) */
 	pos = os_strstr(cmd, "tstCap=");
 	if (pos) {
 		role = strtol(pos + 7, NULL, 16);
@@ -8447,7 +8402,7 @@ static void wpa_supplicant_ctrl_iface_flush(struct wpa_supplicant *wpa_s)
 
 #ifdef CONFIG_WPS_TESTING
 	wps_version_number = 0x20;
-	wps_testing_dummy_cred = 0;
+	wps_testing_stub_cred = 0;
 	wps_corrupt_pkhash = 0;
 	wps_force_auth_types_in_use = 0;
 	wps_force_encr_types_in_use = 0;
@@ -8477,7 +8432,9 @@ static void wpa_supplicant_ctrl_iface_flush(struct wpa_supplicant *wpa_s)
 	dpp_pkex_ephemeral_key_override_len = 0;
 	dpp_protocol_key_override_len = 0;
 	dpp_nonce_override_len = 0;
-#ifdef CONFIG_DPP2
+#ifdef CONFIG_DPP3
+	dpp_version_override = 3;
+#elif defined(CONFIG_DPP2)
 	dpp_version_override = 2;
 #else /* CONFIG_DPP2 */
 	dpp_version_override = 1;
@@ -10624,6 +10581,8 @@ static int wpas_ctrl_iface_pmksa_add(struct wpa_supplicant *wpa_s,
 	if (sscanf(pos, "%d %d %d %d", &reauth_time, &expiration,
 		   &entry->akmp, &entry->opportunistic) != 4)
 		goto fail;
+	if (reauth_time > expiration)
+		goto fail;
 	for (i = 0; i < 4; i++) {
 		pos = os_strchr(pos, ' ');
 		if (!pos) {
@@ -12374,6 +12333,9 @@ char * wpa_supplicant_ctrl_iface_process(struct wpa_supplicant *wpa_s,
 		}
 	} else if (os_strncmp(buf, "DPP_PKEX_REMOVE ", 16) == 0) {
 		if (wpas_dpp_pkex_remove(wpa_s, buf + 16) < 0)
+			reply_len = -1;
+	} else if (os_strncmp(buf, "DPP_CONF_SET ", 13) == 0) {
+		if (wpas_dpp_conf_set(wpa_s, buf + 12) < 0)
 			reply_len = -1;
 #ifdef CONFIG_DPP2
 	} else if (os_strncmp(buf, "DPP_CONTROLLER_START ", 21) == 0) {
