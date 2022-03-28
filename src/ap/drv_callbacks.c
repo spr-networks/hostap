@@ -261,12 +261,7 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 	}
 #endif /* NEED_AP_MLME */
 
-#ifdef CONFIG_INTERWORKING
-	if (elems.ext_capab && elems.ext_capab_len > 4) {
-		if (elems.ext_capab[4] & 0x01)
-			sta->qos_map_enabled = 1;
-	}
-#endif /* CONFIG_INTERWORKING */
+	check_ext_capab(hapd, sta, elems.ext_capab, elems.ext_capab_len);
 
 #ifdef CONFIG_HS20
 	wpabuf_free(sta->hs20_ie);
@@ -1011,7 +1006,9 @@ void hostapd_event_ch_switch(struct hostapd_data *hapd, int freq, int ht,
 		hostapd_neighbor_set_own_report(hapd->iface->bss[i]);
 
 #ifdef CONFIG_OCV
-	if (hapd->conf->ocv) {
+	if (hapd->conf->ocv &&
+	    !(hapd->iface->drv_flags2 &
+	      WPA_DRIVER_FLAGS2_SA_QUERY_OFFLOAD_AP)) {
 		struct sta_info *sta;
 		bool check_sa_query = false;
 

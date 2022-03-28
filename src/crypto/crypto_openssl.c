@@ -121,6 +121,15 @@ static const unsigned char * ASN1_STRING_get0_data(const ASN1_STRING *x)
 #endif /* OpenSSL version < 1.1.0 */
 
 
+#if OPENSSL_VERSION_NUMBER < 0x10101000L
+static int EC_GROUP_get_curve(const EC_GROUP *group, BIGNUM *p, BIGNUM *a,
+			      BIGNUM *b, BN_CTX *ctx)
+{
+	return EC_GROUP_get_curve_GFp(group, p, a, b, ctx);
+}
+#endif /* OpenSSL version < 1.1.1 */
+
+
 void openssl_load_legacy_provider(void)
 {
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
@@ -1752,7 +1761,7 @@ struct crypto_ec * crypto_ec_init(int group)
 	e->b = BN_new();
 	if (e->group == NULL || e->bnctx == NULL || e->prime == NULL ||
 	    e->order == NULL || e->a == NULL || e->b == NULL ||
-	    !EC_GROUP_get_curve_GFp(e->group, e->prime, e->a, e->b, e->bnctx) ||
+	    !EC_GROUP_get_curve(e->group, e->prime, e->a, e->b, e->bnctx) ||
 	    !EC_GROUP_get_order(e->group, e->order, e->bnctx)) {
 		crypto_ec_deinit(e);
 		e = NULL;
@@ -2777,12 +2786,53 @@ struct wpabuf * crypto_ec_key_sign(struct crypto_ec_key *key, const u8 *data,
 }
 
 
-struct wpabuf * crypto_ec_key_sign_r_s(struct crypto_ec_key *key,
-				       const u8 *data, size_t len)
+static int openssl_evp_pkey_ec_prime_len(struct crypto_ec_key *key)
 {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	char gname[50];
+	int nid;
+	EC_GROUP *group;
+	BIGNUM *prime = NULL;
+	int prime_len = -1;
+
+	if (EVP_PKEY_get_group_name((EVP_PKEY *) key, gname, sizeof(gname),
+				    NULL) != 1)
+		return -1;
+	nid = OBJ_txt2nid(gname);
+	group = EC_GROUP_new_by_curve_name(nid);
+	prime = BN_new();
+	if (!group || !prime)
+		return -1;
+	if (EC_GROUP_get_curve(group, prime, NULL, NULL, NULL) == 1)
+		prime_len = BN_num_bytes(prime);
+	EC_GROUP_free(group);
+	BN_free(prime);
+	return prime_len;
+#else
 	const EC_GROUP *group;
 	const EC_KEY *eckey;
 	BIGNUM *prime = NULL;
+	int prime_len = -1;
+
+	eckey = EVP_PKEY_get0_EC_KEY((EVP_PKEY *) key);
+	if (!eckey)
+		goto fail;
+	group = EC_KEY_get0_group(eckey);
+	prime = BN_new();
+	if (!prime || !group ||
+	    !EC_GROUP_get_curve(group, prime, NULL, NULL, NULL))
+		goto fail;
+	prime_len = BN_num_bytes(prime);
+fail:
+	BN_free(prime);
+	return prime_len;
+#endif
+}
+
+
+struct wpabuf * crypto_ec_key_sign_r_s(struct crypto_ec_key *key,
+				       const u8 *data, size_t len)
+{
 	ECDSA_SIG *sig = NULL;
 	const BIGNUM *r, *s;
 	u8 *r_buf, *s_buf;
@@ -2790,20 +2840,15 @@ struct wpabuf * crypto_ec_key_sign_r_s(struct crypto_ec_key *key,
 	const unsigned char *p;
 	int prime_len;
 
+	prime_len = openssl_evp_pkey_ec_prime_len(key);
+	if (prime_len < 0)
+		return NULL;
+
 	buf = crypto_ec_key_sign(key, data, len);
 	if (!buf)
 		return NULL;
 
 	/* Extract (r,s) from Ecdsa-Sig-Value */
-	eckey = EVP_PKEY_get0_EC_KEY((EVP_PKEY *) key);
-	if (!eckey)
-		goto fail;
-	group = EC_KEY_get0_group(eckey);
-	prime = BN_new();
-	if (!prime || !group ||
-	    !EC_GROUP_get_curve_GFp(group, prime, NULL, NULL, NULL))
-		goto fail;
-	prime_len = BN_num_bytes(prime);
 
 	p = wpabuf_head(buf);
 	sig = d2i_ECDSA_SIG(NULL, &p, wpabuf_len(buf));
@@ -2822,7 +2867,6 @@ struct wpabuf * crypto_ec_key_sign_r_s(struct crypto_ec_key *key,
 		goto fail;
 
 out:
-	BN_free(prime);
 	ECDSA_SIG_free(sig);
 	return buf;
 fail:
@@ -2893,6 +2937,15 @@ fail:
 
 int crypto_ec_key_group(struct crypto_ec_key *key)
 {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	char gname[50];
+	int nid;
+
+	if (EVP_PKEY_get_group_name((EVP_PKEY *) key, gname, sizeof(gname),
+				    NULL) != 1)
+		return -1;
+	nid = OBJ_txt2nid(gname);
+#else
 	const EC_KEY *eckey;
 	const EC_GROUP *group;
 	int nid;
@@ -2904,6 +2957,7 @@ int crypto_ec_key_group(struct crypto_ec_key *key)
 	if (!group)
 		return -1;
 	nid = EC_GROUP_get_curve_name(group);
+#endif
 	switch (nid) {
 	case NID_X9_62_prime256v1:
 		return 19;
@@ -2932,8 +2986,13 @@ int crypto_ec_key_group(struct crypto_ec_key *key)
 
 int crypto_ec_key_cmp(struct crypto_ec_key *key1, struct crypto_ec_key *key2)
 {
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (EVP_PKEY_eq((EVP_PKEY *) key1, (EVP_PKEY *) key2) != 1)
+		return -1;
+#else
 	if (EVP_PKEY_cmp((EVP_PKEY *) key1, (EVP_PKEY *) key2) != 1)
 		return -1;
+#endif
 	return 0;
 }
 

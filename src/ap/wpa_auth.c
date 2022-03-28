@@ -603,7 +603,7 @@ void wpa_deinit(struct wpa_authenticator *wpa_auth)
 	while (group) {
 		prev = group;
 		group = group->next;
-		os_free(prev);
+		bin_clear_free(prev, sizeof(*prev));
 	}
 
 	os_free(wpa_auth);
@@ -1642,7 +1642,7 @@ void __wpa_send_eapol(struct wpa_authenticator *wpa_auth,
 			if (aes_wrap(sm->PTK.kek, sm->PTK.kek_len,
 				     (key_data_len - 8) / 8, buf, key_data)) {
 				os_free(hdr);
-				os_free(buf);
+				bin_clear_free(buf, key_data_len);
 				return;
 			}
 			WPA_PUT_BE16(key_mic + mic_len, key_data_len);
@@ -1663,10 +1663,10 @@ void __wpa_send_eapol(struct wpa_authenticator *wpa_auth,
 #endif /* CONFIG_NO_RC4 */
 		} else {
 			os_free(hdr);
-			os_free(buf);
+			bin_clear_free(buf, key_data_len);
 			return;
 		}
-		os_free(buf);
+		bin_clear_free(buf, key_data_len);
 	}
 
 	if (key_info & WPA_KEY_INFO_MIC) {
@@ -1814,9 +1814,9 @@ int wpa_auth_sm_event(struct wpa_state_machine *sm, enum wpa_event event)
 	case WPA_DEAUTH:
 	case WPA_DISASSOC:
 		sm->DeauthenticationRequest = true;
-#ifdef CONFIG_IEEE80211R_AP
 		os_memset(sm->PMK, 0, sizeof(sm->PMK));
 		sm->pmk_len = 0;
+#ifdef CONFIG_IEEE80211R_AP
 		os_memset(sm->xxkey, 0, sizeof(sm->xxkey));
 		sm->xxkey_len = 0;
 		os_memset(sm->pmk_r1, 0, sizeof(sm->pmk_r1));
@@ -3270,6 +3270,7 @@ static u8 * ieee80211w_kde_add(struct wpa_state_machine *sm, u8 *pos)
 	pos = wpa_add_kde(pos, RSN_KEY_DATA_IGTK,
 			  (const u8 *) &igtk, WPA_IGTK_KDE_PREFIX_LEN + len,
 			  NULL, 0);
+	forced_memzero(&igtk, sizeof(igtk));
 
 	if (!conf->beacon_prot)
 		return pos;
@@ -3293,6 +3294,7 @@ static u8 * ieee80211w_kde_add(struct wpa_state_machine *sm, u8 *pos)
 	pos = wpa_add_kde(pos, RSN_KEY_DATA_BIGTK,
 			  (const u8 *) &bigtk, WPA_BIGTK_KDE_PREFIX_LEN + len,
 			  NULL, 0);
+	forced_memzero(&bigtk, sizeof(bigtk));
 
 	return pos;
 }
@@ -3373,7 +3375,7 @@ static u8 * replace_ie(const char *name, const u8 *old_buf, size_t *len, u8 eid,
 SM_STATE(WPA_PTK, PTKINITNEGOTIATING)
 {
 	u8 rsc[WPA_KEY_RSC_LEN], *_rsc, *gtk, *kde = NULL, *pos, stub_gtk[32];
-	size_t gtk_len, kde_len, wpa_ie_len;
+	size_t gtk_len, kde_len = 0, wpa_ie_len;
 	struct wpa_group *gsm = sm->group;
 	u8 *wpa_ie;
 	int secure, gtkidx, encr = 0;
@@ -3631,7 +3633,7 @@ SM_STATE(WPA_PTK, PTKINITNEGOTIATING)
 		       WPA_KEY_INFO_KEY_TYPE,
 		       _rsc, sm->ANonce, kde, pos - kde, 0, encr);
 done:
-	os_free(kde);
+	bin_clear_free(kde, kde_len);
 	os_free(wpa_ie_buf);
 	os_free(wpa_ie_buf2);
 }
@@ -3856,7 +3858,7 @@ SM_STATE(WPA_PTK_GROUP, REKEYNEGOTIATING)
 	struct wpa_group *gsm = sm->group;
 	const u8 *kde;
 	u8 *kde_buf = NULL, *pos, hdr[2];
-	size_t kde_len;
+	size_t kde_len = 0;
 	u8 *gtk, stub_gtk[32];
 	struct wpa_auth_config *conf = &sm->wpa_auth->conf;
 
@@ -3925,7 +3927,7 @@ SM_STATE(WPA_PTK_GROUP, REKEYNEGOTIATING)
 		       (!sm->Pair ? WPA_KEY_INFO_INSTALL : 0),
 		       rsc, NULL, kde, kde_len, gsm->GN, 1);
 
-	os_free(kde_buf);
+	bin_clear_free(kde_buf, kde_len);
 }
 
 
@@ -5567,7 +5569,7 @@ int wpa_auth_resend_m3(struct wpa_state_machine *sm,
 		       WPA_KEY_INFO_ACK | WPA_KEY_INFO_INSTALL |
 		       WPA_KEY_INFO_KEY_TYPE,
 		       _rsc, sm->ANonce, kde, pos - kde, 0, encr);
-	os_free(kde);
+	bin_clear_free(kde, kde_len);
 	return 0;
 }
 
@@ -5635,7 +5637,7 @@ int wpa_auth_resend_group_m1(struct wpa_state_machine *sm,
 		       (!sm->Pair ? WPA_KEY_INFO_INSTALL : 0),
 		       rsc, NULL, kde, kde_len, gsm->GN, 1);
 
-	os_free(kde_buf);
+	bin_clear_free(kde_buf, kde_len);
 	return 0;
 }
 

@@ -110,6 +110,7 @@ enum dpp_status_error {
 	DPP_STATUS_CONFIGURE_PENDING = 11,
 	DPP_STATUS_CSR_NEEDED = 12,
 	DPP_STATUS_CSR_BAD = 13,
+	DPP_STATUS_NEW_KEY_NEEDED = 14,
 };
 
 /* DPP Reconfig Flags object - connectorKey values */
@@ -171,6 +172,12 @@ struct dpp_bootstrap_info {
 };
 
 #define PKEX_COUNTER_T_LIMIT 5
+
+enum dpp_pkex_ver {
+	PKEX_VER_AUTO,
+	PKEX_VER_ONLY_1,
+	PKEX_VER_ONLY_2,
+};
 
 struct dpp_pkex {
 	void *msg_ctx;
@@ -252,6 +259,7 @@ struct dpp_authentication {
 	void *msg_ctx;
 	u8 peer_version;
 	const struct dpp_curve_params *curve;
+	const struct dpp_curve_params *new_curve;
 	struct dpp_bootstrap_info *peer_bi;
 	struct dpp_bootstrap_info *own_bi;
 	struct dpp_bootstrap_info *tmp_own_bi;
@@ -352,6 +360,8 @@ struct dpp_authentication {
 	char *trusted_eap_server_name;
 	struct wpabuf *cacert;
 	struct wpabuf *certbag;
+	bool waiting_new_key;
+	bool new_key_received;
 	void *config_resp_ctx;
 	void *gas_server_ctx;
 	bool use_config_query;
@@ -375,6 +385,7 @@ struct dpp_configurator {
 	u8 kid_hash[SHA256_MAC_LEN];
 	char *kid;
 	const struct dpp_curve_params *curve;
+	const struct dpp_curve_params *net_access_key_curve;
 	char *connector; /* own Connector for reconfiguration */
 	struct crypto_ec_key *connector_key;
 	struct crypto_ec_key *pp_key;
@@ -509,6 +520,8 @@ enum dpp_test_behavior {
 	DPP_TEST_NO_PROTOCOL_VERSION_PEER_DISC_RESP = 93,
 	DPP_TEST_INVALID_PROTOCOL_VERSION_PEER_DISC_REQ = 94,
 	DPP_TEST_INVALID_PROTOCOL_VERSION_PEER_DISC_RESP = 95,
+	DPP_TEST_INVALID_PROTOCOL_VERSION_RECONFIG_AUTH_REQ = 96,
+	DPP_TEST_NO_PROTOCOL_VERSION_RECONFIG_AUTH_REQ = 97,
 };
 
 extern enum dpp_test_behavior dpp_test;
@@ -678,6 +691,7 @@ void dpp_bootstrap_find_pair(struct dpp_global *dpp, const u8 *i_bootstrap,
 struct dpp_bootstrap_info * dpp_bootstrap_find_chirp(struct dpp_global *dpp,
 						     const u8 *hash);
 int dpp_configurator_add(struct dpp_global *dpp, const char *cmd);
+int dpp_configurator_set(struct dpp_global *dpp, const char *cmd);
 int dpp_configurator_remove(struct dpp_global *dpp, const char *id);
 int dpp_configurator_get_key_id(struct dpp_global *dpp, unsigned int id,
 				char *buf, size_t buflen);
@@ -695,6 +709,8 @@ int dpp_relay_rx_gas_req(struct dpp_global *dpp, const u8 *src, const u8 *data,
 			 size_t data_len);
 int dpp_controller_start(struct dpp_global *dpp,
 			 struct dpp_controller_config *config);
+int dpp_controller_set_params(struct dpp_global *dpp,
+			      const char *configurator_params);
 void dpp_controller_stop(struct dpp_global *dpp);
 void dpp_controller_stop_for_ctx(struct dpp_global *dpp, void *cb_ctx);
 struct dpp_authentication * dpp_controller_get_auth(struct dpp_global *dpp,

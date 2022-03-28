@@ -2529,16 +2529,11 @@ static int tls_verify_cb(int preverify_ok, X509_STORE_CTX *x509_ctx)
 #ifdef CONFIG_SUITEB
 	if (conn->flags & TLS_CONN_SUITEB) {
 		EVP_PKEY *pk;
-		RSA *rsa;
 		int len = -1;
 
 		pk = X509_get_pubkey(err_cert);
 		if (pk) {
-			rsa = EVP_PKEY_get1_RSA(pk);
-			if (rsa) {
-				len = RSA_bits(rsa);
-				RSA_free(rsa);
-			}
+			len = EVP_PKEY_bits(pk);
 			EVP_PKEY_free(pk);
 		}
 
@@ -3064,7 +3059,9 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
 			return -1;
 		}
 	} else if (flags & TLS_CONN_SUITEB) {
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
 		EC_KEY *ecdh;
+#endif
 		const char *ciphers =
 			"ECDHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-GCM-SHA384";
 		int nid[1] = { NID_secp384r1 };
@@ -3081,6 +3078,14 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
 			return -1;
 		}
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+		if (SSL_set1_groups(ssl, nid, 1) != 1) {
+			wpa_printf(MSG_INFO,
+				   "OpenSSL: Failed to set Suite B groups");
+			return -1;
+		}
+
+#else
 		if (SSL_set1_curves(ssl, nid, 1) != 1) {
 			wpa_printf(MSG_INFO,
 				   "OpenSSL: Failed to set Suite B curves");
@@ -3095,6 +3100,7 @@ static int tls_set_conn_flags(struct tls_connection *conn, unsigned int flags,
 			return -1;
 		}
 		EC_KEY_free(ecdh);
+#endif
 	}
 	if (flags & (TLS_CONN_SUITEB | TLS_CONN_SUITEB_NO_ECDH)) {
 #ifdef OPENSSL_IS_BORINGSSL

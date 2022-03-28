@@ -374,13 +374,16 @@ def run_dpp_qr_code_auth_unicast(dev, apdev, curve, netrole=None, key=None,
                                  require_conf_success=False, init_extra=None,
                                  require_conf_failure=False,
                                  configurator=False, conf_curve=None,
+                                 net_access_key_curve=None,
                                  conf=None, qr=None, stop_responder=True):
+    min_ver = 3 if net_access_key_curve else 1
     brainpool = (curve and "brainpool" in curve) or \
         (conf_curve and "brainpool" in conf_curve)
-    check_dpp_capab(dev[0], brainpool)
-    check_dpp_capab(dev[1], brainpool)
+    check_dpp_capab(dev[0], brainpool, min_ver=min_ver)
+    check_dpp_capab(dev[1], brainpool, min_ver=min_ver)
     if configurator:
-        conf_id = dev[1].dpp_configurator_add(curve=conf_curve)
+        conf_id = dev[1].dpp_configurator_add(curve=conf_curve,
+                                              net_access_key_curve=net_access_key_curve)
     else:
         conf_id = None
 
@@ -401,7 +404,7 @@ def run_dpp_qr_code_auth_unicast(dev, apdev, curve, netrole=None, key=None,
     dev[1].dpp_auth_init(uri=uri0, extra=init_extra, configurator=conf_id,
                          conf=conf, own=id1)
     wait_auth_success(dev[0], dev[1], configurator=dev[1], enrollee=dev[0],
-                      allow_enrollee_failure=True,
+                      allow_enrollee_failure=not require_conf_success,
                       allow_configurator_failure=not require_conf_success,
                       require_configurator_failure=require_conf_failure,
                       stop_responder=stop_responder)
@@ -957,6 +960,15 @@ def test_dpp_config_dpp_gen_secp521r1_secp521r1(dev, apdev):
                                  configurator=True,
                                  conf_curve="secp521r1")
 
+def test_dpp_config_dpp_gen_prime256v1_secp384r1_secp384r1(dev, apdev):
+    """Generate DPP Config Object for DPP network (P-256 + P-384 + P-384)"""
+    run_dpp_qr_code_auth_unicast(dev, apdev, "prime256v1",
+                                 init_extra="conf=sta-dpp",
+                                 require_conf_success=True,
+                                 configurator=True,
+                                 conf_curve="secp384r1",
+                                 net_access_key_curve="secp384r1")
+
 def test_dpp_config_dpp_gen_expiry(dev, apdev):
     """Generate DPP Config Object for DPP network with expiry value"""
     run_dpp_qr_code_auth_unicast(dev, apdev, "prime256v1",
@@ -1462,7 +1474,7 @@ def test_dpp_gas_timeout(dev, apdev):
         raise Exception("Unexpected GAS result (Enrollee): " + ev)
     dev[0].set("ext_mgmt_frame_handling", "0")
 
-    ev = dev[1].wait_event(["DPP-CONF-FAILED"], timeout=15)
+    ev = dev[1].wait_event(["DPP-CONF-FAILED"], timeout=65)
     if ev is None:
         raise Exception("DPP configuration failure not reported (Configurator)")
 
@@ -2668,6 +2680,58 @@ def test_dpp_pkex_hostapd_errors(dev, apdev):
         raise Exception("Failed to flush PKEX responders")
     hapd.request("DPP_PKEX_REMOVE *")
 
+def test_dpp_pkex_nak_curve_change(dev, apdev):
+    """DPP PKEX with netAccessKey curve change"""
+    try:
+        run_dpp_pkex_nak_curve_change(dev, apdev)
+    finally:
+        dev[1].set("dpp_config_processing", "0", allow_fail=True)
+
+def test_dpp_pkex_nak_curve_change2(dev, apdev):
+    """DPP PKEX with netAccessKey curve change (2)"""
+    try:
+        run_dpp_pkex_nak_curve_change(dev, apdev, failure=True)
+    finally:
+        dev[1].set("dpp_config_processing", "0", allow_fail=True)
+
+def run_dpp_pkex_nak_curve_change(dev, apdev, failure=False):
+    check_dpp_capab(dev[0], min_ver=3)
+    check_dpp_capab(dev[1], min_ver=3)
+    hapd = hostapd.add_ap(apdev[0], {"ssid": "unconfigured",
+                                     "channel": "6"})
+    check_dpp_capab(hapd, min_ver=3)
+    hapd.dpp_pkex_resp(2437, identifier="test-1", code="secret-1",
+                       curve="secp384r1")
+    conf_id = dev[0].dpp_configurator_add()
+    dev[0].dpp_pkex_init(identifier="test-1", code="secret-1",
+                         curve="secp384r1",
+                         extra="conf=ap-dpp configurator=%d" % conf_id)
+    wait_auth_success(hapd, dev[0], configurator=dev[0], enrollee=hapd,
+                      stop_initiator=True)
+    update_hapd_config(hapd)
+    dev[0].dump_monitor()
+    hapd.dump_monitor()
+
+    dev[1].set("dpp_config_processing", "2")
+    dev[1].dpp_pkex_resp(2437, identifier="test-2", code="secret-2")
+    if failure:
+        dev[0].dpp_configurator_set(conf_id, net_access_key_curve="prime256v1")
+    dev[0].dpp_pkex_init(identifier="test-2", code="secret-2",
+                         extra="conf=sta-dpp configurator=%d" % conf_id)
+    wait_auth_success(dev[1], dev[0], configurator=dev[0], enrollee=dev[1],
+                      stop_initiator=True)
+    if failure:
+        ev = dev[1].wait_event(["DPP-INTRO"], timeout=10)
+        if ev is None:
+            raise Exception("No DPP-INTRO message seen")
+        if "status=7" not in ev:
+            raise Exception("Unexpected DPP-INTRO contents: " + ev)
+    else:
+        dev[1].wait_connected()
+    dev[0].dump_monitor()
+    dev[1].dump_monitor()
+    hapd.dump_monitor()
+
 def test_dpp_hostapd_configurator(dev, apdev):
     """DPP with hostapd as configurator/initiator"""
     run_dpp_hostapd_configurator(dev, apdev)
@@ -3130,6 +3194,7 @@ def run_dpp_own_config(dev, apdev, own_curve=None, expect_failure=False,
     dev[0].set("dpp_config_processing", "1")
     cmd = "DPP_CONFIGURATOR_SIGN conf=sta-dpp configurator=%d%s" % (conf_id, extra)
     if own_curve:
+        dev[0].dpp_configurator_set(conf_id, net_access_key_curve=own_curve)
         cmd += " curve=" + own_curve
     res = dev[0].request(cmd)
     if "FAIL" in res:
@@ -3214,8 +3279,8 @@ def test_dpp_intro_mismatch(dev, apdev):
 
 def run_dpp_intro_mismatch(dev, apdev, wpas):
     check_dpp_capab(dev[0])
-    check_dpp_capab(dev[1])
-    check_dpp_capab(dev[2])
+    check_dpp_capab(dev[1], min_ver=3)
+    check_dpp_capab(dev[2], min_ver=3)
     logger.info("Start AP in unconfigured state")
     hapd = hostapd.add_ap(apdev[0], {"ssid": "unconfigured"})
     check_dpp_capab(hapd)
@@ -3252,6 +3317,7 @@ def run_dpp_intro_mismatch(dev, apdev, wpas):
     uri5 = wpas.request("DPP_BOOTSTRAP_GET_URI %d" % id5)
     wpas.dpp_listen(2412)
     dev[1].set("dpp_groups_override", '')
+    dev[1].dpp_configurator_set(conf_id, net_access_key_curve="P-521")
     dev[1].dpp_auth_init(uri=uri5, conf="sta-dpp", configurator=conf_id)
     wait_auth_success(wpas, dev[1], configurator=dev[1], enrollee=wpas)
 
@@ -3685,13 +3751,22 @@ def test_dpp_proto_auth_conf_replaced_by_resp(dev, apdev):
     wait_dpp_fail(dev[0], "Unexpected Authentication Response")
 
 def run_dpp_proto_conf_req_missing(dev, test, reason):
-    run_dpp_proto_init(dev, 0, test)
+    res = run_dpp_proto_init(dev, 0, test)
     wait_dpp_fail(dev[1], reason)
+    return res
 
 def test_dpp_proto_conf_req_no_e_nonce(dev, apdev):
     """DPP protocol testing - no E-nonce in Conf Req"""
-    run_dpp_proto_conf_req_missing(dev, 51,
-                                   "Missing or invalid Enrollee Nonce attribute")
+    res = run_dpp_proto_conf_req_missing(dev, 51,
+                                         "Missing or invalid Enrollee Nonce attribute")
+    # Verify that the DPP session has been cleared on failure during GAS request
+    # handling.
+    dev[0].set("dpp_test", "0")
+    dev[1].dpp_listen(freq=2412)
+    id0 = dev[1].dpp_bootstrap_gen(chan="81/1", mac=True)
+    uri0 = dev[1].request("DPP_BOOTSTRAP_GET_URI %d" % id0)
+    dev[0].dpp_auth_init(uri=uri0)
+    wait_auth_success(dev[1], dev[0])
 
 def test_dpp_proto_conf_req_invalid_e_nonce(dev, apdev):
     """DPP protocol testing - invalid E-nonce in Conf Req"""
@@ -5331,6 +5406,8 @@ def run_dpp_controller_relay(dev, apdev, params, chirp=False):
     wait_auth_success(relay, dev[1], configurator=dev[1], enrollee=relay)
     update_hapd_config(relay)
 
+    dev[0].flush_scan_cache()
+
     # Initiate from Enrollee with broadcast DPP Authentication Request or
     # using chirping
     dev[0].set("dpp_config_processing", "2")
@@ -6328,6 +6405,7 @@ def test_dpp_chirp_ap_5g(dev, apdev):
         update_hapd_config(hapd)
     finally:
         clear_regdom(hapd, dev)
+        clear_scan_cache(apdev[0])
 
 def test_dpp_chirp_ap_errors(dev, apdev):
     """DPP chirp errors in hostapd"""
@@ -7106,7 +7184,7 @@ def run_dpp_qr_code_config_event_initiator(dev, apdev, set_comeback=False,
         if "OK" not in dev[1].request(("DPP_CONF_SET peer=%d " % id1) + conf):
             raise Exception("DPP_CONF_SET failed")
 
-    ev = dev[0].wait_event(["DPP-CONF-RECEIVED", "DPP-CONF-FAILED"], timeout=15)
+    ev = dev[0].wait_event(["DPP-CONF-RECEIVED", "DPP-CONF-FAILED"], timeout=65)
     if ev is None:
         raise Exception("DPP configuration not completed (Enrollee)")
     if failure and "DPP-CONF-FAILED" not in ev:

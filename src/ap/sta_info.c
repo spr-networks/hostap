@@ -410,6 +410,7 @@ void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 
 #ifdef CONFIG_TESTING_OPTIONS
 	os_free(sta->sae_postponed_commit);
+	forced_memzero(sta->last_tk, WPA_TK_MAX_LEN);
 #endif /* CONFIG_TESTING_OPTIONS */
 
 	os_free(sta);
@@ -1251,8 +1252,6 @@ const char * ap_sta_wpa_get_keyid(struct hostapd_data *hapd,
 	for (psk = ssid->wpa_psk; psk; psk = psk->next)
 		if (os_memcmp(pmk, psk->psk, PMK_LEN) == 0)
 			break;
-	if (!psk)
-		return NULL;
 	if (!psk || !psk->keyid[0])
 		return NULL;
 

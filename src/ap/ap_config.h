@@ -851,6 +851,13 @@ struct hostapd_bss_config {
 	int mka_priority;
 
 	/**
+	 * macsec_csindex - Cipher suite index for MACsec
+	 *
+	 * Range: 0-1 (default: 0)
+	 */
+	int macsec_csindex;
+
+	/**
 	 * mka_ckn - MKA pre-shared CKN
 	 */
 #define MACSEC_CKN_MAX_LEN 32
@@ -1198,5 +1205,10 @@ bool hostapd_sae_pk_in_use(struct hostapd_bss_config *conf);
 bool hostapd_sae_pk_exclusively(struct hostapd_bss_config *conf);
 int hostapd_setup_sae_pt(struct hostapd_bss_config *conf);
 int parse_sae_password(struct hostapd_bss_config *bss, const char *val);
+int hostapd_acl_comp(const void *a, const void *b);
+int hostapd_add_acl_maclist(struct mac_acl_entry **acl, int *num,
+			    int vlan_id, const u8 *addr);
+void hostapd_remove_acl_mac(struct mac_acl_entry **acl, int *num,
+			    const u8 *addr);
 
 #endif /* HOSTAPD_CONFIG_H */

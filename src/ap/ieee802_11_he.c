@@ -29,17 +29,19 @@ static u8 ieee80211_he_ppet_size(u8 ppe_thres_hdr, const u8 *phy_cap_info)
 
 	ru = (ppe_thres_hdr >> HE_PPE_THRES_RU_INDEX_BITMASK_SHIFT) &
 		HE_PPE_THRES_RU_INDEX_BITMASK_MASK;
+	/* Count the number of 1 bits in RU Index Bitmask */
 	while (ru) {
 		if (ru & 0x1)
 			sz++;
 		ru >>= 1;
 	}
 
+	/* fixed header of 3 (NSTS) + 4 (RU Index Bitmask) = 7 bits */
+	/* 6 * (NSTS + 1) bits for bit 1 in RU Index Bitmask */
 	sz *= 1 + (ppe_thres_hdr & HE_PPE_THRES_NSS_MASK);
 	sz = (sz * 6) + 7;
-	if (sz % 8)
-		sz += 8;
-	sz /= 8;
+	/* PPE Pad to count the number of needed full octets */
+	sz = (sz + 7) / 8;
 
 	return sz;
 }
@@ -64,6 +66,7 @@ static int ieee80211_invalid_he_cap_size(const u8 *buf, size_t len)
 {
 	struct ieee80211_he_capabilities *cap;
 	size_t cap_len;
+	u8 ppe_thres_hdr;
 
 	cap = (struct ieee80211_he_capabilities *) buf;
 	cap_len = sizeof(*cap) - sizeof(cap->optional);
@@ -74,9 +77,11 @@ static int ieee80211_invalid_he_cap_size(const u8 *buf, size_t len)
 	if (len < cap_len)
 		return 1;
 
-	cap_len += ieee80211_he_ppet_size(buf[cap_len], cap->he_phy_capab_info);
+	ppe_thres_hdr = len > cap_len ? buf[cap_len] : 0xff;
+	cap_len += ieee80211_he_ppet_size(ppe_thres_hdr,
+					  cap->he_phy_capab_info);
 
-	return len != cap_len;
+	return len < cap_len;
 }
 
 

@@ -2936,6 +2936,8 @@ static int wpa_driver_nl80211_del_beacon(struct i802_bss *bss)
 
 	wpa_printf(MSG_DEBUG, "nl80211: Remove beacon (ifindex=%d)",
 		   drv->ifindex);
+	bss->beacon_set = 0;
+	bss->freq = 0;
 	nl80211_put_wiphy_data_ap(bss);
 	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_DEL_BEACON);
 	return send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
@@ -4656,10 +4658,24 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 	     nla_put_flag(msg, NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT)))
 		goto fail;
 
-	if (drv->device_ap_sme &&
-	    (params->key_mgmt_suites & WPA_KEY_MGMT_SAE) &&
-	    nla_put_flag(msg, NL80211_ATTR_EXTERNAL_AUTH_SUPPORT))
-		goto fail;
+	if (drv->device_ap_sme) {
+		u32 flags = 0;
+
+		if (params->key_mgmt_suites & WPA_KEY_MGMT_SAE) {
+			/* Add the previously used flag attribute to support
+			 * older kernel versions and the newer flag bit for
+			 * newer kernels. */
+			if (nla_put_flag(msg,
+					 NL80211_ATTR_EXTERNAL_AUTH_SUPPORT))
+				goto fail;
+			flags |= NL80211_AP_SETTINGS_EXTERNAL_AUTH_SUPPORT;
+		}
+
+		flags |= NL80211_AP_SETTINGS_SA_QUERY_OFFLOAD_SUPPORT;
+
+		if (nla_put_u32(msg, NL80211_ATTR_AP_SETTINGS_FLAGS, flags))
+			goto fail;
+	}
 
 	wpa_printf(MSG_DEBUG, "nl80211: pairwise_ciphers=0x%x",
 		   params->pairwise_ciphers);
@@ -4896,6 +4912,8 @@ static int nl80211_put_freq_params(struct nl_msg *msg,
 	wpa_printf(MSG_DEBUG, "  * he_enabled=%d", freq->he_enabled);
 	wpa_printf(MSG_DEBUG, "  * vht_enabled=%d", freq->vht_enabled);
 	wpa_printf(MSG_DEBUG, "  * ht_enabled=%d", freq->ht_enabled);
+	wpa_printf(MSG_DEBUG, "  * radar_background=%d",
+		   freq->radar_background);
 
 	hw_mode = ieee80211_freq_to_chan(freq->freq, &channel);
 	is_24ghz = hw_mode == HOSTAPD_MODE_IEEE80211G ||
@@ -4973,6 +4991,9 @@ static int nl80211_put_freq_params(struct nl_msg *msg,
 				NL80211_CHAN_NO_HT))
 			return -ENOBUFS;
 	}
+	if (freq->radar_background)
+		nla_put_flag(msg, NL80211_ATTR_RADAR_BACKGROUND);
+
 	return 0;
 }
 
@@ -8150,6 +8171,11 @@ static int nl80211_send_frame_cmd(struct i802_bss *bss,
 		if (save_cookie)
 			drv->send_frame_cookie = no_ack ? (u64) -1 : cookie;
 
+		if (!wait) {
+			 /* There is no need to store this cookie since there
+			  * is no wait that could be canceled later.  */
+			goto fail;
+		}
 		if (drv->num_send_frame_cookies == MAX_SEND_FRAME_COOKIES) {
 			wpa_printf(MSG_DEBUG,
 				   "nl80211: Drop oldest pending send frame cookie 0x%llx",
@@ -8280,7 +8306,8 @@ static void wpa_driver_nl80211_send_action_cancel_wait(void *priv)
 	u64 cookie;
 
 	/* Cancel the last pending TX cookie */
-	nl80211_frame_wait_cancel(bss, drv->send_frame_cookie);
+	if (drv->send_frame_cookie != (u64) -1)
+		nl80211_frame_wait_cancel(bss, drv->send_frame_cookie);
 
 	/*
 	 * Cancel the other pending TX cookies, if any. This is needed since
@@ -8472,7 +8499,6 @@ static int wpa_driver_nl80211_deinit_ap(void *priv)
 	if (!is_ap_interface(drv->nlmode))
 		return -1;
 	wpa_driver_nl80211_del_beacon(bss);
-	bss->beacon_set = 0;
 
 	/*
 	 * If the P2P GO interface was dynamically added, then it is
@@ -8492,7 +8518,6 @@ static int wpa_driver_nl80211_stop_ap(void *priv)
 	if (!is_ap_interface(drv->nlmode))
 		return -1;
 	wpa_driver_nl80211_del_beacon(bss);
-	bss->beacon_set = 0;
 	return 0;
 }
 
@@ -10626,6 +10651,7 @@ static int wpa_driver_nl80211_leave_mesh(void *priv)
 	} else {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: mesh leave request send successfully");
+		drv->first_bss->freq = 0;
 	}
 
 	if (drv->start_mode_sta &&

@@ -14,6 +14,7 @@
 #endif /* CONFIG_SQLITE */
 
 #include "common/defs.h"
+#include "common/dpp.h"
 #include "utils/list.h"
 #include "ap_config.h"
 #include "drivers/driver.h"
@@ -388,6 +389,7 @@ struct hostapd_data {
 	struct dpp_bootstrap_info *dpp_pkex_bi;
 	char *dpp_pkex_code;
 	char *dpp_pkex_identifier;
+	enum dpp_pkex_ver dpp_pkex_ver;
 	char *dpp_pkex_auth_cmd;
 	char *dpp_configurator_params;
 	struct os_reltime dpp_last_init;
@@ -519,6 +521,21 @@ struct hostapd_iface {
 	struct hostapd_rate_data *current_rates;
 	int *basic_rates;
 	int freq;
+
+	/* Background radar configuration */
+	struct {
+		int channel;
+		int secondary_channel;
+		int freq;
+		int centr_freq_seg0_idx;
+		int centr_freq_seg1_idx;
+		/* Main chain is on temporary channel during
+		 * CAC detection on radar offchain.
+		 */
+		unsigned int temp_ch:1;
+		/* CAC started on radar offchain */
+		unsigned int cac_started:1;
+	} radar_background;
 
 	u16 hw_flags;
 
@@ -691,5 +708,7 @@ void hostapd_event_sta_opmode_changed(struct hostapd_data *hapd, const u8 *addr,
 void fst_hostapd_fill_iface_obj(struct hostapd_data *hapd,
 				struct fst_wpa_obj *iface_obj);
 #endif /* CONFIG_FST */
+
+int hostapd_set_acl(struct hostapd_data *hapd);
 
 #endif /* HOSTAPD_H */

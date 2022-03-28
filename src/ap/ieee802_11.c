@@ -498,6 +498,7 @@ static const char * sae_get_password(struct hostapd_data *hapd,
 	struct sae_password_entry *pw;
 	struct sae_pt *pt = NULL;
 	const struct sae_pk *pk = NULL;
+	struct hostapd_sta_wpa_psk_short *psk = NULL;
 
 	for (pw = hapd->conf->sae_passwords; pw; pw = pw->next) {
 		if (!is_broadcast_ether_addr(pw->peer_addr) &&
@@ -517,6 +518,15 @@ static const char * sae_get_password(struct hostapd_data *hapd,
 	if (!password) {
 		password = hapd->conf->ssid.wpa_passphrase;
 		pt = hapd->conf->ssid.pt;
+	}
+
+	if (!password) {
+		for (psk = sta->psk; psk; psk = psk->next) {
+			if (psk->is_passphrase) {
+				password = psk->passphrase;
+				break;
+			}
+		}
 	}
 
 	if (pw_entry)
@@ -4126,32 +4136,6 @@ static u16 copy_supp_rates(struct hostapd_data *hapd, struct sta_info *sta,
 		sta->supported_rates, sizeof(sta->supported_rates),
 		elems->supp_rates, elems->supp_rates_len,
 		elems->ext_supp_rates, elems->ext_supp_rates_len);
-
-	return WLAN_STATUS_SUCCESS;
-}
-
-
-static u16 check_ext_capab(struct hostapd_data *hapd, struct sta_info *sta,
-			   const u8 *ext_capab_ie, size_t ext_capab_ie_len)
-{
-#ifdef CONFIG_INTERWORKING
-	/* check for QoS Map support */
-	if (ext_capab_ie_len >= 5) {
-		if (ext_capab_ie[4] & 0x01)
-			sta->qos_map_enabled = 1;
-	}
-#endif /* CONFIG_INTERWORKING */
-
-	if (ext_capab_ie_len > 0) {
-		sta->ecsa_supported = !!(ext_capab_ie[0] & BIT(2));
-		os_free(sta->ext_capability);
-		sta->ext_capability = os_malloc(1 + ext_capab_ie_len);
-		if (sta->ext_capability) {
-			sta->ext_capability[0] = ext_capab_ie_len;
-			os_memcpy(sta->ext_capability + 1, ext_capab_ie,
-				  ext_capab_ie_len);
-		}
-	}
 
 	return WLAN_STATUS_SUCCESS;
 }

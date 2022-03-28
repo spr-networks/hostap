@@ -665,6 +665,10 @@ static void wiphy_info_ext_feature_flags(struct wiphy_info_data *info,
 	if (ext_feature_isset(ext_features, len,
 			      NL80211_EXT_FEATURE_OPERATING_CHANNEL_VALIDATION))
 		capa->flags2 |= WPA_DRIVER_FLAGS2_OCV;
+
+	if (ext_feature_isset(ext_features, len,
+			      NL80211_EXT_FEATURE_RADAR_BACKGROUND))
+		capa->flags2 |= WPA_DRIVER_RADAR_BACKGROUND;
 }
 
 
@@ -920,8 +924,15 @@ static int wiphy_info_handler(struct nl_msg *msg, void *arg)
 	wiphy_info_tdls(capa, tb[NL80211_ATTR_TDLS_SUPPORT],
 			tb[NL80211_ATTR_TDLS_EXTERNAL_SETUP]);
 
-	if (tb[NL80211_ATTR_DEVICE_AP_SME])
+	if (tb[NL80211_ATTR_DEVICE_AP_SME]) {
+		u32 ap_sme_features_flags =
+			nla_get_u32(tb[NL80211_ATTR_DEVICE_AP_SME]);
+
+		if (ap_sme_features_flags & NL80211_AP_SME_SA_QUERY_OFFLOAD)
+			capa->flags2 |= WPA_DRIVER_FLAGS2_SA_QUERY_OFFLOAD_AP;
+
 		info->device_ap_sme = 1;
+	}
 
 	wiphy_info_feature_flags(info, tb[NL80211_ATTR_FEATURE_FLAGS]);
 	wiphy_info_ext_feature_flags(info, tb[NL80211_ATTR_EXT_FEATURES]);
@@ -1330,7 +1341,7 @@ int wpa_driver_nl80211_capa(struct wpa_driver_nl80211_data *drv)
 	drv->has_capability = 1;
 	drv->has_driver_key_mgmt = info.has_key_mgmt | info.has_key_mgmt_iftype;
 
-	/* Fallback to hardcoded defaults if the driver does nott advertize any
+	/* Fallback to hardcoded defaults if the driver does not advertise any
 	 * AKM capabilities. */
 	if (!drv->has_driver_key_mgmt) {
 		drv->capa.key_mgmt = WPA_DRIVER_CAPA_KEY_MGMT_WPA |
