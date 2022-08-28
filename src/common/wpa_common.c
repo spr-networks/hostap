@@ -36,6 +36,9 @@ static unsigned int wpa_kck_len(int akmp, size_t pmk_len)
 		return pmk_len / 2;
 	case WPA_KEY_MGMT_OWE:
 		return pmk_len / 2;
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
+	case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
+		return pmk_len / 2;
 	default:
 		return 16;
 	}
@@ -71,6 +74,9 @@ static unsigned int wpa_kek_len(int akmp, size_t pmk_len)
 	case WPA_KEY_MGMT_DPP:
 		return pmk_len <= 32 ? 16 : 32;
 	case WPA_KEY_MGMT_OWE:
+		return pmk_len <= 32 ? 16 : 32;
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
+	case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
 		return pmk_len <= 32 ? 16 : 32;
 	default:
 		return 16;
@@ -108,6 +114,9 @@ unsigned int wpa_mic_len(int akmp, size_t pmk_len)
 		return pmk_len / 2;
 	case WPA_KEY_MGMT_OWE:
 		return pmk_len / 2;
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
+	case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
+		return pmk_len / 2;
 	default:
 		return 16;
 	}
@@ -143,7 +152,8 @@ int wpa_use_cmac(int akmp)
 		akmp == WPA_KEY_MGMT_DPP ||
 		wpa_key_mgmt_ft(akmp) ||
 		wpa_key_mgmt_sha256(akmp) ||
-		wpa_key_mgmt_sae(akmp) ||
+		(wpa_key_mgmt_sae(akmp) &&
+		 !wpa_key_mgmt_sae_ext_key(akmp)) ||
 		wpa_key_mgmt_suite_b(akmp);
 }
 
@@ -223,6 +233,32 @@ int wpa_eapol_key_mic(const u8 *key, size_t key_len, int akmp, int ver,
 			wpa_printf(MSG_DEBUG,
 				   "WPA: EAPOL-Key MIC using AES-CMAC (AKM-defined - SAE)");
 			return omac1_aes_128(key, buf, len, mic);
+		case WPA_KEY_MGMT_SAE_EXT_KEY:
+		case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
+			wpa_printf(MSG_DEBUG,
+				   "WPA: EAPOL-Key MIC using HMAC-SHA%u (AKM-defined - SAE-EXT-KEY)",
+				   (unsigned int) key_len * 8 * 2);
+			if (key_len == 128 / 8) {
+				if (hmac_sha256(key, key_len, buf, len, hash))
+					return -1;
+#ifdef CONFIG_SHA384
+			} else if (key_len == 192 / 8) {
+				if (hmac_sha384(key, key_len, buf, len, hash))
+					return -1;
+#endif /* CONFIG_SHA384 */
+#ifdef CONFIG_SHA512
+			} else if (key_len == 256 / 8) {
+				if (hmac_sha512(key, key_len, buf, len, hash))
+					return -1;
+#endif /* CONFIG_SHA512 */
+			} else {
+				wpa_printf(MSG_INFO,
+					   "SAE: Unsupported KCK length: %u",
+					   (unsigned int) key_len);
+				return -1;
+			}
+			os_memcpy(mic, hash, key_len);
+			break;
 #endif /* CONFIG_SAE */
 #ifdef CONFIG_HS20
 		case WPA_KEY_MGMT_OSEN:
@@ -473,6 +509,36 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 			   (unsigned int) pmk_len);
 		return -1;
 #endif /* CONFIG_DPP */
+#ifdef CONFIG_SAE
+	} else if (wpa_key_mgmt_sae_ext_key(akmp)) {
+		if (pmk_len == 32) {
+			wpa_printf(MSG_DEBUG,
+				   "SAE: PTK derivation using PRF(SHA256)");
+			if (sha256_prf(pmk, pmk_len, label, data, data_len,
+				       tmp, ptk_len) < 0)
+				return -1;
+#ifdef CONFIG_SHA384
+		} else if (pmk_len == 48) {
+			wpa_printf(MSG_DEBUG,
+				   "SAE: PTK derivation using PRF(SHA384)");
+			if (sha384_prf(pmk, pmk_len, label, data, data_len,
+				       tmp, ptk_len) < 0)
+				return -1;
+#endif /* CONFIG_SHA384 */
+#ifdef CONFIG_SHA512
+		} else if (pmk_len == 64) {
+			wpa_printf(MSG_DEBUG,
+				   "SAE: PTK derivation using PRF(SHA512)");
+			if (sha512_prf(pmk, pmk_len, label, data, data_len,
+				       tmp, ptk_len) < 0)
+				return -1;
+#endif /* CONFIG_SHA512 */
+		} else {
+			wpa_printf(MSG_INFO, "SAE: Unknown PMK length %u",
+				   (unsigned int) pmk_len);
+			return -1;
+		}
+#endif /* CONFIG_SAE */
 	} else {
 		wpa_printf(MSG_DEBUG, "WPA: PTK derivation using PRF(SHA1)");
 		if (sha1_prf(pmk, pmk_len, label, data, data_len, tmp,
@@ -1479,8 +1545,12 @@ static int rsn_key_mgmt_to_bitfield(const u8 *s)
 #ifdef CONFIG_SAE
 	if (RSN_SELECTOR_GET(s) == RSN_AUTH_KEY_MGMT_SAE)
 		return WPA_KEY_MGMT_SAE;
+	if (RSN_SELECTOR_GET(s) == RSN_AUTH_KEY_MGMT_SAE_EXT_KEY)
+		return WPA_KEY_MGMT_SAE_EXT_KEY;
 	if (RSN_SELECTOR_GET(s) == RSN_AUTH_KEY_MGMT_FT_SAE)
 		return WPA_KEY_MGMT_FT_SAE;
+	if (RSN_SELECTOR_GET(s) == RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY)
+		return WPA_KEY_MGMT_FT_SAE_EXT_KEY;
 #endif /* CONFIG_SAE */
 	if (RSN_SELECTOR_GET(s) == RSN_AUTH_KEY_MGMT_802_1X_SUITE_B)
 		return WPA_KEY_MGMT_IEEE8021X_SUITE_B;
@@ -1599,6 +1669,13 @@ int wpa_parse_wpa_ie_rsn(const u8 *rsn_ie, size_t rsn_ie_len,
 				   "%s: invalid group cipher 0x%x (%08x)",
 				   __func__, data->group_cipher,
 				   WPA_GET_BE32(pos));
+#ifdef CONFIG_NO_TKIP
+			if (RSN_SELECTOR_GET(pos) == RSN_CIPHER_SUITE_TKIP) {
+				wpa_printf(MSG_DEBUG,
+					   "%s: TKIP as group cipher not supported in CONFIG_NO_TKIP=y build",
+					   __func__);
+			}
+#endif /* CONFIG_NO_TKIP */
 			return -1;
 		}
 		pos += RSN_SELECTOR_LEN;
@@ -2372,8 +2449,12 @@ const char * wpa_key_mgmt_txt(int key_mgmt, int proto)
 		return "WPS";
 	case WPA_KEY_MGMT_SAE:
 		return "SAE";
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
+		return "SAE-EXT-KEY";
 	case WPA_KEY_MGMT_FT_SAE:
 		return "FT-SAE";
+	case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
+		return "FT-SAE-EXT-KEY";
 	case WPA_KEY_MGMT_OSEN:
 		return "OSEN";
 	case WPA_KEY_MGMT_IEEE8021X_SUITE_B:
@@ -2434,8 +2515,12 @@ u32 wpa_akm_to_suite(int akm)
 		return RSN_AUTH_KEY_MGMT_FT_FILS_SHA384;
 	if (akm & WPA_KEY_MGMT_SAE)
 		return RSN_AUTH_KEY_MGMT_SAE;
+	if (akm & WPA_KEY_MGMT_SAE_EXT_KEY)
+		return RSN_AUTH_KEY_MGMT_SAE_EXT_KEY;
 	if (akm & WPA_KEY_MGMT_FT_SAE)
 		return RSN_AUTH_KEY_MGMT_FT_SAE;
+	if (akm & WPA_KEY_MGMT_FT_SAE_EXT_KEY)
+		return RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY;
 	if (akm & WPA_KEY_MGMT_OWE)
 		return RSN_AUTH_KEY_MGMT_OWE;
 	if (akm & WPA_KEY_MGMT_DPP)
@@ -3018,120 +3103,116 @@ static void wpa_parse_vendor_specific(const u8 *pos, const u8 *end,
  */
 static int wpa_parse_generic(const u8 *pos, struct wpa_eapol_ie_parse *ie)
 {
-	if (pos[1] == 0)
+	u8 len = pos[1];
+	size_t dlen = 2 + len;
+	u32 selector;
+	const u8 *p;
+	size_t left;
+
+	if (len == 0)
 		return 1;
 
-	if (pos[1] >= 6 &&
-	    RSN_SELECTOR_GET(pos + 2) == WPA_OUI_TYPE &&
-	    pos[2 + WPA_SELECTOR_LEN] == 1 &&
-	    pos[2 + WPA_SELECTOR_LEN + 1] == 0) {
+	if (len < RSN_SELECTOR_LEN)
+		return 2;
+
+	p = pos + 2;
+	selector = RSN_SELECTOR_GET(p);
+	p += RSN_SELECTOR_LEN;
+	left = len - RSN_SELECTOR_LEN;
+
+	if (left >= 2 && selector == WPA_OUI_TYPE && p[0] == 1 && p[1] == 0) {
 		ie->wpa_ie = pos;
-		ie->wpa_ie_len = pos[1] + 2;
+		ie->wpa_ie_len = dlen;
 		wpa_hexdump(MSG_DEBUG, "WPA: WPA IE in EAPOL-Key",
 			    ie->wpa_ie, ie->wpa_ie_len);
 		return 0;
 	}
 
-	if (pos[1] >= 4 && WPA_GET_BE32(pos + 2) == OSEN_IE_VENDOR_TYPE) {
+	if (selector == OSEN_IE_VENDOR_TYPE) {
 		ie->osen = pos;
-		ie->osen_len = pos[1] + 2;
+		ie->osen_len = dlen;
 		return 0;
 	}
 
-	if (pos[1] >= RSN_SELECTOR_LEN + PMKID_LEN &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_PMKID) {
-		ie->pmkid = pos + 2 + RSN_SELECTOR_LEN;
-		wpa_hexdump(MSG_DEBUG, "WPA: PMKID in EAPOL-Key",
-			    pos, pos[1] + 2);
+	if (left >= PMKID_LEN && selector == RSN_KEY_DATA_PMKID) {
+		ie->pmkid = p;
+		wpa_hexdump(MSG_DEBUG, "WPA: PMKID in EAPOL-Key", pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] >= RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_KEYID) {
-		ie->key_id = pos + 2 + RSN_SELECTOR_LEN;
-		wpa_hexdump(MSG_DEBUG, "WPA: KeyID in EAPOL-Key",
-			    pos, pos[1] + 2);
+	if (left >= 2 && selector == RSN_KEY_DATA_KEYID) {
+		ie->key_id = p;
+		wpa_hexdump(MSG_DEBUG, "WPA: KeyID in EAPOL-Key", pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_GROUPKEY) {
-		ie->gtk = pos + 2 + RSN_SELECTOR_LEN;
-		ie->gtk_len = pos[1] - RSN_SELECTOR_LEN;
-		wpa_hexdump_key(MSG_DEBUG, "WPA: GTK in EAPOL-Key",
-				pos, pos[1] + 2);
+	if (left > 2 && selector == RSN_KEY_DATA_GROUPKEY) {
+		ie->gtk = p;
+		ie->gtk_len = left;
+		wpa_hexdump_key(MSG_DEBUG, "WPA: GTK in EAPOL-Key", pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_MAC_ADDR) {
-		ie->mac_addr = pos + 2 + RSN_SELECTOR_LEN;
-		ie->mac_addr_len = pos[1] - RSN_SELECTOR_LEN;
+	if (left > 2 && selector == RSN_KEY_DATA_MAC_ADDR) {
+		ie->mac_addr = p;
+		ie->mac_addr_len = left;
 		wpa_hexdump(MSG_DEBUG, "WPA: MAC Address in EAPOL-Key",
-			    pos, pos[1] + 2);
+			    pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_IGTK) {
-		ie->igtk = pos + 2 + RSN_SELECTOR_LEN;
-		ie->igtk_len = pos[1] - RSN_SELECTOR_LEN;
+	if (left > 2 && selector == RSN_KEY_DATA_IGTK) {
+		ie->igtk = p;
+		ie->igtk_len = left;
 		wpa_hexdump_key(MSG_DEBUG, "WPA: IGTK in EAPOL-Key",
-				pos, pos[1] + 2);
+				pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_BIGTK) {
-		ie->bigtk = pos + 2 + RSN_SELECTOR_LEN;
-		ie->bigtk_len = pos[1] - RSN_SELECTOR_LEN;
+	if (left > 2 && selector == RSN_KEY_DATA_BIGTK) {
+		ie->bigtk = p;
+		ie->bigtk_len = left;
 		wpa_hexdump_key(MSG_DEBUG, "WPA: BIGTK in EAPOL-Key",
-				pos, pos[1] + 2);
+				pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] >= RSN_SELECTOR_LEN + 1 &&
-	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_IP_ADDR_REQ) {
-		ie->ip_addr_req = pos + 2 + RSN_SELECTOR_LEN;
+	if (left >= 1 && selector == WFA_KEY_DATA_IP_ADDR_REQ) {
+		ie->ip_addr_req = p;
 		wpa_hexdump(MSG_DEBUG, "WPA: IP Address Request in EAPOL-Key",
-			    ie->ip_addr_req, pos[1] - RSN_SELECTOR_LEN);
+			    ie->ip_addr_req, left);
 		return 0;
 	}
 
-	if (pos[1] >= RSN_SELECTOR_LEN + 3 * 4 &&
-	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_IP_ADDR_ALLOC) {
-		ie->ip_addr_alloc = pos + 2 + RSN_SELECTOR_LEN;
+	if (left >= 3 * 4 && selector == WFA_KEY_DATA_IP_ADDR_ALLOC) {
+		ie->ip_addr_alloc = p;
 		wpa_hexdump(MSG_DEBUG,
 			    "WPA: IP Address Allocation in EAPOL-Key",
-			    ie->ip_addr_alloc, pos[1] - RSN_SELECTOR_LEN);
+			    ie->ip_addr_alloc, left);
 		return 0;
 	}
 
-	if (pos[1] > RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == RSN_KEY_DATA_OCI) {
-		ie->oci = pos + 2 + RSN_SELECTOR_LEN;
-		ie->oci_len = pos[1] - RSN_SELECTOR_LEN;
+	if (left > 2 && selector == RSN_KEY_DATA_OCI) {
+		ie->oci = p;
+		ie->oci_len = left;
 		wpa_hexdump(MSG_DEBUG, "WPA: OCI KDE in EAPOL-Key",
-			    pos, pos[1] + 2);
+			    pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] >= RSN_SELECTOR_LEN + 1 &&
-	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_TRANSITION_DISABLE) {
-		ie->transition_disable = pos + 2 + RSN_SELECTOR_LEN;
-		ie->transition_disable_len = pos[1] - RSN_SELECTOR_LEN;
+	if (left >= 1 && selector == WFA_KEY_DATA_TRANSITION_DISABLE) {
+		ie->transition_disable = p;
+		ie->transition_disable_len = left;
 		wpa_hexdump(MSG_DEBUG,
 			    "WPA: Transition Disable KDE in EAPOL-Key",
-			    pos, pos[1] + 2);
+			    pos, dlen);
 		return 0;
 	}
 
-	if (pos[1] >= RSN_SELECTOR_LEN + 2 &&
-	    RSN_SELECTOR_GET(pos + 2) == WFA_KEY_DATA_DPP) {
-		ie->dpp_kde = pos + 2 + RSN_SELECTOR_LEN;
-		ie->dpp_kde_len = pos[1] - RSN_SELECTOR_LEN;
-		wpa_hexdump(MSG_DEBUG, "WPA: DPP KDE in EAPOL-Key",
-			    pos, pos[1] + 2);
+	if (left >= 2 && selector == WFA_KEY_DATA_DPP) {
+		ie->dpp_kde = p;
+		ie->dpp_kde_len = left;
+		wpa_hexdump(MSG_DEBUG, "WPA: DPP KDE in EAPOL-Key", pos, dlen);
 		return 0;
 	}
 
@@ -3150,15 +3231,17 @@ int wpa_parse_kde_ies(const u8 *buf, size_t len, struct wpa_eapol_ie_parse *ie)
 {
 	const u8 *pos, *end;
 	int ret = 0;
+	size_t dlen = 0;
 
 	os_memset(ie, 0, sizeof(*ie));
-	for (pos = buf, end = pos + len; end - pos > 1; pos += 2 + pos[1]) {
+	for (pos = buf, end = pos + len; end - pos > 1; pos += dlen) {
 		if (pos[0] == 0xdd &&
 		    ((pos == buf + len - 1) || pos[1] == 0)) {
 			/* Ignore padding */
 			break;
 		}
-		if (2 + pos[1] > end - pos) {
+		dlen = 2 + pos[1];
+		if ((int) dlen > end - pos) {
 			wpa_printf(MSG_DEBUG,
 				   "WPA: EAPOL-Key Key Data underflow (ie=%d len=%d pos=%d)",
 				   pos[0], pos[1], (int) (pos - buf));
@@ -3168,22 +3251,22 @@ int wpa_parse_kde_ies(const u8 *buf, size_t len, struct wpa_eapol_ie_parse *ie)
 		}
 		if (*pos == WLAN_EID_RSN) {
 			ie->rsn_ie = pos;
-			ie->rsn_ie_len = pos[1] + 2;
+			ie->rsn_ie_len = dlen;
 			wpa_hexdump(MSG_DEBUG, "WPA: RSN IE in EAPOL-Key",
 				    ie->rsn_ie, ie->rsn_ie_len);
 		} else if (*pos == WLAN_EID_RSNX) {
 			ie->rsnxe = pos;
-			ie->rsnxe_len = pos[1] + 2;
+			ie->rsnxe_len = dlen;
 			wpa_hexdump(MSG_DEBUG, "WPA: RSNXE in EAPOL-Key",
 				    ie->rsnxe, ie->rsnxe_len);
 		} else if (*pos == WLAN_EID_MOBILITY_DOMAIN) {
 			ie->mdie = pos;
-			ie->mdie_len = pos[1] + 2;
+			ie->mdie_len = dlen;
 			wpa_hexdump(MSG_DEBUG, "WPA: MDIE in EAPOL-Key",
 				    ie->mdie, ie->mdie_len);
 		} else if (*pos == WLAN_EID_FAST_BSS_TRANSITION) {
 			ie->ftie = pos;
-			ie->ftie_len = pos[1] + 2;
+			ie->ftie_len = dlen;
 			wpa_hexdump(MSG_DEBUG, "WPA: FTIE in EAPOL-Key",
 				    ie->ftie, ie->ftie_len);
 		} else if (*pos == WLAN_EID_TIMEOUT_INTERVAL && pos[1] >= 5) {
@@ -3191,31 +3274,31 @@ int wpa_parse_kde_ies(const u8 *buf, size_t len, struct wpa_eapol_ie_parse *ie)
 				ie->reassoc_deadline = pos;
 				wpa_hexdump(MSG_DEBUG, "WPA: Reassoc Deadline "
 					    "in EAPOL-Key",
-					    ie->reassoc_deadline, pos[1] + 2);
+					    ie->reassoc_deadline, dlen);
 			} else if (pos[2] == WLAN_TIMEOUT_KEY_LIFETIME) {
 				ie->key_lifetime = pos;
 				wpa_hexdump(MSG_DEBUG, "WPA: KeyLifetime "
 					    "in EAPOL-Key",
-					    ie->key_lifetime, pos[1] + 2);
+					    ie->key_lifetime, dlen);
 			} else {
 				wpa_hexdump(MSG_DEBUG, "WPA: Unrecognized "
 					    "EAPOL-Key Key Data IE",
-					    pos, 2 + pos[1]);
+					    pos, dlen);
 			}
 		} else if (*pos == WLAN_EID_LINK_ID) {
 			if (pos[1] >= 18) {
 				ie->lnkid = pos;
-				ie->lnkid_len = pos[1] + 2;
+				ie->lnkid_len = dlen;
 			}
 		} else if (*pos == WLAN_EID_EXT_CAPAB) {
 			ie->ext_capab = pos;
-			ie->ext_capab_len = pos[1] + 2;
+			ie->ext_capab_len = dlen;
 		} else if (*pos == WLAN_EID_SUPP_RATES) {
 			ie->supp_rates = pos;
-			ie->supp_rates_len = pos[1] + 2;
+			ie->supp_rates_len = dlen;
 		} else if (*pos == WLAN_EID_EXT_SUPP_RATES) {
 			ie->ext_supp_rates = pos;
-			ie->ext_supp_rates_len = pos[1] + 2;
+			ie->ext_supp_rates_len = dlen;
 		} else if (*pos == WLAN_EID_HT_CAP &&
 			   pos[1] >= sizeof(struct ieee80211_ht_capabilities)) {
 			ie->ht_capabilities = pos + 2;
@@ -3269,7 +3352,7 @@ int wpa_parse_kde_ies(const u8 *buf, size_t len, struct wpa_eapol_ie_parse *ie)
 		} else {
 			wpa_hexdump(MSG_DEBUG,
 				    "WPA: Unrecognized EAPOL-Key Key Data IE",
-				    pos, 2 + pos[1]);
+				    pos, dlen);
 		}
 	}
 
@@ -3367,6 +3450,9 @@ int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid, int akmp, int cipher)
 #ifdef CONFIG_SAE
 	case WPA_KEY_MGMT_SAE:
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_SAE);
+		break;
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_SAE_EXT_KEY);
 		break;
 #endif /* CONFIG_SAE */
 #ifdef CONFIG_FILS
@@ -3581,6 +3667,7 @@ int wpa_pasn_validate_rsne(const struct wpa_ie_data *data)
 	switch (data->key_mgmt) {
 #ifdef CONFIG_SAE
 	case WPA_KEY_MGMT_SAE:
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
 	/* fall through */
 #endif /* CONFIG_SAE */
 #ifdef CONFIG_FILS

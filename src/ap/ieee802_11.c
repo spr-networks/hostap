@@ -986,7 +986,8 @@ void sae_accept_sta(struct hostapd_data *hapd, struct sta_info *sta)
 	sta->sae->peer_commit_scalar_accepted = sta->sae->peer_commit_scalar;
 	sta->sae->peer_commit_scalar = NULL;
 	wpa_auth_pmksa_add_sae(hapd->wpa_auth, sta->addr,
-			       sta->sae->pmk, sta->sae->pmkid);
+			       sta->sae->pmk, sta->sae->pmk_len,
+			       sta->sae->pmkid, sta->sae->akmp);
 	sae_sme_send_external_auth_status(hapd, sta, WLAN_STATUS_SUCCESS);
 }
 
@@ -1237,6 +1238,10 @@ static int sae_status_success(struct hostapd_data *hapd, u16 status_code)
 	if (sae_pwe == 0 && sae_pk)
 		sae_pwe = 2;
 #endif /* CONFIG_SAE_PK */
+	if (sae_pwe == 0 &&
+	    (hapd->conf->wpa_key_mgmt &
+	     (WPA_KEY_MGMT_SAE_EXT_KEY | WPA_KEY_MGMT_FT_SAE_EXT_KEY)))
+		sae_pwe = 2;
 
 	return ((sae_pwe == 0 || sae_pwe == 3) &&
 		status_code == WLAN_STATUS_SUCCESS) ||
@@ -2333,9 +2338,8 @@ static int ieee802_11_allowed_address(struct hostapd_data *hapd, const u8 *addr,
 }
 
 
-static int
-ieee802_11_set_radius_info(struct hostapd_data *hapd, struct sta_info *sta,
-			   int res, struct radius_sta *info)
+int ieee802_11_set_radius_info(struct hostapd_data *hapd, struct sta_info *sta,
+			       int res, struct radius_sta *info)
 {
 	u32 session_timeout = info->session_timeout;
 	u32 acct_interim_interval = info->acct_interim_interval;
@@ -2523,7 +2527,8 @@ static int pasn_wd_handle_sae_confirm(struct hostapd_data *hapd,
 	 * restrict this only for PASN.
 	 */
 	wpa_auth_pmksa_add_sae(hapd->wpa_auth, sta->addr,
-			       pasn->sae.pmk, pasn->sae.pmkid);
+			       pasn->sae.pmk, pasn->sae.pmk_len,
+			       pasn->sae.pmkid, pasn->sae.akmp);
 	return 0;
 }
 
@@ -3130,6 +3135,7 @@ static void handle_auth_pasn_1(struct hostapd_data *hapd, struct sta_info *sta,
 	int ret, inc_y;
 	bool derive_keys;
 	u32 i;
+	bool derive_kdk;
 
 	if (!groups)
 		groups = default_groups;
@@ -3169,10 +3175,14 @@ static void handle_auth_pasn_1(struct hostapd_data *hapd, struct sta_info *sta,
 	sta->pasn->akmp = rsn_data.key_mgmt;
 	sta->pasn->cipher = rsn_data.pairwise_cipher;
 
-	if (hapd->conf->force_kdk_derivation ||
-	    ((hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_LTF) &&
-	     ieee802_11_rsnx_capab_len(elems.rsnxe, elems.rsnxe_len,
-				       WLAN_RSNX_CAPAB_SECURE_LTF)))
+	derive_kdk = (hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_LTF) &&
+		ieee802_11_rsnx_capab_len(elems.rsnxe, elems.rsnxe_len,
+					  WLAN_RSNX_CAPAB_SECURE_LTF);
+#ifdef CONFIG_TESTING_OPTIONS
+	if (!derive_kdk)
+		derive_kdk = hapd->conf->force_kdk_derivation;
+#endif /* CONFIG_TESTING_OPTIONS */
+	if (derive_kdk)
 		sta->pasn->kdk_len = WPA_KDK_MAX_LEN;
 	else
 		sta->pasn->kdk_len = 0;
@@ -4195,8 +4205,21 @@ static u16 owe_process_assoc_req(struct hostapd_data *hapd,
 	else
 		return WLAN_STATUS_FINITE_CYCLIC_GROUP_NOT_SUPPORTED;
 
-	crypto_ecdh_deinit(sta->owe_ecdh);
-	sta->owe_ecdh = crypto_ecdh_init(group);
+	if (sta->owe_group == group && sta->owe_ecdh) {
+		/* This is a workaround for mac80211 behavior of retransmitting
+		 * the Association Request frames multiple times if the link
+		 * layer retries (i.e., seq# remains same) fail. The mac80211
+		 * initiated retransmission will use a different seq# and as
+		 * such, will go through duplicate detection. If we were to
+		 * change our DH key for that attempt, there would be two
+		 * different DH shared secrets and the STA would likely select
+		 * the wrong one. */
+		wpa_printf(MSG_DEBUG,
+			   "OWE: Try to reuse own previous DH key since the STA tried to go through OWE association again");
+	} else {
+		crypto_ecdh_deinit(sta->owe_ecdh);
+		sta->owe_ecdh = crypto_ecdh_init(group);
+	}
 	if (!sta->owe_ecdh)
 		return WLAN_STATUS_FINITE_CYCLIC_GROUP_NOT_SUPPORTED;
 	sta->owe_group = group;
@@ -4545,6 +4568,17 @@ static int check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 		}
 	}
 #endif /* CONFIG_IEEE80211AX */
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->iconf->ieee80211be && !hapd->conf->disable_11be) {
+		resp = copy_sta_eht_capab(hapd, sta, IEEE80211_MODE_AP,
+					  elems.he_capabilities,
+					  elems.he_capabilities_len,
+					  elems.eht_capabilities,
+					  elems.eht_capabilities_len);
+		if (resp != WLAN_STATUS_SUCCESS)
+			return resp;
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 #ifdef CONFIG_P2P
 	if (elems.p2p) {
@@ -4609,6 +4643,9 @@ static int check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 	if (hapd->conf->wpa && wpa_ie) {
 		enum wpa_validate_result res;
 
+		if (check_sa_query(hapd, sta, reassoc))
+			return WLAN_STATUS_ASSOC_REJECTED_TEMPORARILY;
+
 		wpa_ie -= 2;
 		wpa_ie_len += 2;
 		if (sta->wpa_sm == NULL)
@@ -4631,9 +4668,6 @@ static int check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 		resp = wpa_res_to_status_code(res);
 		if (resp != WLAN_STATUS_SUCCESS)
 			return resp;
-
-		if (check_sa_query(hapd, sta, reassoc))
-			return WLAN_STATUS_ASSOC_REJECTED_TEMPORARILY;
 
 		if (wpa_auth_uses_mfp(sta->wpa_sm))
 			sta->flags |= WLAN_STA_MFP;
@@ -4666,7 +4700,7 @@ static int check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 		    sta->auth_alg == WLAN_AUTH_OPEN) {
 			struct rsn_pmksa_cache_entry *sa;
 			sa = wpa_auth_sta_get_pmksa(sta->wpa_sm);
-			if (!sa || sa->akmp != WPA_KEY_MGMT_SAE) {
+			if (!sa || !wpa_key_mgmt_sae(sa->akmp)) {
 				wpa_printf(MSG_DEBUG,
 					   "SAE: No PMKSA cache entry found for "
 					   MACSTR, MAC2STR(sta->addr));
@@ -4916,6 +4950,7 @@ static int add_associated_sta(struct hostapd_data *hapd,
 	struct ieee80211_ht_capabilities ht_cap;
 	struct ieee80211_vht_capabilities vht_cap;
 	struct ieee80211_he_capabilities he_cap;
+	struct ieee80211_eht_capabilities eht_cap;
 	int set = 1;
 
 	/*
@@ -4972,6 +5007,11 @@ static int add_associated_sta(struct hostapd_data *hapd,
 				     sta->he_capab_len);
 	}
 #endif /* CONFIG_IEEE80211AX */
+#ifdef CONFIG_IEEE80211BE
+	if (sta->flags & WLAN_STA_EHT)
+		hostapd_get_eht_capab(hapd, sta->eht_capab, &eht_cap,
+				      sta->eht_capab_len);
+#endif /* CONFIG_IEEE80211BE */
 
 	/*
 	 * Add the station with forced WLAN_STA_ASSOC flag. The sta->flags
@@ -4985,6 +5025,8 @@ static int add_associated_sta(struct hostapd_data *hapd,
 			    sta->flags & WLAN_STA_VHT ? &vht_cap : NULL,
 			    sta->flags & WLAN_STA_HE ? &he_cap : NULL,
 			    sta->flags & WLAN_STA_HE ? sta->he_capab_len : 0,
+			    sta->flags & WLAN_STA_EHT ? &eht_cap : NULL,
+			    sta->flags & WLAN_STA_EHT ? sta->eht_capab_len : 0,
 			    sta->he_6ghz_capab,
 			    sta->flags | WLAN_STA_ASSOC, sta->qosinfo,
 			    sta->vht_opmode, sta->p2p_ie ? 1 : 0,
@@ -5035,6 +5077,13 @@ static u16 send_assoc_resp(struct hostapd_data *hapd, struct sta_info *sta,
 	if (sta && sta->dpp_pfs)
 		buflen += 5 + sta->dpp_pfs->curve->prime_len;
 #endif /* CONFIG_DPP2 */
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->iconf->ieee80211be && !hapd->conf->disable_11be) {
+		buflen += hostapd_eid_eht_capab_len(hapd, IEEE80211_MODE_AP);
+		buflen += 3 + sizeof(struct ieee80211_eht_operation);
+	}
+#endif /* CONFIG_IEEE80211BE */
+
 	buf = os_zalloc(buflen);
 	if (!buf) {
 		res = WLAN_STATUS_UNSPECIFIED_FAILURE;
@@ -5143,6 +5192,7 @@ static u16 send_assoc_resp(struct hostapd_data *hapd, struct sta_info *sta,
 	if (hapd->iconf->ieee80211ax && !hapd->conf->disable_11ax) {
 		p = hostapd_eid_he_capab(hapd, p, IEEE80211_MODE_AP);
 		p = hostapd_eid_he_operation(hapd, p);
+		p = hostapd_eid_cca(hapd, p);
 		p = hostapd_eid_spatial_reuse(hapd, p);
 		p = hostapd_eid_he_mu_edca_parameter_set(hapd, p);
 		p = hostapd_eid_he_6ghz_band_cap(hapd, p);
@@ -5179,6 +5229,13 @@ static u16 send_assoc_resp(struct hostapd_data *hapd, struct sta_info *sta,
 #ifdef CONFIG_TESTING_OPTIONS
 rsnxe_done:
 #endif /* CONFIG_TESTING_OPTIONS */
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->iconf->ieee80211be && !hapd->conf->disable_11be) {
+		p = hostapd_eid_eht_capab(hapd, p, IEEE80211_MODE_AP);
+		p = hostapd_eid_eht_operation(hapd, p);
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 #ifdef CONFIG_OWE
 	if ((hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_OWE) &&
@@ -6546,7 +6603,8 @@ static void handle_assoc_cb(struct hostapd_data *hapd,
 			ieee802_1x_receive(
 				hapd, mgmt->da,
 				wpabuf_head(sta->pending_eapol_rx->buf),
-				wpabuf_len(sta->pending_eapol_rx->buf));
+				wpabuf_len(sta->pending_eapol_rx->buf),
+				sta->pending_eapol_rx->encrypted);
 		}
 		wpabuf_free(sta->pending_eapol_rx->buf);
 		os_free(sta->pending_eapol_rx);
@@ -6895,6 +6953,38 @@ void ieee802_11_rx_from_unknown(struct hostapd_data *hapd, const u8 *src,
 }
 
 
+static u8 * hostapd_add_tpe_info(u8 *eid, u8 tx_pwr_count,
+				 enum max_tx_pwr_interpretation tx_pwr_intrpn,
+				 u8 tx_pwr_cat, u8 tx_pwr)
+{
+	int i;
+
+	*eid++ = WLAN_EID_TRANSMIT_POWER_ENVELOPE; /* Element ID */
+	*eid++ = 2 + tx_pwr_count; /* Length */
+
+	/*
+	 * Transmit Power Information field
+	 *	bits 0-2 : Maximum Transmit Power Count
+	 *	bits 3-5 : Maximum Transmit Power Interpretation
+	 *	bits 6-7 : Maximum Transmit Power Category
+	 */
+	*eid++ = tx_pwr_count | (tx_pwr_intrpn << 3) | (tx_pwr_cat << 6);
+
+	/* Maximum Transmit Power field */
+	for (i = 0; i <= tx_pwr_count; i++)
+		*eid++ = tx_pwr;
+
+	return eid;
+}
+
+
+/*
+ * TODO: Extract power limits from channel data after 6G regulatory
+ *	support.
+ */
+#define REG_PSD_MAX_TXPOWER_FOR_DEFAULT_CLIENT      (-1) /* dBm/MHz */
+#define REG_PSD_MAX_TXPOWER_FOR_SUBORDINATE_CLIENT  5    /* dBm/MHz */
+
 u8 * hostapd_eid_txpower_envelope(struct hostapd_data *hapd, u8 *eid)
 {
 	struct hostapd_iface *iface = hapd->iface;
@@ -6919,8 +7009,45 @@ u8 * hostapd_eid_txpower_envelope(struct hostapd_data *hapd, u8 *eid)
 	if (i == mode->num_channels)
 		return eid;
 
+#ifdef CONFIG_IEEE80211AX
+	/* IEEE Std 802.11ax-2021, Annex E.2.7 (6 GHz band in the United
+	 * States): An AP that is an Indoor Access Point per regulatory rules
+	 * shall send at least two Transmit Power Envelope elements in Beacon
+	 * and Probe Response frames as follows:
+	 *  - Maximum Transmit Power Category subfield = Default;
+	 *	Unit interpretation = Regulatory client EIRP PSD
+	 *  - Maximum Transmit Power Category subfield = Subordinate Device;
+	 *	Unit interpretation = Regulatory client EIRP PSD
+	 */
+	if (is_6ghz_op_class(iconf->op_class)) {
+		enum max_tx_pwr_interpretation tx_pwr_intrpn;
+
+		/* Same Maximum Transmit Power for all 20 MHz bands */
+		tx_pwr_count = 0;
+		tx_pwr_intrpn = REGULATORY_CLIENT_EIRP_PSD;
+
+		/* Default Transmit Power Envelope for Global Operating Class */
+		tx_pwr = REG_PSD_MAX_TXPOWER_FOR_DEFAULT_CLIENT * 2;
+		eid = hostapd_add_tpe_info(eid, tx_pwr_count, tx_pwr_intrpn,
+					   REG_DEFAULT_CLIENT, tx_pwr);
+
+		/* Indoor Access Point must include an additional TPE for
+		 * subordinate devices */
+		if (iconf->he_6ghz_reg_pwr_type == HE_6GHZ_INDOOR_AP) {
+			/* TODO: Extract PSD limits from channel data */
+			tx_pwr = REG_PSD_MAX_TXPOWER_FOR_SUBORDINATE_CLIENT * 2;
+			eid = hostapd_add_tpe_info(eid, tx_pwr_count,
+						   tx_pwr_intrpn,
+						   REG_SUBORDINATE_CLIENT,
+						   tx_pwr);
+		}
+
+		return eid;
+	}
+#endif /* CONFIG_IEEE80211AX */
+
 	switch (hostapd_get_oper_chwidth(iconf)) {
-	case CHANWIDTH_USE_HT:
+	case CONF_OPER_CHWIDTH_USE_HT:
 		if (iconf->secondary_channel == 0) {
 			/* Max Transmit Power count = 0 (20 MHz) */
 			tx_pwr_count = 0;
@@ -6929,12 +7056,12 @@ u8 * hostapd_eid_txpower_envelope(struct hostapd_data *hapd, u8 *eid)
 			tx_pwr_count = 1;
 		}
 		break;
-	case CHANWIDTH_80MHZ:
+	case CONF_OPER_CHWIDTH_80MHZ:
 		/* Max Transmit Power count = 2 (20, 40, and 80 MHz) */
 		tx_pwr_count = 2;
 		break;
-	case CHANWIDTH_80P80MHZ:
-	case CHANWIDTH_160MHZ:
+	case CONF_OPER_CHWIDTH_80P80MHZ:
+	case CONF_OPER_CHWIDTH_160MHZ:
 		/* Max Transmit Power count = 3 (20, 40, 80, 160/80+80 MHz) */
 		tx_pwr_count = 3;
 		break;
@@ -6991,19 +7118,9 @@ u8 * hostapd_eid_txpower_envelope(struct hostapd_data *hapd, u8 *eid)
 	else
 		tx_pwr = max_tx_power;
 
-	*eid++ = WLAN_EID_TRANSMIT_POWER_ENVELOPE;
-	*eid++ = 2 + tx_pwr_count;
-
-	/*
-	 * Max Transmit Power count and
-	 * Max Transmit Power units = 0 (EIRP)
-	 */
-	*eid++ = tx_pwr_count;
-
-	for (i = 0; i <= tx_pwr_count; i++)
-		*eid++ = tx_pwr;
-
-	return eid;
+	return hostapd_add_tpe_info(eid, tx_pwr_count, LOCAL_EIRP,
+				    0 /* Reserved for bands other than 6 GHz */,
+				    tx_pwr);
 }
 
 
@@ -7014,7 +7131,8 @@ u8 * hostapd_eid_wb_chsw_wrapper(struct hostapd_data *hapd, u8 *eid)
 
 	if (!hapd->cs_freq_params.channel ||
 	    (!hapd->cs_freq_params.vht_enabled &&
-	     !hapd->cs_freq_params.he_enabled))
+	     !hapd->cs_freq_params.he_enabled &&
+	     !hapd->cs_freq_params.eht_enabled))
 		return eid;
 
 	/* bandwidth: 0: 40, 1: 80, 2: 160, 3: 80+80 */

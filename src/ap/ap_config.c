@@ -1,6 +1,6 @@
 /*
  * hostapd / Configuration helper functions
- * Copyright (c) 2003-2014, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2003-2022, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -514,9 +514,12 @@ static int hostapd_derive_psk(struct hostapd_ssid *ssid)
 	wpa_hexdump_ascii_key(MSG_DEBUG, "PSK (ASCII passphrase)",
 			      (u8 *) ssid->wpa_passphrase,
 			      os_strlen(ssid->wpa_passphrase));
-	pbkdf2_sha1(ssid->wpa_passphrase,
-		    ssid->ssid, ssid->ssid_len,
-		    4096, ssid->wpa_psk->psk, PMK_LEN);
+	if (pbkdf2_sha1(ssid->wpa_passphrase,
+			ssid->ssid, ssid->ssid_len,
+			4096, ssid->wpa_psk->psk, PMK_LEN) != 0) {
+		wpa_printf(MSG_ERROR, "Error in pbkdf2_sha1()");
+		return -1;
+	}
 	wpa_hexdump_key(MSG_DEBUG, "PSK (from passphrase)",
 			ssid->wpa_psk->psk, PMK_LEN);
 	return 0;
@@ -530,6 +533,7 @@ int hostapd_setup_sae_pt(struct hostapd_bss_config *conf)
 	struct sae_password_entry *pw;
 
 	if ((conf->sae_pwe == 0 && !hostapd_sae_pw_id_in_use(conf) &&
+	     !wpa_key_mgmt_sae_ext_key(conf->wpa_key_mgmt) &&
 	     !hostapd_sae_pk_in_use(conf)) ||
 	    conf->sae_pwe == 3 ||
 	    !wpa_key_mgmt_sae(conf->wpa_key_mgmt))
@@ -874,6 +878,7 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 	os_free(conf->eap_fast_a_id);
 	os_free(conf->eap_fast_a_id_info);
 	os_free(conf->eap_sim_db);
+	os_free(conf->imsi_privacy_key);
 	os_free(conf->radius_server_clients);
 	os_free(conf->radius);
 	os_free(conf->radius_das_shared_secret);
@@ -1008,6 +1013,8 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 #ifdef CONFIG_DPP
 	os_free(conf->dpp_name);
 	os_free(conf->dpp_mud_url);
+	os_free(conf->dpp_extra_conf_req_name);
+	os_free(conf->dpp_extra_conf_req_value);
 	os_free(conf->dpp_connector);
 	wpabuf_free(conf->dpp_netaccesskey);
 	wpabuf_free(conf->dpp_csign);
@@ -1308,15 +1315,18 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 
 	if (full_config && bss->wpa &&
 	    bss->wpa_psk_radius != PSK_RADIUS_IGNORED &&
+	    bss->wpa_psk_radius != PSK_RADIUS_DURING_4WAY_HS &&
 	    bss->macaddr_acl != USE_EXTERNAL_RADIUS_AUTH) {
 		wpa_printf(MSG_ERROR, "WPA-PSK using RADIUS enabled, but no "
 			   "RADIUS checking (macaddr_acl=2) enabled.");
 		return -1;
 	}
 
-	if (full_config && bss->wpa && (bss->wpa_key_mgmt & WPA_KEY_MGMT_PSK) &&
+	if (full_config && bss->wpa &&
+	    wpa_key_mgmt_wpa_psk_no_sae(bss->wpa_key_mgmt) &&
 	    bss->ssid.wpa_psk == NULL && bss->ssid.wpa_passphrase == NULL &&
 	    bss->ssid.wpa_psk_file == NULL &&
+	    bss->wpa_psk_radius != PSK_RADIUS_DURING_4WAY_HS &&
 	    (bss->wpa_psk_radius != PSK_RADIUS_REQUIRED ||
 	     bss->macaddr_acl != USE_EXTERNAL_RADIUS_AUTH)) {
 		wpa_printf(MSG_ERROR, "WPA-PSK enabled, but PSK or passphrase "
@@ -1489,13 +1499,21 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 #endif /* CONFIG_SAE_PK */
 
 #ifdef CONFIG_FILS
-	if (full_config && bss->fils_discovery_min_int &&
+	if (full_config && bss->fils_discovery_max_int &&
 	    bss->unsol_bcast_probe_resp_interval) {
 		wpa_printf(MSG_ERROR,
 			   "Cannot enable both FILS discovery and unsolicited broadcast Probe Response at the same time");
 		return -1;
 	}
 #endif /* CONFIG_FILS */
+
+#ifdef CONFIG_IEEE80211BE
+	if (full_config && !bss->disable_11be && bss->disable_11ax) {
+		bss->disable_11be = true;
+		wpa_printf(MSG_INFO,
+			   "Disabling IEEE 802.11be as IEEE 802.11ax is disabled for this BSS");
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 	return 0;
 }
@@ -1527,6 +1545,13 @@ static int hostapd_config_check_cw(struct hostapd_config *conf, int queue)
 int hostapd_config_check(struct hostapd_config *conf, int full_config)
 {
 	size_t i;
+
+	if (full_config && is_6ghz_op_class(conf->op_class) &&
+	    !conf->hw_mode_set) {
+		/* Use the appropriate hw_mode value automatically when the
+		 * op_class parameter has been set, but hw_mode was not. */
+		conf->hw_mode = HOSTAPD_MODE_IEEE80211A;
+	}
 
 	if (full_config && conf->ieee80211d &&
 	    (!conf->country[0] || !conf->country[1])) {
@@ -1564,6 +1589,14 @@ int hostapd_config_check(struct hostapd_config *conf, int full_config)
 		if (hostapd_config_check_cw(conf, i))
 			return -1;
 	}
+
+#ifdef CONFIG_IEEE80211BE
+	if (full_config && conf->ieee80211be && !conf->ieee80211ax) {
+		wpa_printf(MSG_ERROR,
+			   "Cannot set ieee80211be without ieee80211ax");
+		return -1;
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 	for (i = 0; i < conf->num_bss; i++) {
 		if (hostapd_config_check_bss(conf->bss[i], conf, full_config))

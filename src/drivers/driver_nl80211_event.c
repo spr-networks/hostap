@@ -179,6 +179,11 @@ static const char * nl80211_command_to_string(enum nl80211_commands cmd)
 	C2S(NL80211_CMD_COLOR_CHANGE_COMPLETED)
 	C2S(NL80211_CMD_SET_FILS_AAD)
 	C2S(NL80211_CMD_ASSOC_COMEBACK)
+	C2S(NL80211_CMD_ADD_LINK)
+	C2S(NL80211_CMD_REMOVE_LINK)
+	C2S(NL80211_CMD_ADD_LINK_STA)
+	C2S(NL80211_CMD_MODIFY_LINK_STA)
+	C2S(NL80211_CMD_REMOVE_LINK_STA)
 	C2S(__NL80211_CMD_AFTER_LAST)
 	}
 #undef C2S
@@ -673,6 +678,9 @@ static int calculate_chan_offset(int width, int freq, int cf1, int cf2)
 		break;
 	case CHAN_WIDTH_80P80:
 		freq1 = cf1 - 30;
+		break;
+	case CHAN_WIDTH_320:
+		freq1 = cf1 - 150;
 		break;
 	case CHAN_WIDTH_UNKNOWN:
 	case CHAN_WIDTH_2160:
@@ -2117,7 +2125,6 @@ qca_nl80211_key_mgmt_auth_handler(struct wpa_driver_nl80211_data *drv,
 	if (!drv->roam_indication_done) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Pending roam indication, delay processing roam+auth vendor event");
-		os_get_reltime(&drv->pending_roam_ind_time);
 
 		os_free(drv->pending_roam_data);
 		drv->pending_roam_data = os_memdup(data, len);
@@ -2791,6 +2798,9 @@ static void nl80211_sta_opmode_change_event(struct wpa_driver_nl80211_data *drv,
 		case NL80211_CHAN_WIDTH_160:
 			ed.sta_opmode.chan_width = CHAN_WIDTH_160;
 			break;
+		case NL80211_CHAN_WIDTH_320:
+			ed.sta_opmode.chan_width = CHAN_WIDTH_320;
+			break;
 		default:
 			ed.sta_opmode.chan_width = CHAN_WIDTH_UNKNOWN;
 			break;
@@ -2810,6 +2820,7 @@ static void nl80211_control_port_frame(struct wpa_driver_nl80211_data *drv,
 {
 	u8 *src_addr;
 	u16 ethertype;
+	enum frame_encryption encrypted;
 
 	if (!tb[NL80211_ATTR_MAC] ||
 	    !tb[NL80211_ATTR_FRAME] ||
@@ -2818,6 +2829,8 @@ static void nl80211_control_port_frame(struct wpa_driver_nl80211_data *drv,
 
 	src_addr = nla_data(tb[NL80211_ATTR_MAC]);
 	ethertype = nla_get_u16(tb[NL80211_ATTR_CONTROL_PORT_ETHERTYPE]);
+	encrypted = nla_get_flag(tb[NL80211_ATTR_CONTROL_PORT_NO_ENCRYPT]) ?
+		FRAME_NOT_ENCRYPTED : FRAME_ENCRYPTED;
 
 	switch (ethertype) {
 	case ETH_P_RSN_PREAUTH:
@@ -2826,9 +2839,10 @@ static void nl80211_control_port_frame(struct wpa_driver_nl80211_data *drv,
 			   MAC2STR(src_addr));
 		break;
 	case ETH_P_PAE:
-		drv_event_eapol_rx(drv->ctx, src_addr,
-				   nla_data(tb[NL80211_ATTR_FRAME]),
-				   nla_len(tb[NL80211_ATTR_FRAME]));
+		drv_event_eapol_rx2(drv->ctx, src_addr,
+				    nla_data(tb[NL80211_ATTR_FRAME]),
+				    nla_len(tb[NL80211_ATTR_FRAME]),
+				    encrypted);
 		break;
 	default:
 		wpa_printf(MSG_INFO,
@@ -2911,6 +2925,58 @@ static void nl80211_assoc_comeback(struct wpa_driver_nl80211_data *drv,
 }
 
 
+#ifdef CONFIG_IEEE80211AX
+
+static void nl80211_obss_color_collision(struct wpa_driver_nl80211_data *drv,
+					 struct nlattr *tb[])
+{
+	union wpa_event_data data;
+
+	if (!tb[NL80211_ATTR_OBSS_COLOR_BITMAP])
+		return;
+
+	os_memset(&data, 0, sizeof(data));
+	data.bss_color_collision.bitmap =
+		nla_get_u64(tb[NL80211_ATTR_OBSS_COLOR_BITMAP]);
+
+	wpa_printf(MSG_DEBUG, "nl80211: BSS color collision - bitmap %08llx",
+		   (long long unsigned int) data.bss_color_collision.bitmap);
+	wpa_supplicant_event(drv->ctx, EVENT_BSS_COLOR_COLLISION, &data);
+}
+
+
+static void
+nl80211_color_change_announcement_started(struct wpa_driver_nl80211_data *drv)
+{
+	union wpa_event_data data = {};
+
+	wpa_printf(MSG_DEBUG, "nl80211: CCA started");
+	wpa_supplicant_event(drv->ctx, EVENT_CCA_STARTED_NOTIFY, &data);
+}
+
+
+static void
+nl80211_color_change_announcement_aborted(struct wpa_driver_nl80211_data *drv)
+{
+	union wpa_event_data data = {};
+
+	wpa_printf(MSG_DEBUG, "nl80211: CCA aborted");
+	wpa_supplicant_event(drv->ctx, EVENT_CCA_ABORTED_NOTIFY, &data);
+}
+
+
+static void
+nl80211_color_change_announcement_completed(struct wpa_driver_nl80211_data *drv)
+{
+	union wpa_event_data data = {};
+
+	wpa_printf(MSG_DEBUG, "nl80211: CCA completed");
+	wpa_supplicant_event(drv->ctx, EVENT_CCA_NOTIFY, &data);
+}
+
+#endif /* CONFIG_IEEE80211AX */
+
+
 static void do_process_drv_event(struct i802_bss *bss, int cmd,
 				 struct nlattr **tb)
 {
@@ -2925,17 +2991,10 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 	if (cmd == NL80211_CMD_ROAM &&
 	    (drv->capa.flags & WPA_DRIVER_FLAGS_KEY_MGMT_OFFLOAD)) {
 		if (drv->pending_roam_data) {
-			struct os_reltime now, age;
-
-			os_get_reltime(&now);
-			os_reltime_sub(&now, &drv->pending_roam_ind_time, &age);
-			if (age.sec == 0 && age.usec < 100000) {
-				wpa_printf(MSG_DEBUG,
-					   "nl80211: Process pending roam+auth vendor event");
-				qca_nl80211_key_mgmt_auth(
-					drv, drv->pending_roam_data,
-					drv->pending_roam_data_len);
-			}
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Process pending roam+auth vendor event");
+			qca_nl80211_key_mgmt_auth(drv, drv->pending_roam_data,
+						  drv->pending_roam_data_len);
 			os_free(drv->pending_roam_data);
 			drv->pending_roam_data = NULL;
 			return;
@@ -3164,6 +3223,20 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 		nl80211_assoc_comeback(drv, tb[NL80211_ATTR_MAC],
 				       tb[NL80211_ATTR_TIMEOUT]);
 		break;
+#ifdef CONFIG_IEEE80211AX
+	case NL80211_CMD_OBSS_COLOR_COLLISION:
+		nl80211_obss_color_collision(drv, tb);
+		break;
+	case NL80211_CMD_COLOR_CHANGE_STARTED:
+		nl80211_color_change_announcement_started(drv);
+		break;
+	case NL80211_CMD_COLOR_CHANGE_ABORTED:
+		nl80211_color_change_announcement_aborted(drv);
+		break;
+	case NL80211_CMD_COLOR_CHANGE_COMPLETED:
+		nl80211_color_change_announcement_completed(drv);
+		break;
+#endif /* CONFIG_IEEE80211AX */
 	default:
 		wpa_dbg(drv->ctx, MSG_DEBUG, "nl80211: Ignored unknown event "
 			"(cmd=%d)", cmd);

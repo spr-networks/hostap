@@ -1,6 +1,6 @@
 /*
  * IEEE 802.11 RSN / WPA Authenticator
- * Copyright (c) 2004-2019, Jouni Malinen <j@w1.fi>
+ * Copyright (c) 2004-2022, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -731,16 +731,13 @@ static void wpa_free_sta_sm(struct wpa_state_machine *sm)
 {
 #ifdef CONFIG_P2P
 	if (WPA_GET_BE32(sm->ip_addr)) {
-		u32 start;
 		wpa_printf(MSG_DEBUG,
 			   "P2P: Free assigned IP address %u.%u.%u.%u from "
-			   MACSTR,
+			   MACSTR " (bit %u)",
 			   sm->ip_addr[0], sm->ip_addr[1],
 			   sm->ip_addr[2], sm->ip_addr[3],
-			   MAC2STR(sm->addr));
-		start = WPA_GET_BE32(sm->wpa_auth->conf.ip_addr_start);
-		bitfield_clear(sm->wpa_auth->ip_pool,
-			       WPA_GET_BE32(sm->ip_addr) - start);
+			   MAC2STR(sm->addr), sm->ip_addr_bit);
+		bitfield_clear(sm->wpa_auth->ip_pool, sm->ip_addr_bit);
 	}
 #endif /* CONFIG_P2P */
 	if (sm->GUpdateStationKeys) {
@@ -1481,6 +1478,12 @@ static void wpa_send_eapol_timeout(void *eloop_ctx, void *timeout_ctx)
 	struct wpa_authenticator *wpa_auth = eloop_ctx;
 	struct wpa_state_machine *sm = timeout_ctx;
 
+	if (sm->waiting_radius_psk) {
+		wpa_auth_logger(wpa_auth, sm->addr, LOGGER_DEBUG,
+				"Ignore EAPOL-Key timeout while waiting for RADIUS PSK");
+		return;
+	}
+
 	sm->pending_1_of_4_timeout = 0;
 	wpa_auth_logger(wpa_auth, sm->addr, LOGGER_DEBUG, "EAPOL-Key timeout");
 	sm->TimeoutEvt = true;
@@ -1844,6 +1847,14 @@ int wpa_auth_sm_event(struct wpa_state_machine *sm, enum wpa_event event)
 			break;
 		}
 
+		if (sm->ptkstart_without_success > 3) {
+			wpa_printf(MSG_INFO,
+				   "WPA: Multiple EAP reauth attempts without 4-way handshake completion, disconnect "
+				   MACSTR, MAC2STR(sm->addr));
+			sm->Disconnect = true;
+			break;
+		}
+
 		if (!sm->use_ext_key_id &&
 		    sm->wpa_auth->conf.wpa_deny_ptk0_rekey) {
 			wpa_printf(MSG_INFO,
@@ -2181,11 +2192,13 @@ SM_STATE(WPA_PTK, PTKSTART)
 {
 	u8 buf[2 + RSN_SELECTOR_LEN + PMKID_LEN], *pmkid = NULL;
 	size_t pmkid_len = 0;
+	u16 key_info;
 
 	SM_ENTRY_MA(WPA_PTK, PTKSTART, wpa_ptk);
 	sm->PTKRequest = false;
 	sm->TimeoutEvt = false;
 	sm->alt_snonce_valid = false;
+	sm->ptkstart_without_success++;
 
 	sm->TimeoutCtr++;
 	if (sm->TimeoutCtr > sm->wpa_auth->conf.wpa_pairwise_update_count) {
@@ -2283,8 +2296,10 @@ SM_STATE(WPA_PTK, PTKSTART)
 	}
 	if (!pmkid)
 		pmkid_len = 0;
-	wpa_send_eapol(sm->wpa_auth, sm,
-		       WPA_KEY_INFO_ACK | WPA_KEY_INFO_KEY_TYPE, NULL,
+	key_info = WPA_KEY_INFO_ACK | WPA_KEY_INFO_KEY_TYPE;
+	if (sm->pairwise_set && sm->wpa != WPA_VERSION_WPA)
+		key_info |= WPA_KEY_INFO_SECURE;
+	wpa_send_eapol(sm->wpa_auth, sm, key_info, NULL,
 		       sm->ANonce, pmkid, pmkid_len, 0, 0);
 }
 
@@ -2868,6 +2883,7 @@ int fils_set_tk(struct wpa_state_machine *sm)
 		wpa_printf(MSG_DEBUG, "FILS: Failed to set TK to the driver");
 		return -1;
 	}
+	sm->pairwise_set = true;
 	sm->tk_already_set = true;
 
 	wpa_auth_store_ptksa(sm->wpa_auth, sm->addr, sm->pairwise,
@@ -3017,6 +3033,19 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 			break;
 	}
 
+	if (!ok && wpa_key_mgmt_wpa_psk_no_sae(sm->wpa_key_mgmt) &&
+	    wpa_auth->conf.radius_psk && wpa_auth->cb->request_radius_psk &&
+	    !sm->waiting_radius_psk) {
+		wpa_printf(MSG_DEBUG, "No PSK available - ask RADIUS server");
+		wpa_auth->cb->request_radius_psk(wpa_auth->cb_ctx, sm->addr,
+						 sm->wpa_key_mgmt,
+						 sm->ANonce,
+						 sm->last_rx_eapol_key,
+						 sm->last_rx_eapol_key_len);
+		sm->waiting_radius_psk = 1;
+		return;
+	}
+
 	if (!ok) {
 		wpa_auth_logger(sm->wpa_auth, sm->addr, LOGGER_DEBUG,
 				"invalid MIC in msg 2/4 of 4-Way Handshake");
@@ -3141,12 +3170,14 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 		if (idx >= 0) {
 			u32 start = WPA_GET_BE32(wpa_auth->conf.ip_addr_start);
 			bitfield_set(wpa_auth->ip_pool, idx);
+			sm->ip_addr_bit = idx;
 			WPA_PUT_BE32(sm->ip_addr, start + idx);
 			wpa_printf(MSG_DEBUG,
 				   "P2P: Assigned IP address %u.%u.%u.%u to "
-				   MACSTR, sm->ip_addr[0], sm->ip_addr[1],
+				   MACSTR " (bit %u)",
+				   sm->ip_addr[0], sm->ip_addr[1],
 				   sm->ip_addr[2], sm->ip_addr[3],
-				   MAC2STR(sm->addr));
+				   MAC2STR(sm->addr), sm->ip_addr_bit);
 		}
 	}
 #endif /* CONFIG_P2P */
@@ -3702,6 +3733,8 @@ SM_STATE(WPA_PTK, PTKINITDONE)
 #ifdef CONFIG_IEEE80211R_AP
 	wpa_ft_push_pmk_r1(sm->wpa_auth, sm->addr);
 #endif /* CONFIG_IEEE80211R_AP */
+
+	sm->ptkstart_without_success = 0;
 }
 
 
@@ -3776,6 +3809,11 @@ SM_STEP(WPA_PTK)
 		} else if (wpa_auth_uses_sae(sm) && sm->pmksa) {
 			SM_ENTER(WPA_PTK, PTKSTART);
 #endif /* CONFIG_SAE */
+		} else if (wpa_key_mgmt_wpa_psk_no_sae(sm->wpa_key_mgmt) &&
+			   wpa_auth->conf.radius_psk) {
+			wpa_printf(MSG_DEBUG,
+				   "INITPSK: No PSK yet available for STA - use RADIUS later");
+			SM_ENTER(WPA_PTK, PTKSTART);
 		} else {
 			wpa_auth_logger(wpa_auth, sm->addr, LOGGER_INFO,
 					"no PSK configured for the STA");
@@ -4826,16 +4864,17 @@ int wpa_auth_pmksa_add_preauth(struct wpa_authenticator *wpa_auth,
 
 
 int wpa_auth_pmksa_add_sae(struct wpa_authenticator *wpa_auth, const u8 *addr,
-			   const u8 *pmk, const u8 *pmkid)
+			   const u8 *pmk, size_t pmk_len, const u8 *pmkid,
+			   int akmp)
 {
 	if (wpa_auth->conf.disable_pmksa_caching)
 		return -1;
 
-	wpa_hexdump_key(MSG_DEBUG, "RSN: Cache PMK from SAE", pmk, PMK_LEN);
-	if (pmksa_cache_auth_add(wpa_auth->pmksa, pmk, PMK_LEN, pmkid,
-				 NULL, 0,
-				 wpa_auth->addr, addr, 0, NULL,
-				 WPA_KEY_MGMT_SAE))
+	wpa_hexdump_key(MSG_DEBUG, "RSN: Cache PMK from SAE", pmk, pmk_len);
+	if (!akmp)
+		akmp = WPA_KEY_MGMT_SAE;
+	if (pmksa_cache_auth_add(wpa_auth->pmksa, pmk, pmk_len, pmkid,
+				 NULL, 0, wpa_auth->addr, addr, 0, NULL, akmp))
 		return 0;
 
 	return -1;
@@ -4913,13 +4952,14 @@ int wpa_auth_pmksa_list_mesh(struct wpa_authenticator *wpa_auth, const u8 *addr,
 
 struct rsn_pmksa_cache_entry *
 wpa_auth_pmksa_create_entry(const u8 *aa, const u8 *spa, const u8 *pmk,
+			    size_t pmk_len, int akmp,
 			    const u8 *pmkid, int expiration)
 {
 	struct rsn_pmksa_cache_entry *entry;
 	struct os_reltime now;
 
-	entry = pmksa_cache_auth_create_entry(pmk, PMK_LEN, pmkid, NULL, 0, aa,
-					      spa, 0, NULL, WPA_KEY_MGMT_SAE);
+	entry = pmksa_cache_auth_create_entry(pmk, pmk_len, pmkid, NULL, 0, aa,
+					      spa, 0, NULL, akmp);
 	if (!entry)
 		return NULL;
 
@@ -5233,7 +5273,8 @@ int wpa_auth_uses_ft_sae(struct wpa_state_machine *sm)
 {
 	if (!sm)
 		return 0;
-	return sm->wpa_key_mgmt == WPA_KEY_MGMT_FT_SAE;
+	return sm->wpa_key_mgmt == WPA_KEY_MGMT_FT_SAE ||
+		sm->wpa_key_mgmt == WPA_KEY_MGMT_FT_SAE_EXT_KEY;
 }
 
 
@@ -5693,3 +5734,28 @@ void wpa_auth_set_ocv_override_freq(struct wpa_authenticator *wpa_auth,
 }
 
 #endif /* CONFIG_TESTING_OPTIONS */
+
+
+void wpa_auth_sta_radius_psk_resp(struct wpa_state_machine *sm, bool success)
+{
+	if (!sm->waiting_radius_psk) {
+		wpa_printf(MSG_DEBUG,
+			   "Ignore RADIUS PSK response for " MACSTR
+			   " that did not wait one",
+			   MAC2STR(sm->addr));
+		return;
+	}
+
+	wpa_printf(MSG_DEBUG, "RADIUS PSK response for " MACSTR " (%s)",
+		   MAC2STR(sm->addr), success ? "success" : "fail");
+	sm->waiting_radius_psk = 0;
+
+	if (success) {
+		/* Try to process the EAPOL-Key msg 2/4 again */
+		sm->EAPOLKeyReceived = true;
+	} else {
+		sm->Disconnect = true;
+	}
+
+	eloop_register_timeout(0, 0, wpa_sm_call_step, sm, NULL);
+}

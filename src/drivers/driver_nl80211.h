@@ -180,6 +180,7 @@ struct wpa_driver_nl80211_data {
 	unsigned int unsol_bcast_probe_resp:1;
 	unsigned int qca_do_acs:1;
 	unsigned int brcm_do_acs:1;
+	unsigned int uses_6ghz:1;
 
 	u64 vendor_scan_cookie;
 	u64 remain_on_chan_cookie;
@@ -232,7 +233,6 @@ struct wpa_driver_nl80211_data {
 	bool roam_indication_done;
 	u8 *pending_roam_data;
 	size_t pending_roam_data_len;
-	struct os_reltime pending_roam_ind_time;
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 };
 

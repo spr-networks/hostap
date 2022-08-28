@@ -181,6 +181,26 @@ struct wpa_cred {
 	char *milenage;
 
 	/**
+	 * imsi_privacy_cert - IMSI privacy certificate
+	 *
+	 * This field is used with EAP-SIM/AKA/AKA' to encrypt the permanent
+	 * identity (IMSI) to improve privacy. The referenced PEM-encoded
+	 * X.509v3 certificate needs to include a 2048-bit RSA public key and
+	 * this is from the operator who authenticates the SIM/USIM.
+	 */
+	char *imsi_privacy_cert;
+
+	/**
+	 * imsi_privacy_attr - IMSI privacy attribute
+	 *
+	 * This field is used to help the EAP-SIM/AKA/AKA' server to identify
+	 * the used certificate (and as such, the matching private key). This
+	 * is set to an attribute in name=value format if the operator needs
+	 * this information.
+	 */
+	char *imsi_privacy_attr;
+
+	/**
 	 * engine - Use an engine for private key operations
 	 */
 	int engine;
@@ -1596,6 +1616,25 @@ struct wpa_config {
 	 * dpp_mud_url - MUD URL for Enrollee's DPP Configuration Request
 	 */
 	char *dpp_mud_url;
+
+	/**
+	 * dpp_extra_conf_req_name - JSON node name of additional data for
+	 * Enrollee's DPP Configuration Request
+	 */
+	char *dpp_extra_conf_req_name;
+
+	/**
+	 * dpp_extra_conf_req_value - JSON node data of additional data for
+	 * Enrollee's DPP Configuration Request
+	 */
+	char *dpp_extra_conf_req_value;
+
+	/* dpp_connector_privacy_default - Default valur for Connector privacy
+	 *
+	 * This value is used as the default for the dpp_connector_privacy
+	 * network parameter for all new networks provisioned using DPP.
+	 */
+	int dpp_connector_privacy_default;
 
 	/**
 	 * coloc_intf_reporting - Colocated interference reporting

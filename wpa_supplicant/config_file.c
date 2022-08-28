@@ -297,8 +297,8 @@ struct wpa_config * wpa_config_read(const char *name, struct wpa_config *cfgp)
 	struct wpa_ssid *ssid, *tail, *head;
 	struct wpa_cred *cred, *cred_tail, *cred_head;
 	struct wpa_config *config;
-	int id = 0;
-	int cred_id = 0;
+	static int id = 0;
+	static int cred_id = 0;
 
 	if (name == NULL)
 		return NULL;
@@ -699,7 +699,6 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 	STR(client_cert);
 	STR(private_key);
 	STR(private_key_passwd);
-	STR(dh_file);
 	STR(subject_match);
 	STR(check_cert_subject);
 	STR(altsubject_match);
@@ -710,7 +709,6 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 	STR(client_cert2);
 	STR(private_key2);
 	STR(private_key2_passwd);
-	STR(dh_file2);
 	STR(subject_match2);
 	STR(check_cert_subject2);
 	STR(altsubject_match2);
@@ -721,7 +719,6 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 	STR(machine_client_cert);
 	STR(machine_private_key);
 	STR(machine_private_key_passwd);
-	STR(machine_dh_file);
 	STR(machine_subject_match);
 	STR(machine_check_cert_subject);
 	STR(machine_altsubject_match);
@@ -836,6 +833,7 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 	STR(dpp_csign);
 	STR(dpp_pp_key);
 	INT(dpp_pfs);
+	INT(dpp_connector_privacy);
 #endif /* CONFIG_DPP */
 	INT(owe_group);
 	INT(owe_only);
@@ -1039,6 +1037,13 @@ static void wpa_config_write_cred(FILE *f, struct wpa_cred *cred)
 		fprintf(f, "\tcert_id=\"%s\"\n", cred->cert_id);
 	if (cred->ca_cert_id)
 		fprintf(f, "\tca_cert_id=\"%s\"\n", cred->ca_cert_id);
+
+	if (cred->imsi_privacy_cert)
+		fprintf(f, "\timsi_privacy_cert=\"%s\"\n",
+			cred->imsi_privacy_cert);
+	if (cred->imsi_privacy_attr)
+		fprintf(f, "\timsi_privacy_attr=\"%s\"\n",
+			cred->imsi_privacy_attr);
 }
 
 
@@ -1539,6 +1544,19 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
 	if (config->dpp_config_processing)
 		fprintf(f, "dpp_config_processing=%d\n",
 			config->dpp_config_processing);
+	if (config->dpp_name)
+		fprintf(f, "dpp_name=%s\n", config->dpp_name);
+	if (config->dpp_mud_url)
+		fprintf(f, "dpp_mud_url=%s\n", config->dpp_mud_url);
+	if (config->dpp_extra_conf_req_name)
+		fprintf(f, "dpp_extra_conf_req_name=%s\n",
+			config->dpp_extra_conf_req_name);
+	if (config->dpp_extra_conf_req_value)
+		fprintf(f, "dpp_extra_conf_req_value=%s\n",
+			config->dpp_extra_conf_req_value);
+	if (config->dpp_connector_privacy_default)
+		fprintf(f, "dpp_connector_privacy_default=%d\n",
+			config->dpp_connector_privacy_default);
 	if (config->coloc_intf_reporting)
 		fprintf(f, "coloc_intf_reporting=%d\n",
 			config->coloc_intf_reporting);

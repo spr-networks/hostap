@@ -39,7 +39,7 @@ def check_dpp_capab(dev, brainpool=False, min_ver=1):
         raise HwsimSkip("DPP not supported")
     if brainpool:
         tls = dev.request("GET tls_library")
-        if not tls.startswith("OpenSSL") or "run=BoringSSL" in tls:
+        if (not tls.startswith("OpenSSL") or "run=BoringSSL" in tls) and not tls.startswith("wolfSSL"):
             raise HwsimSkip("Crypto library does not support Brainpool curves: " + tls)
     capa = dev.request("GET_CAPABILITY dpp")
     ver = 1
@@ -65,6 +65,10 @@ def test_dpp_qr_code_parsing(dev, apdev):
              "DPP:C:81/1,81/2,81/3,81/4,81/5,81/6,81/7,81/8,81/9,81/10,81/11,81/12,81/13,82/14,83/1,83/2,83/3,83/4,83/5,83/6,83/7,83/8,83/9,84/5,84/6,84/7,84/8,84/9,84/10,84/11,84/12,84/13,115/36;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADM2206avxHJaHXgLMkq/24e0rsrfMP9K1Tm8gx+ovP0I=;;",
              "DPP:C:81/1,2,3,4,5,6,7,8,9,10,11,12,13,82/14,83/1,2,3,4,5,6,7,8,9,84/5,6,7,8,9,10,11,12,13,115/36;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADM2206avxHJaHXgLMkq/24e0rsrfMP9K1Tm8gx+ovP0I=;;",
              "DPP:C:81/1,2,3;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADM2206avxHJaHXgLMkq/24e0rsrfMP9K1Tm8gx+ovP0I=;;",
+             "DPP:H:192.168.1.1;M:010203040506;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;",
+             "DPP:H:192.168.1.1:12345;M:010203040506;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;",
+             "DPP:H:fe80::1234:5678:9abc:def0;M:010203040506;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;",
+             "DPP:H:[fe80::1234:5678:9abc:def0]:12345;M:010203040506;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;",
              "DPP:I:SN=4774LH2b4044;M:010203040506;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;",
              "DPP:I:;M:010203040506;K:MDkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDIgADURzxmttZoIRIPWGoQMV00XHWCAQIhXruVWOz0NjlkIA=;;"]
     for uri in tests:
@@ -94,7 +98,7 @@ def test_dpp_qr_code_parsing(dev, apdev):
             raise Exception("Accepted invalid QR Code: " + t)
 
     logger.info("ID: " + str(id))
-    if id[0] == id[1] or id[0] == id[2] or id[1] == id[2]:
+    if len(id) != len(set(id)):
         raise Exception("Duplicate ID returned")
 
     if "FAIL" not in dev[0].request("DPP_BOOTSTRAP_REMOVE 12345678"):
@@ -145,6 +149,57 @@ def test_dpp_uri_version(dev, apdev):
     logger.info("Parsed URI info:\n" + info)
     if "version=0" not in info.splitlines():
         raise Exception("Unexpected version information (without indication)")
+
+def test_dpp_uri_supported_curves(dev, apdev):
+    """DPP URI supported curves"""
+    check_dpp_capab(dev[0], min_ver=3)
+
+    tests = [("P-256", "1"),
+             ("P-384", "2"),
+             ("P-521", "4"),
+             ("BP-256", "8"),
+             ("BP-384", "01"),
+             ("BP-512", "02"),
+             ("P-256:P-384:P-521", "7"),
+             ("P-256:BP-512", "12"),
+             ("P-256:P-384:BP-384", "31"),
+             ("P-256:P-384:P-521:BP-256:BP-384:BP-512", "f3")]
+    for t in tests:
+        logger.info("Supported list: " + t[0])
+        id0 = dev[0].dpp_bootstrap_gen(supported_curves=t[0])
+        uri = dev[0].request("DPP_BOOTSTRAP_GET_URI %d" % id0)
+        logger.info("Generated URI: " + uri)
+        if ";B:%s;" % t[1] not in uri:
+            raise Exception("Supported curves(1) not indicated correctly: " + uri)
+
+        id1 = dev[0].dpp_qr_code(uri)
+        uri = dev[0].request("DPP_BOOTSTRAP_GET_URI %d" % id1)
+        info = dev[0].request("DPP_BOOTSTRAP_INFO %d" % id1)
+        logger.info("Parsed URI info:\n" + info)
+        if "supp_curves=" + t[0] not in info.splitlines():
+            raise Exception("supp_curves not indicated correctly in info")
+
+def test_dpp_uri_host(dev, apdev):
+    """DPP URI host"""
+    check_dpp_capab(dev[0], min_ver=3)
+
+    tests = [("192.168.1.1", "192.168.1.1 8908"),
+             ("192.168.1.1:12345", "192.168.1.1 12345"),
+             ("fe80::1234:5678:9abc:def0", "fe80::1234:5678:9abc:def0 8908"),
+             ("[fe80::1234:5678:9abc:def0]:12345",
+              "fe80::1234:5678:9abc:def0 12345")]
+    for t in tests:
+        logger.info("host: " + t[0])
+        id0 = dev[0].dpp_bootstrap_gen(host=t[0])
+        uri = dev[0].request("DPP_BOOTSTRAP_GET_URI %d" % id0)
+        logger.info("Generated URI: " + uri)
+        if ";H:%s;" % t[0] not in uri:
+            raise Exception("host not indicated correctly: " + uri)
+
+        info = dev[0].request("DPP_BOOTSTRAP_INFO %d" % id0)
+        logger.info("Parsed URI info:\n" + info)
+        if "host=" + t[1] not in info.splitlines():
+            raise Exception("host not indicated correctly in info")
 
 def test_dpp_qr_code_parsing_fail(dev, apdev):
     """DPP QR Code parsing local failure"""
@@ -981,6 +1036,28 @@ def test_dpp_config_dpp_gen_expired_key(dev, apdev):
     run_dpp_qr_code_auth_unicast(dev, apdev, "prime256v1",
                                  init_extra="conf=sta-dpp expiry=%d" % (time.time() - 10),
                                  require_conf_failure=True,
+                                 configurator=True)
+
+def test_dpp_config_dpp_gen_3rd_party(dev, apdev):
+    """Generate DPP Config Object for DPP network with 3rd party information"""
+    check_dpp_capab(dev[0])
+    check_dpp_capab(dev[1])
+    try:
+        dev[0].set("dpp_extra_conf_req_name", "org.example")
+        json = '{"c":1,"d":"test"}'
+        dev[0].set("dpp_extra_conf_req_value", json)
+        run_dpp_config_dpp_gen_3rd_party(dev, apdev)
+    finally:
+        dev[0].set("dpp_extra_conf_req_name", "", allow_fail=True)
+        dev[0].set("dpp_extra_conf_req_value", "", allow_fail=True)
+
+def run_dpp_config_dpp_gen_3rd_party(dev, apdev):
+    extra = "conf_extra_name=org.example conf_extra_value="
+    json = '{"a":1,"b":"test"}'
+    extra += binascii.hexlify(json.encode()).decode()
+    run_dpp_qr_code_auth_unicast(dev, apdev, "prime256v1",
+                                 init_extra="conf=sta-dpp " + extra,
+                                 require_conf_success=True,
                                  configurator=True)
 
 def test_dpp_config_dpp_override_prime256v1(dev, apdev):
@@ -2670,8 +2747,7 @@ def test_dpp_pkex_hostapd_errors(dev, apdev):
         raise Exception("Failed to add PKEX responder")
     if "OK" not in hapd.request("DPP_PKEX_REMOVE " + res):
         raise Exception("Failed to remove PKEX responder")
-    if "FAIL" not in hapd.request("DPP_PKEX_REMOVE " + res):
-        raise Exception("Unknown PKEX responder removal accepted")
+    hapd.request("DPP_PKEX_REMOVE " + res)
 
     res = hapd.request("DPP_PKEX_ADD own=%d code=foo" % id0)
     if "FAIL" in res:
@@ -2738,6 +2814,7 @@ def test_dpp_hostapd_configurator(dev, apdev):
 
 def test_dpp_hostapd_configurator_enrollee_v1(dev, apdev):
     """DPP with hostapd as configurator/initiator with v1 enrollee"""
+    check_dpp_capab(dev[0])
     dev[0].set("dpp_version_override", "1")
     run_dpp_hostapd_configurator(dev, apdev)
 
@@ -5357,13 +5434,18 @@ def test_dpp_controller_relay_chirp(dev, apdev, params):
         dev[0].set("dpp_config_processing", "0", allow_fail=True)
         dev[1].request("DPP_CONTROLLER_STOP")
 
-def run_dpp_controller_relay(dev, apdev, params, chirp=False):
+def test_dpp_controller_relay_discover(dev, apdev, params):
+    """DPP Controller/Relay with need to discover Controller"""
+    try:
+        run_dpp_controller_relay(dev, apdev, params, chirp=True, discover=True)
+    finally:
+        dev[0].set("dpp_config_processing", "0", allow_fail=True)
+        dev[1].request("DPP_CONTROLLER_STOP")
+
+def run_dpp_controller_relay(dev, apdev, params, chirp=False, discover=False):
     check_dpp_capab(dev[0], min_ver=2)
     check_dpp_capab(dev[1], min_ver=2)
-    prefix = "dpp_controller_relay"
-    if chirp:
-        prefix += "_chirp"
-    cap_lo = os.path.join(params['logdir'], prefix + ".lo.pcap")
+    cap_lo = params['prefix'] + ".lo.pcap"
 
     wt = WlantestCapture('lo', cap_lo)
 
@@ -5387,8 +5469,11 @@ def run_dpp_controller_relay(dev, apdev, params, chirp=False):
 
     # Relay
     params = {"ssid": "unconfigured",
-              "channel": "6",
-              "dpp_controller": "ipaddr=127.0.0.1 pkhash=" + pkhash}
+              "channel": "6"}
+    if discover:
+        params["dpp_relay_port"] = "11111"
+    else:
+        params["dpp_controller"] = "ipaddr=127.0.0.1 pkhash=" + pkhash
     if chirp:
         params["channel"] = "11"
         params["dpp_configurator_connectivity"] = "1"
@@ -5425,9 +5510,18 @@ def run_dpp_controller_relay(dev, apdev, params, chirp=False):
             raise Exception("Unexpected DPP frame received: " + ev)
     else:
         dev[0].dpp_auth_init(uri=uri_c, role="enrollee")
+    if discover:
+        ev = relay.wait_event(["DPP-RELAY-NEEDS-CONTROLLER"], timeout=30)
+        if ev is None:
+            raise Exception("Relay did not indicate need for a Controller")
+        cmd = "DPP_RELAY_ADD_CONTROLLER 127.0.0.1 " + pkhash
+        if "OK" not in relay.request(cmd):
+            raise Exception("Could not add Controller to Relay")
+
     wait_auth_success(dev[1], dev[0], configurator=dev[1], enrollee=dev[0],
                       allow_enrollee_failure=True,
-                      allow_configurator_failure=True)
+                      allow_configurator_failure=True,
+                      timeout=100 if discover else 5)
     ev = dev[0].wait_event(["DPP-NETWORK-ID"], timeout=1)
     if ev is None:
         raise Exception("DPP network id not reported")
@@ -5447,6 +5541,116 @@ def run_dpp_controller_relay(dev, apdev, params, chirp=False):
     if network == network2:
         raise Exception("Network ID did not change")
     dev[0].wait_connected()
+
+    time.sleep(0.5)
+    wt.close()
+
+def test_dpp_controller_init_through_relay(dev, apdev, params):
+    """DPP Controller initiating through Relay"""
+    try:
+        run_dpp_controller_init_through_relay(dev, apdev, params)
+    finally:
+        dev[0].set("dpp_config_processing", "0", allow_fail=True)
+        dev[1].request("DPP_CONTROLLER_STOP")
+
+def test_dpp_controller_init_through_relay_dynamic(dev, apdev, params):
+    """DPP Controller initiating through Relay (dynamic addition)"""
+    try:
+        run_dpp_controller_init_through_relay(dev, apdev, params, dynamic=True)
+    finally:
+        dev[0].set("dpp_config_processing", "0", allow_fail=True)
+        dev[1].request("DPP_CONTROLLER_STOP")
+
+def test_dpp_controller_init_through_relay_add(dev, apdev, params):
+    """DPP Controller initiating through Relay (add Controller connection)"""
+    try:
+        run_dpp_controller_init_through_relay(dev, apdev, params, add=True)
+    finally:
+        dev[0].set("dpp_config_processing", "0", allow_fail=True)
+        dev[1].request("DPP_CONTROLLER_STOP")
+
+def run_dpp_controller_init_through_relay(dev, apdev, params, dynamic=False,
+                                          add=False):
+    check_dpp_capab(dev[0], min_ver=2)
+    check_dpp_capab(dev[1], min_ver=2)
+    cap_lo = os.path.join(params['prefix'], ".lo.pcap")
+
+    wt = WlantestCapture('lo', cap_lo)
+
+    # Controller
+    conf_id = dev[1].dpp_configurator_add()
+    dev[1].set("dpp_configurator_params",
+               "conf=sta-dpp configurator=%d" % conf_id)
+    if not dynamic:
+        id_c = dev[1].dpp_bootstrap_gen()
+        res = dev[1].request("DPP_BOOTSTRAP_INFO %d" % id_c)
+        pkhash = None
+        for line in res.splitlines():
+            name, value = line.split('=')
+            if name == "pkhash":
+                pkhash = value
+                break
+        if not pkhash:
+            raise Exception("Could not fetch public key hash from Controller")
+    if "OK" not in dev[1].request("DPP_CONTROLLER_START"):
+        raise Exception("Failed to start Controller")
+
+    # Relay
+    port = 11111
+    params = {"ssid": "unconfigured",
+              "channel": "6",
+              "dpp_relay_port": str(port)}
+    if not dynamic and not add:
+        params["dpp_controller"] = "ipaddr=127.0.0.1 pkhash=" + pkhash
+    relay = hostapd.add_ap(apdev[0], params)
+    check_dpp_capab(relay)
+
+    # Enroll Relay to the network
+    # TODO: Do this over TCP once direct Enrollee-over-TCP case is supported
+    id_h = relay.dpp_bootstrap_gen(chan="81/6", mac=True)
+    uri_r = relay.request("DPP_BOOTSTRAP_GET_URI %d" % id_h)
+    dev[1].dpp_auth_init(uri=uri_r, conf="ap-dpp", configurator=conf_id)
+    wait_auth_success(relay, dev[1], configurator=dev[1], enrollee=relay)
+    update_hapd_config(relay)
+
+    dev[0].flush_scan_cache()
+
+    # Initiate from Controller with broadcast DPP Authentication Request
+    dev[0].set("dpp_config_processing", "2")
+    dev[0].dpp_listen(2437)
+    id_e = dev[0].dpp_bootstrap_gen()
+    uri_e = dev[0].request("DPP_BOOTSTRAP_GET_URI %d" % id_e)
+    dev[1].dpp_auth_init(uri=uri_e, conf="sta-dpp", configurator=conf_id,
+                         tcp_addr="127.0.0.1", tcp_port=str(port))
+    wait_auth_success(dev[1], dev[0], configurator=dev[1], enrollee=dev[0],
+                      allow_enrollee_failure=True,
+                      allow_configurator_failure=True)
+    ev = dev[0].wait_event(["DPP-NETWORK-ID"], timeout=1)
+    if ev is None:
+        raise Exception("DPP network id not reported")
+    network = int(ev.split(' ')[1])
+    dev[0].wait_connected()
+    dev[0].dump_monitor()
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+    dev[0].dump_monitor()
+
+    if add:
+        cmd = "DPP_RELAY_ADD_CONTROLLER 127.0.0.1 " + pkhash
+        if "OK" not in relay.request(cmd):
+            raise Exception("Could not add Controller to Relay")
+    if not dynamic:
+        if "OK" not in dev[0].request("DPP_RECONFIG %s" % network):
+            raise Exception("Failed to start reconfiguration")
+        ev = dev[0].wait_event(["DPP-NETWORK-ID"], timeout=15)
+        if ev is None:
+            raise Exception("DPP network id not reported for reconfiguration")
+        network2 = int(ev.split(' ')[1])
+        if network == network2:
+            raise Exception("Network ID did not change")
+        dev[0].wait_connected()
+    if add:
+        relay.request("DPP_RELAY_REMOVE_CONTROLLER 127.0.0.1")
 
     time.sleep(0.5)
     wt.close()
@@ -6398,6 +6602,10 @@ def test_dpp_chirp_ap_5g(dev, apdev):
         idc = dev[0].dpp_qr_code(uri)
         dev[0].dpp_bootstrap_set(idc, conf="ap-dpp", configurator=conf_id)
         dev[0].dpp_listen(5200)
+        # Workaround for some strange issues in the Authentication Request frame
+        # not getting transmitted. An extra wait of one second here seems to
+        # avoid that?!
+        time.sleep(1)
         if "OK" not in hapd.request("DPP_CHIRP own=%d iter=5" % id_h):
             raise Exception("DPP_CHIRP failed")
         wait_auth_success(hapd, dev[0], configurator=dev[0], enrollee=hapd,
@@ -7292,3 +7500,18 @@ def test_dpp_qr_code_config_event_responder(dev, apdev):
     time.sleep(0.01)
     dev[0].dump_monitor()
     dev[1].dump_monitor()
+
+def test_dpp_discard_public_action(dev, apdev):
+    """DPP and discarding Public Action frames"""
+    check_dpp_capab(dev[0])
+    check_dpp_capab(dev[1])
+    id0 = dev[0].dpp_bootstrap_gen(chan="81/1")
+    uri0 = dev[0].request("DPP_BOOTSTRAP_GET_URI %d" % id0)
+    dev[0].dpp_listen(2412)
+    dev[1].set("dpp_discard_public_action", "1")
+    dev[1].dpp_auth_init(uri=uri0)
+    ev = dev[0].wait_event(["DPP-FAIL"], timeout=5)
+    if ev is None:
+        raise Exception("Failure not reported")
+    if "No Auth Confirm received" not in ev:
+        raise Exception("Unexpected failure reason: " + ev)

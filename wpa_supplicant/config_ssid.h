@@ -561,7 +561,7 @@ struct wpa_ssid {
 
 	int he;
 
-	int max_oper_chwidth;
+	enum oper_chan_width max_oper_chwidth;
 
 	unsigned int vht_center_freq1;
 	unsigned int vht_center_freq2;
@@ -1063,6 +1063,14 @@ struct wpa_ssid {
 	 * configuration) to track state of the DPP PFS fallback mechanism.
 	 */
 	int dpp_pfs_fallback;
+
+	/**
+	 * dpp_connector_privacy - Network introduction type
+	 * 0: unprotected variant from DPP R1
+	 * 1: privacy protecting (station Connector encrypted) variant from
+	 *    DPP R3
+	 */
+	int dpp_connector_privacy;
 
 	/**
 	 * owe_group - OWE DH Group

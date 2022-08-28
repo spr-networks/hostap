@@ -76,6 +76,17 @@ struct hapd_interfaces {
 
 #ifdef CONFIG_DPP
 	struct dpp_global *dpp;
+#ifdef CONFIG_DPP3
+	struct os_reltime dpp_pb_time;
+	struct os_reltime dpp_pb_announce_time;
+	struct dpp_pb_info dpp_pb[DPP_PB_INFO_COUNT];
+	struct dpp_bootstrap_info *dpp_pb_bi;
+	u8 dpp_pb_c_nonce[DPP_MAX_NONCE_LEN];
+	u8 dpp_pb_resp_hash[SHA256_MAC_LEN];
+	struct os_reltime dpp_pb_last_resp;
+	bool dpp_pb_result_indicated;
+	char *dpp_pb_cmd;
+#endif /* CONFIG_DPP3 */
 #endif /* CONFIG_DPP */
 
 #ifdef CONFIG_CTRL_IFACE_UDP
@@ -208,6 +219,7 @@ struct hostapd_data {
 
 	void *ssl_ctx;
 	void *eap_sim_db_priv;
+	struct crypto_rsa_key *imsi_privacy_key;
 	struct radius_server_data *radius_srv;
 	struct dl_list erp_keys; /* struct eap_server_erp_key */
 
@@ -295,6 +307,17 @@ struct hostapd_data {
 	unsigned int cs_c_off_ecsa_beacon;
 	unsigned int cs_c_off_ecsa_proberesp;
 
+#ifdef CONFIG_IEEE80211AX
+	bool cca_in_progress;
+	u8 cca_count;
+	u8 cca_color;
+	unsigned int cca_c_off_beacon;
+	unsigned int cca_c_off_proberesp;
+	struct os_reltime first_color_collision;
+	struct os_reltime last_color_collision;
+	u64 color_collision_bitmap;
+#endif /* CONFIG_IEEE80211AX */
+
 #ifdef CONFIG_P2P
 	struct p2p_data *p2p;
 	struct p2p_group *p2p_group;
@@ -312,6 +335,7 @@ struct hostapd_data {
 #ifdef CONFIG_PROXYARP
 	struct l2_packet_data *sock_dhcp;
 	struct l2_packet_data *sock_ndisc;
+	bool x_snoop_initialized;
 #endif /* CONFIG_PROXYARP */
 #ifdef CONFIG_MESH
 	int num_plinks;
@@ -388,6 +412,7 @@ struct hostapd_data {
 	struct dpp_pkex *dpp_pkex;
 	struct dpp_bootstrap_info *dpp_pkex_bi;
 	char *dpp_pkex_code;
+	size_t dpp_pkex_code_len;
 	char *dpp_pkex_identifier;
 	enum dpp_pkex_ver dpp_pkex_ver;
 	char *dpp_pkex_auth_cmd;
@@ -408,6 +433,7 @@ struct hostapd_data {
 	int dpp_chirp_round;
 	int dpp_chirp_scan_done;
 	int dpp_chirp_listen;
+	struct os_reltime dpp_relay_last_needs_ctrl;
 #endif /* CONFIG_DPP2 */
 #ifdef CONFIG_TESTING_OPTIONS
 	char *dpp_config_obj_override;
@@ -663,6 +689,9 @@ void hostapd_cleanup_cs_params(struct hostapd_data *hapd);
 void hostapd_periodic_iface(struct hostapd_iface *iface);
 int hostapd_owe_trans_get_info(struct hostapd_data *hapd);
 void hostapd_ocv_check_csa_sa_query(void *eloop_ctx, void *timeout_ctx);
+
+void hostapd_switch_color(struct hostapd_data *hapd, u64 bitmap);
+void hostapd_cleanup_cca_params(struct hostapd_data *hapd);
 
 /* utils.c */
 int hostapd_register_probereq_cb(struct hostapd_data *hapd,

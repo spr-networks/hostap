@@ -257,6 +257,8 @@ static u8 * wpa_ft_gen_req_ies(struct wpa_sm *sm, size_t *len,
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_PSK);
 	else if (sm->key_mgmt == WPA_KEY_MGMT_FT_SAE)
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_SAE);
+	else if (sm->key_mgmt == WPA_KEY_MGMT_FT_SAE_EXT_KEY)
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY);
 #ifdef CONFIG_FILS
 	else if (sm->key_mgmt == WPA_KEY_MGMT_FT_FILS_SHA256)
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_FILS_SHA256);
@@ -467,6 +469,7 @@ static int wpa_ft_install_ptk(struct wpa_sm *sm, const u8 *bssid)
 		wpa_printf(MSG_WARNING, "FT: Failed to set PTK to the driver");
 		return -1;
 	}
+	sm->tk_set = true;
 
 	wpa_sm_store_ptk(sm, sm->bssid, sm->pairwise_cipher,
 			 sm->dot11RSNAConfigPMKLifetime, &sm->ptk);
