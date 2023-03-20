@@ -1310,8 +1310,14 @@ static int dpp_configuration_parse_helper(struct dpp_authentication *auth,
 		auth->conf_sta = conf_sta;
 		auth->conf_ap = conf_ap;
 	} else if (idx == 1) {
-		auth->conf2_sta = conf_sta;
-		auth->conf2_ap = conf_ap;
+		if (!auth->conf_sta)
+			auth->conf_sta = conf_sta;
+		else
+			auth->conf2_sta = conf_sta;
+		if (!auth->conf_ap)
+			auth->conf_ap = conf_ap;
+		else
+			auth->conf2_ap = conf_ap;
 	} else {
 		goto fail;
 	}
@@ -1342,7 +1348,7 @@ static int dpp_configuration_parse(struct dpp_authentication *auth,
 		goto fail;
 	os_memcpy(tmp, cmd, len);
 	tmp[len] = '\0';
-	res = dpp_configuration_parse_helper(auth, cmd, 0);
+	res = dpp_configuration_parse_helper(auth, tmp, 0);
 	str_clear_free(tmp);
 	if (res)
 		goto fail;
@@ -4141,7 +4147,7 @@ dpp_peer_intro(struct dpp_introduction *intro, const char *own_connector,
 	       const u8 *net_access_key, size_t net_access_key_len,
 	       const u8 *csign_key, size_t csign_key_len,
 	       const u8 *peer_connector, size_t peer_connector_len,
-	       os_time_t *expiry)
+	       os_time_t *expiry, u8 *peer_key_hash)
 {
 	struct json_token *root = NULL, *netkey, *token;
 	struct json_token *own_root = NULL;
@@ -4263,6 +4269,9 @@ dpp_peer_intro(struct dpp_introduction *intro, const char *own_connector,
 		goto fail;
 	}
 #endif /* CONFIG_DPP3 */
+
+	if (peer_key_hash)
+		dpp_get_pubkey_hash(intro->peer_key, peer_key_hash);
 
 	ret = DPP_STATUS_OK;
 fail:
@@ -5031,6 +5040,24 @@ void dpp_global_deinit(struct dpp_global *dpp)
 {
 	dpp_global_clear(dpp);
 	os_free(dpp);
+}
+
+
+void dpp_notify_auth_success(struct dpp_authentication *auth, int initiator)
+{
+	u8 hash[SHA256_MAC_LEN];
+	char hex[SHA256_MAC_LEN * 2 + 1];
+
+	if (auth->peer_protocol_key) {
+		dpp_get_pubkey_hash(auth->peer_protocol_key, hash);
+		wpa_snprintf_hex(hex, sizeof(hex), hash, sizeof(hash));
+	} else {
+		hex[0] = '\0';
+	}
+	wpa_msg(auth->msg_ctx, MSG_INFO,
+		DPP_EVENT_AUTH_SUCCESS "init=%d pkhash=%s own=%d peer=%d",
+		initiator, hex, auth->own_bi ? (int) auth->own_bi->id : -1,
+		auth->peer_bi ? (int) auth->peer_bi->id : -1);
 }
 
 

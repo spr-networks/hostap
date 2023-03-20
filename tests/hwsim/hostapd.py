@@ -282,6 +282,7 @@ class Hostapd:
             raise Exception("AP did not report STA connection")
         if addr and addr not in ev:
             raise Exception("Unexpected STA address in connection event: " + ev)
+        return ev
 
     def wait_ptkinitdone(self, addr, timeout=2):
         while timeout > 0:
@@ -702,6 +703,18 @@ def terminate(apdev):
         logger.info("Terminating hostapd")
     hapd_global = HostapdGlobal(apdev)
     hapd_global.terminate()
+
+def wpa3_params(ssid=None, password=None, wpa_key_mgmt="SAE",
+                ieee80211w="2"):
+    params = {"wpa": "2",
+              "wpa_key_mgmt": wpa_key_mgmt,
+              "ieee80211w": ieee80211w,
+              "rsn_pairwise": "CCMP"}
+    if ssid:
+        params["ssid"] = ssid
+    if password:
+        params["sae_password"] = password
+    return params
 
 def wpa2_params(ssid=None, passphrase=None, wpa_key_mgmt="WPA-PSK",
                 ieee80211w=None):

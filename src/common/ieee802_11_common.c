@@ -199,11 +199,76 @@ static int ieee802_11_parse_vendor_specific(const u8 *pos, size_t elen,
 }
 
 
+static int ieee802_11_parse_mle(const u8 *pos, size_t elen, size_t **total_len,
+				struct ieee802_11_elems *elems,
+				int show_errors)
+{
+	u8 mle_type = pos[0] & MULTI_LINK_CONTROL_TYPE_MASK;
+
+	switch (mle_type) {
+	case MULTI_LINK_CONTROL_TYPE_BASIC:
+		elems->basic_mle = pos;
+		elems->basic_mle_len = elen;
+		*total_len = &elems->basic_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_PROBE_REQ:
+		elems->probe_req_mle = pos;
+		elems->probe_req_mle_len = elen;
+		*total_len = &elems->probe_req_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_RECONF:
+		elems->reconf_mle = pos;
+		elems->reconf_mle_len = elen;
+		*total_len = &elems->reconf_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_TDLS:
+		elems->tdls_mle = pos;
+		elems->tdls_mle_len = elen;
+		*total_len = &elems->tdls_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_PRIOR_ACCESS:
+		elems->prior_access_mle = pos;
+		elems->prior_access_mle_len = elen;
+		*total_len = &elems->prior_access_mle_len;
+		break;
+	default:
+		if (show_errors) {
+			wpa_printf(MSG_MSGDUMP,
+				   "Unknown Multi-Link element type %u",
+				   mle_type);
+		}
+		return -1;
+	}
+
+	return 0;
+}
+
+
+static size_t ieee802_11_fragments_length(struct ieee802_11_elems *elems,
+					  const u8 *start, size_t len)
+{
+	const struct element *elem;
+	size_t frags_len = 0;
+
+	for_each_element(elem, start, len) {
+		if (elem->id != WLAN_EID_FRAGMENT)
+			break;
+
+		frags_len += elem->datalen + 2;
+		elems->num_frag_elems++;
+	}
+
+	return frags_len;
+}
+
+
 static int ieee802_11_parse_extension(const u8 *pos, size_t elen,
 				      struct ieee802_11_elems *elems,
+				      const u8 *start, size_t len,
 				      int show_errors)
 {
 	u8 ext_id;
+	size_t *total_len = NULL;
 
 	if (elen < 1) {
 		if (show_errors) {
@@ -215,8 +280,6 @@ static int ieee802_11_parse_extension(const u8 *pos, size_t elen,
 
 	ext_id = *pos++;
 	elen--;
-
-	elems->frag_ies.last_eid_ext = 0;
 
 	switch (ext_id) {
 	case WLAN_EID_EXT_ASSOC_DELAY_INFO:
@@ -244,6 +307,7 @@ static int ieee802_11_parse_extension(const u8 *pos, size_t elen,
 			break;
 		elems->fils_hlp = pos;
 		elems->fils_hlp_len = elen;
+		total_len = &elems->fils_hlp_len;
 		break;
 	case WLAN_EID_EXT_FILS_IP_ADDR_ASSIGN:
 		if (elen < 1)
@@ -260,6 +324,7 @@ static int ieee802_11_parse_extension(const u8 *pos, size_t elen,
 	case WLAN_EID_EXT_WRAPPED_DATA:
 		elems->wrapped_data = pos;
 		elems->wrapped_data_len = elen;
+		total_len = &elems->wrapped_data_len;
 		break;
 	case WLAN_EID_EXT_FILS_PUBLIC_KEY:
 		if (elen < 1)
@@ -315,6 +380,17 @@ static int ieee802_11_parse_extension(const u8 *pos, size_t elen,
 		elems->eht_operation = pos;
 		elems->eht_operation_len = elen;
 		break;
+	case WLAN_EID_EXT_MULTI_LINK:
+		if (elen < 2)
+			break;
+		if (ieee802_11_parse_mle(pos, elen, &total_len, elems,
+					 show_errors))
+			return -1;
+		break;
+	case WLAN_EID_EXT_KNOWN_BSSID:
+		elems->mbssid_known_bss = pos;
+		elems->mbssid_known_bss_len = elen;
+		break;
 	default:
 		if (show_errors) {
 			wpa_printf(MSG_MSGDUMP,
@@ -324,55 +400,20 @@ static int ieee802_11_parse_extension(const u8 *pos, size_t elen,
 		return -1;
 	}
 
-	if (elen == 254)
-		elems->frag_ies.last_eid_ext = ext_id;
+	if (elen == 254 && total_len)
+		*total_len += ieee802_11_fragments_length(
+			elems, pos + elen, (start + len) - (pos + elen));
 
 	return 0;
 }
 
 
-static void ieee802_11_parse_fragment(struct frag_ies_info *frag_ies,
-				      const u8 *pos, u8 elen)
-{
-	if (frag_ies->n_frags >= MAX_NUM_FRAG_IES_SUPPORTED) {
-		wpa_printf(MSG_MSGDUMP, "Too many element fragments - skip");
-		return;
-	}
-
-	/*
-	 * Note: while EID == 0 is a valid ID (SSID IE), it should not be
-	 * fragmented.
-	 */
-	if (!frag_ies->last_eid) {
-		wpa_printf(MSG_MSGDUMP,
-			   "Fragment without a valid last element - skip");
-		return;
-	}
-
-	frag_ies->frags[frag_ies->n_frags].ie = pos;
-	frag_ies->frags[frag_ies->n_frags].ie_len = elen;
-	frag_ies->frags[frag_ies->n_frags].eid = frag_ies->last_eid;
-	frag_ies->frags[frag_ies->n_frags].eid_ext = frag_ies->last_eid_ext;
-	frag_ies->n_frags++;
-}
-
-
-/**
- * ieee802_11_parse_elems - Parse information elements in management frames
- * @start: Pointer to the start of IEs
- * @len: Length of IE buffer in octets
- * @elems: Data structure for parsed elements
- * @show_errors: Whether to show parsing errors in debug log
- * Returns: Parsing result
- */
-ParseRes ieee802_11_parse_elems(const u8 *start, size_t len,
-				struct ieee802_11_elems *elems,
-				int show_errors)
+static ParseRes __ieee802_11_parse_elems(const u8 *start, size_t len,
+					 struct ieee802_11_elems *elems,
+					 int show_errors)
 {
 	const struct element *elem;
 	int unknown = 0;
-
-	os_memset(elems, 0, sizeof(*elems));
 
 	if (!start)
 		return ParseOK;
@@ -380,6 +421,12 @@ ParseRes ieee802_11_parse_elems(const u8 *start, size_t len,
 	for_each_element(elem, start, len) {
 		u8 id = elem->id, elen = elem->datalen;
 		const u8 *pos = elem->data;
+
+		if (id == WLAN_EID_FRAGMENT && elems->num_frag_elems > 0) {
+			elems->num_frag_elems--;
+			continue;
+		}
+		elems->num_frag_elems = 0;
 
 		switch (id) {
 		case WLAN_EID_SSID:
@@ -584,11 +631,13 @@ ParseRes ieee802_11_parse_elems(const u8 *start, size_t len,
 			elems->s1g_capab = pos;
 			break;
 		case WLAN_EID_FRAGMENT:
-			ieee802_11_parse_fragment(&elems->frag_ies, pos, elen);
+			wpa_printf(MSG_MSGDUMP,
+				   "Fragment without a valid last element - skip");
+
 			break;
 		case WLAN_EID_EXTENSION:
-			if (ieee802_11_parse_extension(pos, elen, elems,
-						       show_errors))
+			if (ieee802_11_parse_extension(pos, elen, elems, start,
+						       len, show_errors))
 				unknown++;
 			break;
 		default:
@@ -600,12 +649,6 @@ ParseRes ieee802_11_parse_elems(const u8 *start, size_t len,
 				   id, elen);
 			break;
 		}
-
-		if (id != WLAN_EID_FRAGMENT && elen == 255)
-			elems->frag_ies.last_eid = id;
-
-		if (id == WLAN_EID_EXTENSION && !elems->frag_ies.last_eid_ext)
-			elems->frag_ies.last_eid = 0;
 	}
 
 	if (!for_each_element_completed(elem, start, len)) {
@@ -620,6 +663,431 @@ ParseRes ieee802_11_parse_elems(const u8 *start, size_t len,
 
 done:
 	return unknown ? ParseUnknown : ParseOK;
+}
+
+
+/**
+ * ieee802_11_parse_elems - Parse information elements in management frames
+ * @start: Pointer to the start of IEs
+ * @len: Length of IE buffer in octets
+ * @elems: Data structure for parsed elements
+ * @show_errors: Whether to show parsing errors in debug log
+ * Returns: Parsing result
+ */
+ParseRes ieee802_11_parse_elems(const u8 *start, size_t len,
+				struct ieee802_11_elems *elems,
+				int show_errors)
+{
+	os_memset(elems, 0, sizeof(*elems));
+
+	return __ieee802_11_parse_elems(start, len, elems, show_errors);
+}
+
+
+/**
+ * ieee802_11_elems_clear_ids - Clear the data for the given element IDs
+ * @ids: Array of element IDs for which data should be cleared.
+ * @num: The number of entries in the array
+ */
+void ieee802_11_elems_clear_ids(struct ieee802_11_elems *elems,
+				const u8 *ids, size_t num)
+{
+	size_t i;
+
+	for (i = 0; i < num; i++) {
+		switch (ids[i]) {
+		case WLAN_EID_SSID:
+			elems->ssid = NULL;
+			elems->ssid_len = 0;
+			break;
+		case WLAN_EID_SUPP_RATES:
+			elems->supp_rates = NULL;
+			elems->supp_rates_len = 0;
+			break;
+		case WLAN_EID_DS_PARAMS:
+			elems->ds_params = NULL;
+			break;
+		case WLAN_EID_CHALLENGE:
+			elems->challenge = NULL;
+			elems->challenge_len = 0;
+			break;
+		case WLAN_EID_ERP_INFO:
+			elems->erp_info = NULL;
+			break;
+		case WLAN_EID_EXT_SUPP_RATES:
+			elems->ext_supp_rates = NULL;
+			elems->ext_supp_rates_len = 0;
+			break;
+		case WLAN_EID_RSN:
+			elems->rsn_ie = NULL;
+			elems->rsn_ie_len = 0;
+			break;
+		case WLAN_EID_RSNX:
+			elems->rsnxe = NULL;
+			elems->rsnxe_len = 0;
+			break;
+		case WLAN_EID_PWR_CAPABILITY:
+			elems->power_capab = NULL;
+			elems->power_capab_len = 0;
+			break;
+		case WLAN_EID_SUPPORTED_CHANNELS:
+			elems->supp_channels = NULL;
+			elems->supp_channels_len = 0;
+			break;
+		case WLAN_EID_MOBILITY_DOMAIN:
+			elems->mdie = NULL;
+			elems->mdie_len = 0;
+			break;
+		case WLAN_EID_FAST_BSS_TRANSITION:
+			elems->ftie = NULL;
+			elems->ftie_len = 0;
+			break;
+		case WLAN_EID_TIMEOUT_INTERVAL:
+			elems->timeout_int = NULL;
+			break;
+		case WLAN_EID_HT_CAP:
+			elems->ht_capabilities = NULL;
+			break;
+		case WLAN_EID_HT_OPERATION:
+			elems->ht_operation = NULL;
+			break;
+		case WLAN_EID_MESH_CONFIG:
+			elems->mesh_config = NULL;
+			elems->mesh_config_len = 0;
+			break;
+		case WLAN_EID_MESH_ID:
+			elems->mesh_id = NULL;
+			elems->mesh_id_len = 0;
+			break;
+		case WLAN_EID_PEER_MGMT:
+			elems->peer_mgmt = NULL;
+			elems->peer_mgmt_len = 0;
+			break;
+		case WLAN_EID_VHT_CAP:
+			elems->vht_capabilities = NULL;
+			break;
+		case WLAN_EID_VHT_OPERATION:
+			elems->vht_operation = NULL;
+			break;
+		case WLAN_EID_VHT_OPERATING_MODE_NOTIFICATION:
+			elems->vht_opmode_notif = NULL;
+			break;
+		case WLAN_EID_LINK_ID:
+			elems->link_id = NULL;
+			break;
+		case WLAN_EID_INTERWORKING:
+			elems->interworking = NULL;
+			elems->interworking_len = 0;
+			break;
+		case WLAN_EID_QOS_MAP_SET:
+			elems->qos_map_set = NULL;
+			elems->qos_map_set_len = 0;
+			break;
+		case WLAN_EID_EXT_CAPAB:
+			elems->ext_capab = NULL;
+			elems->ext_capab_len = 0;
+			break;
+		case WLAN_EID_BSS_MAX_IDLE_PERIOD:
+			elems->bss_max_idle_period = NULL;
+			break;
+		case WLAN_EID_SSID_LIST:
+			elems->ssid_list = NULL;
+			elems->ssid_list_len = 0;
+			break;
+		case WLAN_EID_AMPE:
+			elems->ampe = NULL;
+			elems->ampe_len = 0;
+			break;
+		case WLAN_EID_MIC:
+			elems->mic = NULL;
+			elems->mic_len = 0;
+			break;
+		case WLAN_EID_MULTI_BAND:
+			os_memset(&elems->mb_ies, 0, sizeof(elems->mb_ies));
+			elems->mb_ies.nof_ies = 0;
+			break;
+		case WLAN_EID_SUPPORTED_OPERATING_CLASSES:
+			elems->supp_op_classes = NULL;
+			elems->supp_op_classes_len = 0;
+			break;
+		case WLAN_EID_RRM_ENABLED_CAPABILITIES:
+			elems->rrm_enabled = NULL;
+			elems->rrm_enabled_len = 0;
+			break;
+		case WLAN_EID_CAG_NUMBER:
+			elems->cag_number = NULL;
+			elems->cag_number_len = 0;
+			break;
+		case WLAN_EID_AP_CSN:
+			elems->ap_csn = NULL;
+			break;
+		case WLAN_EID_FILS_INDICATION:
+			elems->fils_indic = NULL;
+			elems->fils_indic_len = 0;
+			break;
+		case WLAN_EID_DILS:
+			elems->dils = NULL;
+			elems->dils_len = 0;
+			break;
+		case WLAN_EID_S1G_CAPABILITIES:
+			elems->s1g_capab = NULL;
+			break;
+		}
+	}
+}
+
+
+/**
+ * ieee802_11_elems_clear_ext_ids - Clear the data for the given element
+ * extension IDs
+ * @ids: Array of element extension IDs for which data should be cleared.
+ * @num: The number of entries in the array
+ */
+void ieee802_11_elems_clear_ext_ids(struct ieee802_11_elems *elems,
+				    const u8 *ids, size_t num)
+{
+	size_t i;
+
+	for (i = 0; i < num; i++) {
+		switch (ids[i]) {
+		case WLAN_EID_EXT_ASSOC_DELAY_INFO:
+			elems->assoc_delay_info = NULL;
+			break;
+		case WLAN_EID_EXT_FILS_REQ_PARAMS:
+			elems->fils_req_params = NULL;
+			elems->fils_req_params_len = 0;
+			break;
+		case WLAN_EID_EXT_FILS_KEY_CONFIRM:
+			elems->fils_key_confirm = NULL;
+			elems->fils_key_confirm_len = 0;
+			break;
+		case WLAN_EID_EXT_FILS_SESSION:
+			elems->fils_session = NULL;
+			break;
+		case WLAN_EID_EXT_FILS_HLP_CONTAINER:
+			elems->fils_hlp = NULL;
+			elems->fils_hlp_len = 0;
+			break;
+		case WLAN_EID_EXT_FILS_IP_ADDR_ASSIGN:
+			elems->fils_ip_addr_assign = NULL;
+			elems->fils_ip_addr_assign_len = 0;
+			break;
+		case WLAN_EID_EXT_KEY_DELIVERY:
+			elems->key_delivery = NULL;
+			elems->key_delivery_len = 0;
+			break;
+		case WLAN_EID_EXT_WRAPPED_DATA:
+			elems->wrapped_data = NULL;
+			elems->wrapped_data_len = 0;
+			break;
+		case WLAN_EID_EXT_FILS_PUBLIC_KEY:
+			elems->fils_pk = NULL;
+			elems->fils_pk_len = 0;
+			break;
+		case WLAN_EID_EXT_FILS_NONCE:
+			elems->fils_nonce = NULL;
+			break;
+		case WLAN_EID_EXT_OWE_DH_PARAM:
+			elems->owe_dh = NULL;
+			elems->owe_dh_len = 0;
+			break;
+		case WLAN_EID_EXT_PASSWORD_IDENTIFIER:
+			elems->password_id = NULL;
+			elems->password_id_len = 0;
+			break;
+		case WLAN_EID_EXT_HE_CAPABILITIES:
+			elems->he_capabilities = NULL;
+			elems->he_capabilities_len = 0;
+			break;
+		case WLAN_EID_EXT_HE_OPERATION:
+			elems->he_operation = NULL;
+			elems->he_operation_len = 0;
+			break;
+		case WLAN_EID_EXT_OCV_OCI:
+			elems->oci = NULL;
+			elems->oci_len = 0;
+			break;
+		case WLAN_EID_EXT_SHORT_SSID_LIST:
+			elems->short_ssid_list = NULL;
+			elems->short_ssid_list_len = 0;
+			break;
+		case WLAN_EID_EXT_HE_6GHZ_BAND_CAP:
+			elems->he_6ghz_band_cap = NULL;
+			break;
+		case WLAN_EID_EXT_PASN_PARAMS:
+			elems->pasn_params = NULL;
+			elems->pasn_params_len = 0;
+			break;
+		case WLAN_EID_EXT_MULTI_LINK:
+			elems->basic_mle = NULL;
+			elems->probe_req_mle = NULL;
+			elems->reconf_mle = NULL;
+			elems->tdls_mle = NULL;
+			elems->prior_access_mle = NULL;
+
+			elems->basic_mle_len = 0;
+			elems->probe_req_mle_len = 0;
+			elems->reconf_mle_len = 0;
+			elems->tdls_mle_len = 0;
+			elems->prior_access_mle_len = 0;
+			break;
+		case WLAN_EID_EXT_EHT_CAPABILITIES:
+			elems->eht_capabilities = NULL;
+			elems->eht_capabilities_len = 0;
+			break;
+		case WLAN_EID_EXT_EHT_OPERATION:
+			elems->eht_operation = NULL;
+			elems->eht_operation_len = 0;
+			break;
+		}
+	}
+}
+
+
+ParseRes ieee802_11_parse_link_assoc_req(const u8 *start, size_t len,
+					 struct ieee802_11_elems *elems,
+					 struct wpabuf *mlbuf,
+					 u8 link_id, bool show_errors)
+{
+	const struct ieee80211_eht_ml *ml;
+	const u8 *pos;
+	ParseRes res = ParseFailed;
+
+	pos = wpabuf_head(mlbuf);
+	len = wpabuf_len(mlbuf);
+
+	/* Must have control and common info length */
+	if (len < sizeof(*ml) + 1 || len < sizeof(*ml) + pos[sizeof(*ml)])
+		goto out;
+
+	ml = (const struct ieee80211_eht_ml *) pos;
+
+	/* As we are interested with the Per-STA profile, ignore other types */
+	if ((le_to_host16(ml->ml_control) & MULTI_LINK_CONTROL_TYPE_MASK) !=
+	     MULTI_LINK_CONTROL_TYPE_BASIC)
+		goto out;
+
+	/* Skip the common info */
+	len -= sizeof(*ml) + pos[sizeof(*ml)];
+	pos += sizeof(*ml) + pos[sizeof(*ml)];
+
+	while (len > 2) {
+		size_t sub_elem_len = *(pos + 1);
+		size_t sta_info_len;
+		u16 link_info_control;
+		const u8 *non_inherit;
+
+		wpa_printf(MSG_DEBUG,
+			   "MLD: sub element: len=%zu, sub_elem_len=%zu",
+			   len, sub_elem_len);
+
+		if (2 + sub_elem_len > len) {
+			if (show_errors)
+				wpa_printf(MSG_DEBUG,
+					   "MLD: error: len=%zu, sub_elem_len=%zu",
+					   len, sub_elem_len);
+			goto out;
+		}
+
+		if (*pos != 0) {
+			pos += 2 + sub_elem_len;
+			len -= 2 + sub_elem_len;
+			continue;
+		}
+
+		if (sub_elem_len < 3) {
+			if (show_errors)
+				wpa_printf(MSG_DEBUG,
+					   "MLD: error: sub_elem_len=%zu < 5",
+					   sub_elem_len);
+			goto out;
+		}
+
+		link_info_control = WPA_GET_LE16(pos + 2);
+		if ((link_info_control & BASIC_MLE_STA_CTRL_LINK_ID_MASK) !=
+		    link_id) {
+			pos += 2 + sub_elem_len;
+			len -= 2 + sub_elem_len;
+			continue;
+		}
+
+		sta_info_len = *(pos + 4);
+		if (sub_elem_len < sta_info_len + 3 || sta_info_len < 1) {
+			if (show_errors)
+				wpa_printf(MSG_DEBUG,
+					   "MLD: error: sub_elem_len=%zu, sta_info_len=%zu",
+					   sub_elem_len, sta_info_len);
+			goto out;
+		}
+
+		pos += sta_info_len + 4;
+		sub_elem_len -= sta_info_len + 2;
+
+		if (sub_elem_len < 2) {
+			if (show_errors)
+				wpa_printf(MSG_DEBUG,
+					   "MLD: missing capability info");
+			goto out;
+		}
+
+		pos += 2;
+		sub_elem_len -= 2;
+
+		/* Handle non-inheritance */
+		non_inherit = get_ie_ext(pos, sub_elem_len,
+					 WLAN_EID_EXT_NON_INHERITANCE);
+		if (non_inherit && non_inherit[1] > 1) {
+			u8 non_inherit_len = non_inherit[1] - 1;
+
+			/*
+			 * Do not include the Non-Inheritance element when
+			 * parsing below. It should be the last element in the
+			 * subelement.
+			 */
+			if (3U + non_inherit_len > sub_elem_len)
+				goto out;
+			sub_elem_len -= 3 + non_inherit_len;
+
+			/* Skip the ID, length and extension ID */
+			non_inherit += 3;
+
+			if (non_inherit_len < 1UL + non_inherit[0]) {
+				if (show_errors)
+					wpa_printf(MSG_DEBUG,
+						   "MLD: Invalid inheritance");
+				goto out;
+			}
+
+			ieee802_11_elems_clear_ids(elems, &non_inherit[1],
+						   non_inherit[0]);
+
+			non_inherit_len -= 1 + non_inherit[0];
+			non_inherit += 1 + non_inherit[0];
+
+			if (non_inherit_len < 1UL + non_inherit[0]) {
+				if (show_errors)
+					wpa_printf(MSG_DEBUG,
+						   "MLD: Invalid inheritance");
+				goto out;
+			}
+
+			ieee802_11_elems_clear_ext_ids(elems, &non_inherit[1],
+						       non_inherit[0]);
+		}
+
+		wpa_printf(MSG_DEBUG, "MLD: link: sub_elem_len=%zu",
+			   sub_elem_len);
+
+		if (sub_elem_len)
+			res = __ieee802_11_parse_elems(pos, sub_elem_len,
+						       elems, show_errors);
+		else
+			res = ParseOK;
+		break;
+	}
+
+out:
+	return res;
 }
 
 
@@ -1263,8 +1731,9 @@ static int ieee80211_chan_to_freq_us(u8 op_class, u8 chan)
 		if (chan < 25 || chan > 29)
 			return -1;
 		return 56160 + 2160 * (chan - 24);
+	default:
+		return -1;
 	}
-	return -1;
 }
 
 
@@ -1313,8 +1782,9 @@ static int ieee80211_chan_to_freq_eu(u8 op_class, u8 chan)
 		if (chan != 25)
 			return -1;
 		return 56160 + 2160 * (chan - 24);
+	default:
+		return -1;
 	}
-	return -1;
 }
 
 
@@ -1369,8 +1839,9 @@ static int ieee80211_chan_to_freq_jp(u8 op_class, u8 chan)
 		if (chan != 25)
 			return -1;
 		return 56160 + 2160 * (chan - 24);
+	default:
+		return -1;
 	}
-	return -1;
 }
 
 
@@ -1395,8 +1866,9 @@ static int ieee80211_chan_to_freq_cn(u8 op_class, u8 chan)
 		if (chan < 149 || chan > 165)
 			return -1;
 		return 5000 + 5 * chan;
+	default:
+		return -1;
 	}
-	return -1;
 }
 
 
@@ -1482,8 +1954,9 @@ static int ieee80211_chan_to_freq_global(u8 op_class, u8 chan)
 		if (chan < 25 || chan > 29)
 			return -1;
 		return 56160 + 2160 * (chan - 24);
+	default:
+		return -1;
 	}
-	return -1;
 }
 
 /**
@@ -1822,6 +2295,9 @@ const char * status2str(u16 status)
 	S2S(DENIED_HE_NOT_SUPPORTED)
 	S2S(SAE_HASH_TO_ELEMENT)
 	S2S(SAE_PK)
+	S2S(INVALID_PUBLIC_KEY)
+	S2S(PASN_BASE_AKMP_FAILED)
+	S2S(OCI_MISMATCH)
 	}
 	return "UNKNOWN";
 #undef S2S
@@ -1911,11 +2387,14 @@ const struct oper_class_map global_op_class[] = {
 
 	/*
 	 * IEEE Std 802.11ax-2021, Table E-4 actually talks about channel center
-	 * frequency index 42, 58, 106, 122, 138, 155, 171 with channel spacing
-	 * of 80 MHz, but currently use the following definition for simplicity
+	 * frequency index for operation classes 128, 129, 130, 132, 133, 134,
+	 * and 135, but currently use the lowest 20 MHz channel for simplicity
 	 * (these center frequencies are not actual channels, which makes
-	 * wpas_p2p_verify_channel() fail). wpas_p2p_verify_80mhz() should take
-	 * care of removing invalid channels.
+	 * wpas_p2p_verify_channel() fail).
+	 * Specially for the operation class 136, it is also defined to use the
+	 * channel center frequency index value, but it happens to be a 20 MHz
+	 * channel and the channel number in the channel set would match the
+	 * value in for the frequency center.
 	 */
 	{ HOSTAPD_MODE_IEEE80211A, 128, 36, 177, 4, BW80, P2P_SUPP },
 	{ HOSTAPD_MODE_IEEE80211A, 129, 36, 177, 4, BW160, P2P_SUPP },
@@ -2613,9 +3092,9 @@ int op_class_to_bandwidth(u8 op_class)
 		return 6480;
 	case 183: /* 60 GHz band, EDMG CB4, channel 25..29 */
 		return 8640;
+	default:
+		return 20;
 	}
-
-	return 20;
 }
 
 
@@ -2677,42 +3156,47 @@ enum oper_chan_width op_class_to_ch_width(u8 op_class)
 		return CONF_OPER_CHWIDTH_6480MHZ;
 	case 183: /* 60 GHz band, EDMG CB4, channel 25..29 */
 		return CONF_OPER_CHWIDTH_8640MHZ;
+	default:
+		return CONF_OPER_CHWIDTH_USE_HT;
 	}
-	return CONF_OPER_CHWIDTH_USE_HT;
 }
 
 
-struct wpabuf * ieee802_11_defrag_data(struct ieee802_11_elems *elems,
-				       u8 eid, u8 eid_ext,
-				       const u8 *data, u8 len)
+struct wpabuf * ieee802_11_defrag_data(const u8 *data, size_t len,
+				       bool ext_elem)
 {
-	struct frag_ies_info *frag_ies = &elems->frag_ies;
 	struct wpabuf *buf;
-	unsigned int i;
+	const u8 *pos, *end = data + len;
+	size_t min_defrag_len = ext_elem ? 255 : 256;
 
-	if (!elems || !data || !len)
+	if (!data || !len)
 		return NULL;
 
-	buf = wpabuf_alloc_copy(data, len);
+	if (len < min_defrag_len)
+		return wpabuf_alloc_copy(data, len);
+
+	buf = wpabuf_alloc_copy(data, min_defrag_len - 1);
 	if (!buf)
 		return NULL;
 
-	for (i = 0; i < frag_ies->n_frags; i++) {
+	pos = &data[min_defrag_len - 1];
+	len -= min_defrag_len - 1;
+	while (len > 2 && pos[0] == WLAN_EID_FRAGMENT && pos[1]) {
 		int ret;
+		size_t elen = 2 + pos[1];
 
-		if (frag_ies->frags[i].eid != eid ||
-		    frag_ies->frags[i].eid_ext != eid_ext)
-			continue;
-
-		ret = wpabuf_resize(&buf, frag_ies->frags[i].ie_len);
+		if (elen > (size_t) (end - pos) || elen > len)
+			break;
+		ret = wpabuf_resize(&buf, pos[1]);
 		if (ret < 0) {
 			wpabuf_free(buf);
 			return NULL;
 		}
 
 		/* Copy only the fragment data (without the EID and length) */
-		wpabuf_put_data(buf, frag_ies->frags[i].ie,
-				frag_ies->frags[i].ie_len);
+		wpabuf_put_data(buf, &pos[2], pos[1]);
+		pos += elen;
+		len -= elen;
 	}
 
 	return buf;
@@ -2723,7 +3207,7 @@ struct wpabuf * ieee802_11_defrag(struct ieee802_11_elems *elems,
 				  u8 eid, u8 eid_ext)
 {
 	const u8 *data;
-	u8 len;
+	size_t len;
 
 	/*
 	 * TODO: Defragmentation mechanism can be supported for all IEs. For now
@@ -2753,5 +3237,78 @@ struct wpabuf * ieee802_11_defrag(struct ieee802_11_elems *elems,
 		return NULL;
 	}
 
-	return ieee802_11_defrag_data(elems, eid, eid_ext, data, len);
+	return ieee802_11_defrag_data(data, len, true);
+}
+
+
+const u8 * get_ml_ie(const u8 *ies, size_t len, u8 type)
+{
+	const struct element *elem;
+
+	if (!ies)
+		return NULL;
+
+	for_each_element_extid(elem, WLAN_EID_EXT_MULTI_LINK, ies, len) {
+		if (elem->datalen >= 2 &&
+		    (elem->data[1] & MULTI_LINK_CONTROL_TYPE_MASK) == type)
+			return &elem->id;
+	}
+
+	return NULL;
+}
+
+
+const u8 * get_basic_mle_mld_addr(const u8 *buf, size_t len)
+{
+	const size_t mld_addr_pos =
+		2 /* Control field */ +
+		1 /* Common Info Length field */;
+	const size_t fixed_len = mld_addr_pos +
+		ETH_ALEN /* MLD MAC Address field */;
+
+	if (len < fixed_len)
+		return NULL;
+
+	if ((buf[0] & MULTI_LINK_CONTROL_TYPE_MASK) !=
+	    MULTI_LINK_CONTROL_TYPE_BASIC)
+		return NULL;
+
+	return &buf[mld_addr_pos];
+}
+
+
+struct wpabuf * ieee802_11_defrag_mle(struct ieee802_11_elems *elems, u8 type)
+{
+	const u8 *data;
+	size_t len;
+
+	switch (type) {
+	case MULTI_LINK_CONTROL_TYPE_BASIC:
+		data = elems->basic_mle;
+		len = elems->basic_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_PROBE_REQ:
+		data = elems->probe_req_mle;
+		len = elems->probe_req_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_RECONF:
+		data = elems->reconf_mle;
+		len = elems->reconf_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_TDLS:
+		data = elems->tdls_mle;
+		len = elems->tdls_mle_len;
+		break;
+	case MULTI_LINK_CONTROL_TYPE_PRIOR_ACCESS:
+		data = elems->prior_access_mle;
+		len = elems->prior_access_mle_len;
+		break;
+	default:
+		wpa_printf(MSG_DEBUG,
+			   "Defragmentation not supported for Multi-Link element type=%u",
+			   type);
+		return NULL;
+	}
+
+	return ieee802_11_defrag_data(data, len, true);
 }

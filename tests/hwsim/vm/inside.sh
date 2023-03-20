@@ -30,20 +30,14 @@ export HOME=/tmp
 sysctl kernel.panic_on_oops=1
 sysctl kernel.panic=1
 
-# get extra command line variables from /proc/cmdline
-TESTDIR=$(sed 's/.*testdir=\([^ ]*\) .*/\1/' /proc/cmdline)
-TIMEWARP=$(sed 's/.*timewarp=\([^ ]*\) .*/\1/' /proc/cmdline)
-EPATH=$(sed 's/.*EPATH=\([^ ]*\) .*/\1/' /proc/cmdline)
-TELNET=$(sed 's/.*TELNET=\([^ ]*\) .*/\1/' /proc/cmdline)
-ARGS=$(sed 's/.*ARGS=\([^ ]*\)\( \|$\).*/\1/' /proc/cmdline)
-LOGDIR=$(sed 's/.*LOGDIR=\([^ ]*\)\( \|$\).*/\1/' /proc/cmdline)
-if grep -q "commitid=" /proc/cmdline; then
-    COMMITID=$(sed 's/.*commitid=\([^ ]*\)\( \|$\).*/\1/' /proc/cmdline)
-else
-    COMMITID=
+mount --bind "$TESTDIR/vm/regdb/" /lib/firmware
+
+if [ "$MODULEDIR" != "" ] ; then
+	mount --bind $MODULEDIR /lib/modules
 fi
 
-mount --bind "$TESTDIR/vm/regdb/" /lib/firmware
+# reload reg if (and only if) cfg80211.ko is already loaded
+iw reg reload || true
 
 # create /dev entries we need
 mknod -m 660 /dev/ttyS0 c 4 64

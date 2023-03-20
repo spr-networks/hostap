@@ -219,9 +219,19 @@ u8 * hostapd_eid_he_operation(struct hostapd_data *hapd, u8 *eid)
 	pos += 6; /* skip the fixed part */
 
 	if (is_6ghz_op_class(hapd->iconf->op_class)) {
+		enum oper_chan_width oper_chwidth =
+			hostapd_get_oper_chwidth(hapd->iconf);
 		u8 seg0 = hapd->iconf->he_oper_centr_freq_seg0_idx;
 		u8 seg1 = hostapd_get_oper_centr_freq_seg1_idx(hapd->iconf);
 		u8 control;
+
+#ifdef CONFIG_IEEE80211BE
+		if (hapd->iconf->punct_bitmap) {
+			punct_update_legacy_bw(hapd->iconf->punct_bitmap,
+					       hapd->iconf->channel,
+					       &oper_chwidth, &seg0, &seg1);
+		}
+#endif /* CONFIG_IEEE80211BE */
 
 		if (!seg0)
 			seg0 = hapd->iconf->channel;
@@ -253,7 +263,7 @@ u8 * hostapd_eid_he_operation(struct hostapd_data *hapd, u8 *eid)
 		*pos++ = control;
 
 		/* Channel Center Freq Seg0/Seg1 */
-		if (hapd->iconf->he_oper_chwidth == 2) {
+		if (oper_chwidth == 2) {
 			/*
 			 * Seg 0 indicates the channel center frequency index of
 			 * the 160 MHz channel.
@@ -533,7 +543,8 @@ int hostapd_get_he_twt_responder(struct hostapd_data *hapd,
 	u8 *mac_cap;
 
 	if (!hapd->iface->current_mode ||
-	    !hapd->iface->current_mode->he_capab[mode].he_supported)
+	    !hapd->iface->current_mode->he_capab[mode].he_supported ||
+	    !hapd->iconf->ieee80211ax || hapd->conf->disable_11ax)
 		return 0;
 
 	mac_cap = hapd->iface->current_mode->he_capab[mode].mac_cap;

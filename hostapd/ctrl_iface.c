@@ -38,6 +38,7 @@
 #endif /* CONFIG_DPP */
 #include "common/wpa_ctrl.h"
 #include "common/ptksa_cache.h"
+#include "common/hw_features_common.h"
 #include "crypto/tls.h"
 #include "drivers/driver.h"
 #include "eapol_auth/eapol_auth_sm.h"
@@ -983,6 +984,14 @@ static int hostapd_ctrl_iface_get_config(struct hostapd_data *hapd,
 		return pos - buf;
 	pos += ret;
 
+	if ((hapd->conf->config_id)) {
+		ret = os_snprintf(pos, end - pos, "config_id=%s\n",
+				  hapd->conf->config_id);
+		if (os_snprintf_error(end - pos, ret))
+			return pos - buf;
+		pos += ret;
+	}
+
 #ifdef CONFIG_WPS
 	ret = os_snprintf(pos, end - pos, "wps_state=%s\n",
 			  hapd->conf->wps_state == 0 ? "disabled" :
@@ -1370,6 +1379,16 @@ static int hostapd_ctrl_iface_reload(struct hostapd_iface *iface)
 {
 	if (hostapd_reload_iface(iface) < 0) {
 		wpa_printf(MSG_ERROR, "Reloading of interface failed");
+		return -1;
+	}
+	return 0;
+}
+
+
+static int hostapd_ctrl_iface_reload_bss(struct hostapd_data *bss)
+{
+	if (hostapd_reload_bss_only(bss) < 0) {
+		wpa_printf(MSG_ERROR, "Reloading of BSS failed");
 		return -1;
 	}
 	return 0;
@@ -2439,8 +2458,11 @@ static int hostapd_ctrl_register_frame(struct hostapd_data *hapd,
 
 
 #ifdef NEED_AP_MLME
-static int hostapd_ctrl_check_freq_params(struct hostapd_freq_params *params)
+static int hostapd_ctrl_check_freq_params(struct hostapd_freq_params *params,
+					  u16 punct_bitmap)
 {
+	u32 start_freq;
+
 	switch (params->bandwidth) {
 	case 0:
 		/* bandwidth not specified: use 20 MHz by default */
@@ -2452,9 +2474,15 @@ static int hostapd_ctrl_check_freq_params(struct hostapd_freq_params *params)
 
 		if (params->center_freq2 || params->sec_channel_offset)
 			return -1;
+
+		if (punct_bitmap)
+			return -1;
 		break;
 	case 40:
 		if (params->center_freq2 || !params->sec_channel_offset)
+			return -1;
+
+		if (punct_bitmap)
 			return -1;
 
 		if (!params->center_freq1)
@@ -2491,6 +2519,9 @@ static int hostapd_ctrl_check_freq_params(struct hostapd_freq_params *params)
 			return -1;
 		}
 
+		if (params->center_freq2 && punct_bitmap)
+			return -1;
+
 		/* Adjacent and overlapped are not allowed for 80+80 */
 		if (params->center_freq2 &&
 		    params->center_freq1 - params->center_freq2 <= 80 &&
@@ -2525,6 +2556,29 @@ static int hostapd_ctrl_check_freq_params(struct hostapd_freq_params *params)
 		return -1;
 	}
 
+	if (!punct_bitmap)
+		return 0;
+
+	if (!params->eht_enabled) {
+		wpa_printf(MSG_ERROR,
+			   "Preamble puncturing supported only in EHT");
+		return -1;
+	}
+
+	if (params->freq >= 2412 && params->freq <= 2484) {
+		wpa_printf(MSG_ERROR,
+			   "Preamble puncturing is not supported in 2.4 GHz");
+		return -1;
+	}
+
+	start_freq = params->center_freq1 - (params->bandwidth / 2);
+	if (!is_punct_bitmap_valid(params->bandwidth,
+				   (params->freq - start_freq) / 20,
+				   punct_bitmap)) {
+		wpa_printf(MSG_ERROR, "Invalid preamble puncturing bitmap");
+		return -1;
+	}
+
 	return 0;
 }
 #endif /* NEED_AP_MLME */
@@ -2545,7 +2599,8 @@ static int hostapd_ctrl_iface_chan_switch(struct hostapd_iface *iface,
 	if (ret)
 		return ret;
 
-	ret = hostapd_ctrl_check_freq_params(&settings.freq_params);
+	ret = hostapd_ctrl_check_freq_params(&settings.freq_params,
+					     settings.punct_bitmap);
 	if (ret) {
 		wpa_printf(MSG_INFO,
 			   "chanswitch: invalid frequency settings provided");
@@ -3221,6 +3276,8 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 	} else if (os_strncmp(buf, "RELOG", 5) == 0) {
 		if (wpa_debug_reopen_file() < 0)
 			reply_len = -1;
+	} else if (os_strcmp(buf, "CLOSE_LOG") == 0) {
+		wpa_debug_stop_log();
 	} else if (os_strncmp(buf, "NOTE ", 5) == 0) {
 		wpa_printf(MSG_INFO, "NOTE: %s", buf + 5);
 	} else if (os_strcmp(buf, "STATUS") == 0) {
@@ -3392,6 +3449,9 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 	} else if (os_strcmp(buf, "RELOAD_WPA_PSK") == 0) {
 		if (hostapd_ctrl_iface_reload_wpa_psk(hapd))
 			reply_len = -1;
+	} else if (os_strcmp(buf, "RELOAD_BSS") == 0) {
+		if (hostapd_ctrl_iface_reload_bss(hapd))
+			reply_len = -1;
 	} else if (os_strncmp(buf, "RELOAD", 6) == 0) {
 		if (hostapd_ctrl_iface_reload(hapd->iface))
 			reply_len = -1;
@@ -3553,6 +3613,8 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 			if (hostapd_set_acl(hapd) ||
 			    hostapd_disassoc_accept_mac(hapd))
 				reply_len = -1;
+		} else {
+			reply_len = -1;
 		}
 	} else if (os_strncmp(buf, "DENY_ACL ", 9) == 0) {
 		if (os_strncmp(buf + 9, "ADD_MAC ", 8) == 0) {
@@ -3578,6 +3640,8 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 				&hapd->conf->num_deny_mac);
 			if (hostapd_set_acl(hapd))
 				reply_len = -1;
+		} else {
+			reply_len = -1;
 		}
 #ifdef CONFIG_DPP
 	} else if (os_strncmp(buf, "DPP_QR_CODE ", 12) == 0) {

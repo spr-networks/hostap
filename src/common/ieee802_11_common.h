@@ -21,7 +21,6 @@ struct element {
 struct hostapd_hw_modes;
 
 #define MAX_NOF_MB_IES_SUPPORTED 5
-#define MAX_NUM_FRAG_IES_SUPPORTED 3
 
 struct mb_ies_info {
 	struct {
@@ -29,21 +28,6 @@ struct mb_ies_info {
 		u8 ie_len;
 	} ies[MAX_NOF_MB_IES_SUPPORTED];
 	u8 nof_ies;
-};
-
-struct frag_ies_info {
-	struct {
-		u8 eid;
-		u8 eid_ext;
-		const u8 *ie;
-		u8 ie_len;
-	} frags[MAX_NUM_FRAG_IES_SUPPORTED];
-
-	u8 n_frags;
-
-	/* the last parsed element ID and element extension ID */
-	u8 last_eid;
-	u8 last_eid_ext;
 };
 
 /* Parsed Information Elements */
@@ -119,6 +103,12 @@ struct ieee802_11_elems {
 	const u8 *pasn_params;
 	const u8 *eht_capabilities;
 	const u8 *eht_operation;
+	const u8 *basic_mle;
+	const u8 *probe_req_mle;
+	const u8 *reconf_mle;
+	const u8 *tdls_mle;
+	const u8 *prior_access_mle;
+	const u8 *mbssid_known_bss;
 
 	u8 ssid_len;
 	u8 supp_rates_len;
@@ -157,10 +147,10 @@ struct ieee802_11_elems {
 	u8 dils_len;
 	u8 fils_req_params_len;
 	u8 fils_key_confirm_len;
-	u8 fils_hlp_len;
+	size_t fils_hlp_len;
 	u8 fils_ip_addr_assign_len;
 	u8 key_delivery_len;
-	u8 wrapped_data_len;
+	size_t wrapped_data_len;
 	u8 fils_pk_len;
 	u8 owe_dh_len;
 	u8 power_capab_len;
@@ -175,9 +165,20 @@ struct ieee802_11_elems {
 	u8 pasn_params_len;
 	u8 eht_capabilities_len;
 	u8 eht_operation_len;
+	size_t basic_mle_len;
+	size_t probe_req_mle_len;
+	size_t reconf_mle_len;
+	size_t tdls_mle_len;
+	size_t prior_access_mle_len;
+	u8 mbssid_known_bss_len;
 
 	struct mb_ies_info mb_ies;
-	struct frag_ies_info frag_ies;
+
+	/*
+	 * The number of fragment elements to be skipped after a known
+	 * fragmented element.
+	 */
+	unsigned int num_frag_elems;
 };
 
 typedef enum { ParseOK = 0, ParseUnknown = 1, ParseFailed = -1 } ParseRes;
@@ -185,6 +186,14 @@ typedef enum { ParseOK = 0, ParseUnknown = 1, ParseFailed = -1 } ParseRes;
 ParseRes ieee802_11_parse_elems(const u8 *start, size_t len,
 				struct ieee802_11_elems *elems,
 				int show_errors);
+void ieee802_11_elems_clear_ids(struct ieee802_11_elems *elems,
+				const u8 *ids, size_t num);
+void ieee802_11_elems_clear_ext_ids(struct ieee802_11_elems *elems,
+				    const u8 *ids, size_t num);
+ParseRes ieee802_11_parse_link_assoc_req(const u8 *start, size_t len,
+					 struct ieee802_11_elems *elems,
+					 struct wpabuf *mlbuf,
+					 u8 link_id, bool show_errors);
 int ieee802_11_ie_count(const u8 *ies, size_t ies_len);
 struct wpabuf * ieee802_11_vendor_ie_concat(const u8 *ies, size_t ies_len,
 					    u32 oui_type);
@@ -338,10 +347,12 @@ void hostapd_encode_edmg_chan(int edmg_enable, u8 edmg_channel,
 int ieee802_edmg_is_allowed(struct ieee80211_edmg_config allowed,
 			    struct ieee80211_edmg_config requested);
 
-struct wpabuf * ieee802_11_defrag_data(struct ieee802_11_elems *elems,
-				       u8 eid, u8 eid_ext,
-				       const u8 *data, u8 len);
+struct wpabuf * ieee802_11_defrag_data(const u8 *data, size_t len,
+				       bool ext_elem);
 struct wpabuf * ieee802_11_defrag(struct ieee802_11_elems *elems,
 				  u8 eid, u8 eid_ext);
+struct wpabuf * ieee802_11_defrag_mle(struct ieee802_11_elems *elems, u8 type);
+const u8 * get_ml_ie(const u8 *ies, size_t len, u8 type);
+const u8 * get_basic_mle_mld_addr(const u8 *buf, size_t len);
 
 #endif /* IEEE802_11_COMMON_H */

@@ -424,6 +424,72 @@ def test_sae_mixed_mfp(dev, apdev):
     dev[2].connect("test-sae", psk="12345678", ieee80211w="0", scan_freq="2412")
     dev[2].dump_monitor()
 
+def _test_sae_mixed_check_mfp(dev, apdev):
+    """Mixed SAE and non-SAE network with the sae_check_mfp option"""
+    check_sae_capab(dev[0])
+    check_sae_capab(dev[1])
+    check_sae_capab(dev[2])
+
+    params = hostapd.wpa2_params(ssid="test-sae", passphrase="12345678")
+    params['wpa_key_mgmt'] = 'SAE WPA-PSK'
+    params["ieee80211w"] = "1"
+    hostapd.add_ap(apdev[0], params)
+
+    params = hostapd.wpa2_params(ssid="test-sae-no-mfp", passphrase="12345678")
+    params['wpa_key_mgmt'] = 'SAE WPA-PSK'
+    params["ieee80211w"] = "0"
+    hostapd.add_ap(apdev[1], params)
+
+    dev[0].set("sae_check_mfp", "0")
+    dev[0].set("sae_groups", "")
+    dev[0].connect("test-sae", psk="12345678", key_mgmt="SAE WPA-PSK",
+                   ieee80211w="0", scan_freq="2412")
+    dev[0].dump_monitor()
+    status = dev[0].get_status()
+    if status['key_mgmt'] != "SAE":
+        raise Exception("SAE without sae_check_mfp was not allowed")
+
+    # Confirm SAE is used when sae_check_mfp is not set for non-PMF AP.
+    dev[2].set("sae_check_mfp", "0")
+    dev[2].set("sae_groups", "")
+    dev[2].connect("test-sae-no-mfp", psk="12345678", key_mgmt="SAE WPA-PSK",
+                   ieee80211w="1", scan_freq="2412")
+    status = dev[2].get_status()
+    if status['key_mgmt'] != "SAE":
+        raise Exception("SAE without sae_check_mfp was not allowed")
+    dev[2].dump_monitor()
+
+    # Confirm SAE is not used with the PMF disabled network configuration.
+    dev[1].set("sae_check_mfp", "1")
+    dev[1].set("sae_groups", "")
+    dev[1].connect("test-sae", psk="12345678", key_mgmt="SAE WPA-PSK",
+                   ieee80211w="0", scan_freq="2412")
+    status = dev[1].get_status()
+    dev[1].request("DISCONNECT")
+    dev[1].wait_disconnected()
+    dev[1].dump_monitor()
+    if status['key_mgmt'] != "WPA2-PSK":
+        raise Exception("SAE without MFP was allowed")
+    dev[1].request("REMOVE_NETWORK all")
+
+    # Confirm SAE is not used connecting to PMF disabled AP.
+    dev[1].set("sae_check_mfp", "1")
+    dev[1].set("sae_groups", "")
+    dev[1].connect("test-sae-no-mfp", psk="12345678", key_mgmt="SAE WPA-PSK",
+                   ieee80211w="1", scan_freq="2412")
+    status = dev[1].get_status()
+    if status['key_mgmt'] != "WPA2-PSK":
+        raise Exception("SAE without MFP was allowed")
+
+def test_sae_mixed_check_mfp(dev, apdev):
+    """Mixed SAE and non-SAE network with the sae_check_mfp option"""
+    try:
+        _test_sae_mixed_check_mfp(dev, apdev)
+    finally:
+        dev[0].set("sae_check_mfp", "0")
+        dev[1].set("sae_check_mfp", "0")
+        dev[2].set("sae_check_mfp", "0")
+
 def test_sae_and_psk_transition_disable(dev, apdev):
     """SAE and PSK transition disable indication"""
     check_sae_capab(dev[0])
@@ -2802,12 +2868,37 @@ def test_sae_ext_key_21(dev, apdev):
     """SAE with extended key AKM (group 21)"""
     run_sae_ext_key(dev, apdev, 21)
 
-def run_sae_ext_key(dev, apdev, group):
+def test_sae_ext_key_19_gcmp256(dev, apdev):
+    """SAE with extended key AKM (group 19) with GCMP256 pairwise cipher"""
+    run_sae_ext_key(dev, apdev, 19, cipher="GCMP-256")
+
+def test_sae_ext_key_20_gcmp256(dev, apdev):
+    """SAE with extended key AKM (group 20) with GCMP-256 pairwise cipher"""
+    run_sae_ext_key(dev, apdev, 20, cipher="GCMP-256")
+
+def test_sae_ext_key_21_gcmp256(dev, apdev):
+    """SAE with extended key AKM (group 21) with GCMP-256 pairwise cipher"""
+    run_sae_ext_key(dev, apdev, 21, cipher="GCMP-256")
+
+def test_sae_ext_key_21_gcmp256_gcmp256(dev, apdev):
+    """SAE with extended key AKM (group 21) with GCMP-256 pairwise and group cipher"""
+    run_sae_ext_key(dev, apdev, 21, cipher="GCMP-256", group_cipher="GCMP-256")
+
+def run_sae_ext_key(dev, apdev, group, cipher="CCMP", group_cipher="CCMP"):
     check_sae_capab(dev[0])
+
+    if cipher not in dev[0].get_capability("pairwise"):
+        raise HwsimSkip("Cipher %s not supported" % cipher)
+    if group_cipher not in dev[0].get_capability("group"):
+        raise HwsimSkip("Cipher %s not supported" % group_cipher)
+
     params = hostapd.wpa2_params(ssid="test-sae", passphrase="12345678")
     params['wpa_key_mgmt'] = 'SAE-EXT-KEY'
     params['sae_groups'] = str(group)
     params['ieee80211w'] = '2'
+    params['rsn_pairwise'] = cipher
+    params['group_cipher'] = group_cipher
+
     hapd = hostapd.add_ap(apdev[0], params)
     key_mgmt = hapd.get_config()['key_mgmt']
     if key_mgmt.split(' ')[0] != "SAE-EXT-KEY":
@@ -2815,6 +2906,7 @@ def run_sae_ext_key(dev, apdev, group):
 
     dev[0].set("sae_groups", str(group))
     id = dev[0].connect("test-sae", psk="12345678", key_mgmt="SAE-EXT-KEY",
+                        pairwise=cipher, group=group_cipher,
                         ieee80211w="2", scan_freq="2412")
     hapd.wait_sta()
     if dev[0].get_status_field('sae_group') != str(group):
@@ -2822,7 +2914,7 @@ def run_sae_ext_key(dev, apdev, group):
     bss = dev[0].get_bss(apdev[0]['bssid'])
     if 'flags' not in bss:
         raise Exception("Could not get BSS flags from BSS table")
-    if "[WPA2-SAE-EXT-KEY-CCMP]" not in bss['flags']:
+    if "[WPA2-SAE-EXT-KEY-" + cipher + "]" not in bss['flags']:
         raise Exception("Unexpected BSS flags: " + bss['flags'])
 
     res = hapd.request("STA-FIRST")
@@ -2882,3 +2974,77 @@ def test_sae_akms(dev, apdev):
     dev[2].set("sae_groups", "19")
     dev[2].connect("test-sae", psk="12345678", key_mgmt="SAE",
                    ieee80211w="2", scan_freq="2412")
+
+def test_sae_ext_key_h2e_rejected_group(dev, apdev):
+    """SAE-EXT-KEY, H2E, and rejected groups indication"""
+    run_sae_ext_key_h2e_rejected_group(dev, apdev, "19", "20 19", "20")
+
+def test_sae_ext_key_h2e_rejected_group2(dev, apdev):
+    """SAE-EXT-KEY, H2E, and rejected groups indication (2)"""
+    run_sae_ext_key_h2e_rejected_group(dev, apdev, "20", "19 20", "19")
+
+def run_sae_ext_key_h2e_rejected_group(dev, apdev, ap_groups, sta_groups,
+                                       rejected_groups):
+    check_sae_capab(dev[0])
+    params = hostapd.wpa2_params(ssid="sae-pwe", passphrase="12345678")
+    params['wpa_key_mgmt'] = 'SAE-EXT-KEY'
+    params['sae_groups'] = ap_groups
+    params['sae_pwe'] = "1"
+    params['ieee80211w'] = "2"
+    hapd = hostapd.add_ap(apdev[0], params)
+    try:
+        dev[0].set("sae_groups", sta_groups)
+        dev[0].set("sae_pwe", "1")
+        dev[0].connect("sae-pwe", psk="12345678", key_mgmt="SAE-EXT-KEY",
+                       ieee80211w="2", scan_freq="2412")
+        addr = dev[0].own_addr()
+        hapd.wait_sta(addr)
+        sta = hapd.get_sta(addr)
+        if 'sae_rejected_groups' not in sta:
+            raise Exception("No sae_rejected_groups")
+        val = sta['sae_rejected_groups']
+        if val != rejected_groups:
+            raise Exception("Unexpected sae_rejected_groups value: " + val)
+    finally:
+        dev[0].set("sae_groups", "")
+        dev[0].set("sae_pwe", "0")
+
+def test_sae_pref_ap_wrong_password(dev, apdev):
+    """SAE and preferred AP using wrong password"""
+    check_sae_capab(dev[0])
+
+    params = hostapd.wpa3_params(ssid="test-sae", password="correct")
+    params['ieee80211n'] = '0'
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    params = hostapd.wpa3_params(ssid="test-sae", password="wrong")
+    hapd2 = hostapd.add_ap(apdev[1], params)
+
+    dev[0].scan_for_bss(hapd.own_addr(), freq=2412)
+    dev[0].scan_for_bss(hapd2.own_addr(), freq=2412)
+
+    dev[0].set("sae_groups", "")
+    dev[0].connect("test-sae", sae_password="correct", key_mgmt="SAE",
+                   ieee80211w="2", scan_freq="2412")
+
+def test_sae_pref_ap_wrong_password2(dev, apdev):
+    """SAE and preferred AP using wrong password (2)"""
+    check_sae_capab(dev[0])
+
+    params = hostapd.wpa3_params(ssid="test-sae", password="wrong")
+    hapd2 = hostapd.add_ap(apdev[1], params)
+
+    dev[0].scan_for_bss(hapd2.own_addr(), freq=2412)
+
+    dev[0].set("sae_groups", "")
+    dev[0].connect("test-sae", sae_password="correct", key_mgmt="SAE",
+                   ieee80211w="2", scan_freq="2412", wait_connect=False)
+    ev = dev[0].wait_event(["CTRL-EVENT-SSID-TEMP-DISABLED"], timeout=30)
+    if ev is None:
+        raise Exception("Temporary disabled of SSID not seen")
+
+    params = hostapd.wpa3_params(ssid="test-sae", password="correct")
+    params['ieee80211n'] = '0'
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    dev[0].wait_connected(timeout=40)

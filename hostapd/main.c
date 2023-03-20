@@ -241,6 +241,9 @@ static int hostapd_driver_init(struct hostapd_iface *iface)
 				wpa_printf(MSG_ERROR, "set_wowlan failed");
 		}
 		os_free(triggs);
+
+		iface->mbssid_max_interfaces = capa.mbssid_max_interfaces;
+		iface->ema_max_periodicity = capa.ema_max_periodicity;
 	}
 
 	return 0;
@@ -494,7 +497,8 @@ static void usage(void)
 #endif /* CONFIG_DEBUG_SYSLOG */
 		"   -S   start all the interfaces synchronously\n"
 		"   -t   include timestamps in some debug messages\n"
-		"   -v   show hostapd version\n");
+		"   -v   show hostapd version\n"
+		"   -q   show less debug messages (-qq for even less)\n");
 
 	exit(1);
 }

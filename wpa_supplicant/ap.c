@@ -175,6 +175,9 @@ no_vht:
 	hostapd_set_oper_centr_freq_seg0_idx(
 		conf, conf->channel + conf->secondary_channel * 2);
 	hostapd_set_oper_chwidth(conf, CONF_OPER_CHWIDTH_USE_HT);
+	ieee80211_freq_to_channel_ext(ssid->frequency, 0,
+				      conf->vht_oper_chwidth,
+				      &conf->op_class, &conf->channel);
 }
 
 
@@ -323,6 +326,16 @@ int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
 
 		if (mode && is_6ghz_freq(ssid->frequency) &&
 		    conf->hw_mode == HOSTAPD_MODE_IEEE80211A) {
+			if (mode->eht_capab[wpas_mode_to_ieee80211_mode(
+					    ssid->mode)].eht_supported &&
+			    ssid->eht)
+				conf->ieee80211be = 1;
+
+			if (mode->he_capab[wpas_mode_to_ieee80211_mode(
+					    ssid->mode)].he_supported &&
+			    ssid->he)
+				conf->ieee80211ax = 1;
+
 #ifdef CONFIG_P2P
 			wpas_conf_ap_he_6ghz(wpa_s, mode, ssid, conf);
 #endif /* CONFIG_P2P */
@@ -397,6 +410,11 @@ int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
 			/* check this before VHT, because setting oper chan
 			 * width and friends is the same call for HE and VHT
 			 * and checks if conf->ieee8021ax == 1 */
+			if (mode->eht_capab[wpas_mode_to_ieee80211_mode(
+					    ssid->mode)].eht_supported &&
+			    ssid->eht)
+				conf->ieee80211be = 1;
+
 			if (mode->he_capab[wpas_mode_to_ieee80211_mode(
 					    ssid->mode)].he_supported &&
 			    ssid->he)
@@ -701,8 +719,12 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 		bss->wpa_group_rekey = 86400;
 	}
 
-	if (ssid->ieee80211w != MGMT_FRAME_PROTECTION_DEFAULT)
+	if (ssid->ieee80211w != MGMT_FRAME_PROTECTION_DEFAULT) {
 		bss->ieee80211w = ssid->ieee80211w;
+	} else if (wpa_s->conf->pmf != MGMT_FRAME_PROTECTION_DEFAULT) {
+		if (ssid->mode == WPAS_MODE_AP)
+			bss->ieee80211w = wpa_s->conf->pmf;
+	}
 
 #ifdef CONFIG_OCV
 	bss->ocv = ssid->ocv;
@@ -1817,7 +1839,8 @@ int ap_ctrl_iface_chanswitch(struct wpa_supplicant *wpa_s, const char *pos)
 
 
 void wpas_ap_ch_switch(struct wpa_supplicant *wpa_s, int freq, int ht,
-		       int offset, int width, int cf1, int cf2, int finished)
+		       int offset, int width, int cf1, int cf2,
+		       u16 punct_bitmap, int finished)
 {
 	struct hostapd_iface *iface = wpa_s->ap_iface;
 
@@ -1829,7 +1852,8 @@ void wpas_ap_ch_switch(struct wpa_supplicant *wpa_s, int freq, int ht,
 	if (wpa_s->current_ssid)
 		wpa_s->current_ssid->frequency = freq;
 	hostapd_event_ch_switch(iface->bss[0], freq, ht,
-				offset, width, cf1, cf2, finished);
+				offset, width, cf1, cf2, punct_bitmap,
+				finished);
 }
 
 

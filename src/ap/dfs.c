@@ -281,6 +281,10 @@ static int dfs_find_channel(struct hostapd_iface *iface,
 		if (chan->max_tx_power < iface->conf->min_tx_power)
 			continue;
 
+		if ((chan->flag & HOSTAPD_CHAN_INDOOR_ONLY) &&
+		    iface->conf->country[2] == 0x4f)
+			continue;
+
 		if (ret_chan && idx == channel_idx) {
 			wpa_printf(MSG_DEBUG, "Selected channel %d (%d)",
 				   chan->freq, chan->chan);
@@ -441,6 +445,8 @@ static int dfs_check_chans_radar(struct hostapd_iface *iface,
 	mode = iface->current_mode;
 
 	for (i = 0; i < n_chans; i++) {
+		if (start_chan_idx + i >= mode->num_channels)
+			break;
 		channel = &mode->channels[start_chan_idx + i];
 		if (channel->flag & HOSTAPD_CHAN_RADAR)
 			res++;
@@ -793,6 +799,8 @@ static unsigned int dfs_get_cac_time(struct hostapd_iface *iface,
 	mode = iface->current_mode;
 
 	for (i = 0; i < n_chans; i++) {
+		if (start_chan_idx + i >= mode->num_channels)
+			break;
 		channel = &mode->channels[start_chan_idx + i];
 		if (!(channel->flag & HOSTAPD_CHAN_RADAR))
 			continue;

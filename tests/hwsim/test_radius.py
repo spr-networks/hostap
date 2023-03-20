@@ -21,6 +21,7 @@ import hostapd
 from utils import *
 from test_ap_hs20 import build_dhcp_ack
 from test_ap_ft import ft_params1
+from test_eap_proto import add_message_authenticator_attr
 
 def connect(dev, ssid, wait_connect=True):
     dev.connect(ssid, key_mgmt="WPA-EAP", scan_freq="2412",
@@ -791,7 +792,7 @@ def add_message_auth_req(req):
     hmac_obj.update(16*b"\x00") # all zeros Authenticator in calculation
     hmac_obj.update(attrs)
     del req[80]
-    req.AddAttribute("Message-Authenticator", hmac_obj.digest())
+    add_message_authenticator_attr(req, hmac_obj.digest())
 
 def test_radius_das_disconnect_time_window(dev, apdev):
     """RADIUS Dynamic Authorization Extensions - Disconnect - time window"""
@@ -1077,7 +1078,7 @@ def test_radius_protocol(dev, apdev):
                     logger.info("Include two Message-Authenticator attributes")
                 else:
                     del reply[80]
-                reply.AddAttribute("Message-Authenticator", hmac_obj.digest())
+                add_message_authenticator_attr(reply, hmac_obj.digest())
             self.SendReplyPacket(pkt.fd, reply)
 
         def RunWithStop(self, t_events):
@@ -1387,6 +1388,9 @@ def test_radius_psk_oom(dev, apdev):
 
 def test_radius_sae_password(dev, apdev):
     """WPA3 with SAE password from RADIUS"""
+    check_sae_capab(dev[0])
+    check_sae_capab(dev[1])
+
     t, t_events = start_radius_psk_server("12345678")
 
     try:
@@ -1395,9 +1399,11 @@ def test_radius_sae_password(dev, apdev):
         params["wpa_key_mgmt"] = "SAE"
         params['ieee80211w'] = '2'
         hapd = hostapd.add_ap(apdev[0], params)
+        dev[0].set("sae_groups", "")
         dev[0].connect("test-wpa3-sae", sae_password="12345678", key_mgmt="SAE",
                        ieee80211w="2", scan_freq="2412")
         t_events['psk'] = "0123456789abcdef"
+        dev[1].set("sae_groups", "")
         dev[1].connect("test-wpa3-sae", sae_password="0123456789abcdef",
                        key_mgmt="SAE", ieee80211w="2", scan_freq="2412")
     finally:
@@ -1477,7 +1483,7 @@ def add_message_auth(req):
     hmac_obj.update(req.authenticator)
     hmac_obj.update(attrs)
     del req[80]
-    req.AddAttribute("Message-Authenticator", hmac_obj.digest())
+    add_message_authenticator_attr(req, hmac_obj.digest())
 
 def test_radius_server_failures(dev, apdev):
     """RADIUS server failure cases"""

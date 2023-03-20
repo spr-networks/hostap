@@ -842,6 +842,22 @@ def test_wpas_ap_sae(dev):
     """wpa_supplicant AP mode - SAE using psk"""
     run_wpas_ap_sae(dev, False)
 
+def test_wpas_ap_sae_pmf1(dev):
+    """wpa_supplicant AP mode - SAE using psk and pmf=1"""
+    try:
+        dev[0].set("pmf", "1")
+        run_wpas_ap_sae(dev, False, pmf=2)
+    finally:
+        dev[0].set("pmf", "0")
+
+def test_wpas_ap_sae_pmf2(dev):
+    """wpa_supplicant AP mode - SAE using psk and pmf=2"""
+    try:
+        dev[0].set("pmf", "2")
+        run_wpas_ap_sae(dev, False, pmf=1)
+    finally:
+        dev[0].set("pmf", "0")
+
 def test_wpas_ap_sae_password(dev):
     """wpa_supplicant AP mode - SAE using sae_password"""
     run_wpas_ap_sae(dev, True)
@@ -856,7 +872,7 @@ def test_wpas_ap_sae_pwe_1(dev):
         dev[0].set("sae_pwe", "0")
         dev[1].set("sae_pwe", "0")
 
-def run_wpas_ap_sae(dev, sae_password, sae_password_id=False):
+def run_wpas_ap_sae(dev, sae_password, sae_password_id=False, pmf=0):
     check_sae_capab(dev[0])
     check_sae_capab(dev[1])
     dev[0].request("SET sae_groups ")
@@ -884,7 +900,7 @@ def run_wpas_ap_sae(dev, sae_password, sae_password_id=False):
 
     dev[1].request("SET sae_groups ")
     dev[1].connect("wpas-ap-sae", key_mgmt="SAE", sae_password="12345678",
-                   sae_password_id=pw_id, scan_freq="2412")
+                   sae_password_id=pw_id, scan_freq="2412", ieee80211w=str(pmf))
 
 def test_wpas_ap_scan(dev, apdev):
     """wpa_supplicant AP mode and scanning"""
@@ -983,16 +999,20 @@ def test_wpas_ap_vendor_elems(dev):
     dev[0].select_network(id)
     wait_ap_ready(dev[0])
 
-    beacon_elems = "dd0411223301"
-    dev[0].set("ap_vendor_elements", beacon_elems)
-    dev[0].set("ap_assocresp_elements", "dd0411223302")
-    if "OK" not in dev[0].request("UPDATE_BEACON"):
-        raise Exception("UPDATE_BEACON failed")
+    try:
+        beacon_elems = "dd0411223301"
+        dev[0].set("ap_vendor_elements", beacon_elems)
+        dev[0].set("ap_assocresp_elements", "dd0411223302")
+        if "OK" not in dev[0].request("UPDATE_BEACON"):
+            raise Exception("UPDATE_BEACON failed")
 
-    dev[1].connect("wpas-ap-open", key_mgmt="NONE", scan_freq="2412")
-    bss = dev[1].get_bss(dev[0].own_addr())
-    if beacon_elems not in bss['ie']:
-        raise Exception("Vendor element not visible in scan results")
+        dev[1].connect("wpas-ap-open", key_mgmt="NONE", scan_freq="2412")
+        bss = dev[1].get_bss(dev[0].own_addr())
+        if beacon_elems not in bss['ie']:
+            raise Exception("Vendor element not visible in scan results")
+    finally:
+        dev[0].set("ap_vendor_elements", "")
+        dev[0].set("ap_assocresp_elements", "")
 
 def test_wpas_ap_lifetime_in_memory(dev, apdev, params):
     """wpa_supplicant AP mode and PSK/PTK lifetime in memory"""

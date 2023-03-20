@@ -738,6 +738,7 @@ def test_dbus_wps_pbc_overlap(dev, apdev):
     dev[0].request("WPS_CANCEL")
     dev[0].request("DISCONNECT")
     hapd.disable()
+    hapd2.disable()
     dev[0].flush_scan_cache()
 
 def test_dbus_wps_pin(dev, apdev):
@@ -2030,7 +2031,8 @@ def _test_dbus_interface(dev, apdev):
     (bus, wpas_obj, path, if_obj) = prepare_dbus(dev[0])
     wpas = dbus.Interface(wpas_obj, WPAS_DBUS_SERVICE)
 
-    params = dbus.Dictionary({'Ifname': 'lo', 'Driver': 'none'},
+    params = dbus.Dictionary({'Ifname': 'lo', 'Driver': 'none', 'Type': 'sta',
+                              'Address': '02:03:11:22:33:44'},
                              signature='sv')
     path = wpas.CreateInterface(params)
     logger.debug("New interface path: " + str(path))
@@ -2069,6 +2071,38 @@ def _test_dbus_interface(dev, apdev):
             raise Exception("Unexpected error message for invalid CreateInterface: " + str(e))
 
     params = dbus.Dictionary({'Driver': 'none'}, signature='sv')
+    try:
+        wpas.CreateInterface(params)
+        raise Exception("Invalid CreateInterface() accepted")
+    except dbus.exceptions.DBusException as e:
+        if "InvalidArgs" not in str(e):
+            raise Exception("Unexpected error message for invalid CreateInterface: " + str(e))
+
+    try:
+        wpas.GetInterface("lo")
+        raise Exception("Invalid GetInterface() accepted")
+    except dbus.exceptions.DBusException as e:
+        if "InterfaceUnknown" not in str(e):
+            raise Exception("Unexpected error message for invalid RemoveInterface: " + str(e))
+
+    params = dbus.Dictionary({'Ifname': 'lo', 'Driver': 'none',
+                              'Type': 'foo'}, signature='sv')
+    try:
+        wpas.CreateInterface(params)
+        raise Exception("Invalid CreateInterface() accepted")
+    except dbus.exceptions.DBusException as e:
+        if "InvalidArgs" not in str(e):
+            raise Exception("Unexpected error message for invalid CreateInterface: " + str(e))
+
+    try:
+        wpas.GetInterface("lo")
+        raise Exception("Invalid GetInterface() accepted")
+    except dbus.exceptions.DBusException as e:
+        if "InterfaceUnknown" not in str(e):
+            raise Exception("Unexpected error message for invalid RemoveInterface: " + str(e))
+
+    params = dbus.Dictionary({'Ifname': 'lo', 'Driver': 'none',
+                              'Address': 'foo'}, signature='sv')
     try:
         wpas.CreateInterface(params)
         raise Exception("Invalid CreateInterface() accepted")
@@ -6102,10 +6136,10 @@ def test_dbus_creds(dev, apdev):
     (bus, wpas_obj, path, if_obj) = prepare_dbus(dev[0])
     iface = dbus.Interface(if_obj, WPAS_DBUS_IFACE)
 
-    args = {'domain': 'server.w1.fi',
+    args = {'domain': ['server.w1.fi','server2.w1.fi'],
             'realm': 'server.w1.fi',
-            'roaming_consortium': '50a9bf',
-            'required_roaming_consortium': '23bf50',
+            'home_ois': '50a9bf',
+            'required_home_ois': '23bf50',
             'eap': 'TTLS',
             'phase2': 'auth=MSCHAPV2',
             'username': 'user',
@@ -6118,6 +6152,8 @@ def test_dbus_creds(dev, apdev):
         if k == 'password':
             continue
         prop = dev[0].get_cred(0, k)
+        if isinstance(v, list):
+            v = '\n'.join(v)
         if prop != v:
             raise Exception('Credential add failed: %s does not match %s' % (prop, v))
 

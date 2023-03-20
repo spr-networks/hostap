@@ -117,6 +117,7 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 #ifdef CONFIG_TESTING_OPTIONS
 	wconf->corrupt_gtk_rekey_mic_probability =
 		iconf->corrupt_gtk_rekey_mic_probability;
+	wconf->delay_eapol_tx = iconf->delay_eapol_tx;
 	if (conf->own_ie_override &&
 	    wpabuf_len(conf->own_ie_override) <= MAX_OWN_IE_OVERRIDE) {
 		wconf->own_ie_override_len = wpabuf_len(conf->own_ie_override);
@@ -196,10 +197,10 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 #endif /* CONFIG_FILS */
 	wconf->sae_pwe = conf->sae_pwe;
 	sae_pw_id = hostapd_sae_pw_id_in_use(conf);
-	if (sae_pw_id == 2 && wconf->sae_pwe != 3)
-		wconf->sae_pwe = 1;
-	else if (sae_pw_id == 1 && wconf->sae_pwe == 0)
-		wconf->sae_pwe = 2;
+	if (sae_pw_id == 2 && wconf->sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK)
+		wconf->sae_pwe = SAE_PWE_HASH_TO_ELEMENT;
+	else if (sae_pw_id == 1 && wconf->sae_pwe == SAE_PWE_HUNT_AND_PECK)
+		wconf->sae_pwe = SAE_PWE_BOTH;
 #ifdef CONFIG_SAE_PK
 	wconf->sae_pk = hostapd_sae_pk_in_use(conf);
 #endif /* CONFIG_SAE_PK */
@@ -934,7 +935,8 @@ static void hostapd_store_ptksa(void *ctx, const u8 *addr,int cipher,
 {
 	struct hostapd_data *hapd = ctx;
 
-	ptksa_cache_add(hapd->ptksa, addr, cipher, life_time, ptk);
+	ptksa_cache_add(hapd->ptksa, hapd->own_addr, addr, cipher, life_time,
+			ptk, NULL, NULL, 0);
 }
 
 
@@ -1469,6 +1471,21 @@ static void hostapd_request_radius_psk(void *ctx, const u8 *addr, int key_mgmt,
 #endif /* CONFIG_NO_RADIUS */
 
 
+#ifdef CONFIG_PASN
+static int hostapd_set_ltf_keyseed(void *ctx, const u8 *peer_addr,
+				   const u8 *ltf_keyseed,
+				   size_t ltf_keyseed_len)
+{
+	struct hostapd_data *hapd = ctx;
+
+	return hostapd_drv_set_secure_ranging_ctx(hapd, hapd->own_addr,
+						  peer_addr, 0, 0, NULL,
+						  ltf_keyseed_len,
+						  ltf_keyseed, 0);
+}
+#endif /* CONFIG_PASN */
+
+
 int hostapd_setup_wpa(struct hostapd_data *hapd)
 {
 	struct wpa_auth_config _conf;
@@ -1515,6 +1532,9 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 #ifndef CONFIG_NO_RADIUS
 		.request_radius_psk = hostapd_request_radius_psk,
 #endif /* CONFIG_NO_RADIUS */
+#ifdef CONFIG_PASN
+		.set_ltf_keyseed = hostapd_set_ltf_keyseed,
+#endif /* CONFIG_PASN */
 	};
 	const u8 *wpa_ie;
 	size_t wpa_ie_len;
@@ -1551,11 +1571,12 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 #endif /* CONFIG_OCV */
 
 	_conf.secure_ltf =
-		!!(hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_LTF);
+		!!(hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_LTF_AP);
 	_conf.secure_rtt =
-		!!(hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_RTT);
+		!!(hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_RTT_AP);
 	_conf.prot_range_neg =
-		!!(hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_PROT_RANGE_NEG);
+		!!(hapd->iface->drv_flags2 &
+		   WPA_DRIVER_FLAGS2_PROT_RANGE_NEG_AP);
 
 	hapd->wpa_auth = wpa_init(hapd->own_addr, &_conf, &cb, hapd);
 	if (hapd->wpa_auth == NULL) {

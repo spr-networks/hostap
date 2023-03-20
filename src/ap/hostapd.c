@@ -91,6 +91,29 @@ int hostapd_for_each_interface(struct hapd_interfaces *interfaces,
 }
 
 
+struct hostapd_data * hostapd_mbssid_get_tx_bss(struct hostapd_data *hapd)
+{
+	if (hapd->iconf->mbssid)
+		return hapd->iface->bss[0];
+
+	return hapd;
+}
+
+
+int hostapd_mbssid_get_bss_index(struct hostapd_data *hapd)
+{
+	if (hapd->iconf->mbssid) {
+		size_t i;
+
+		for (i = 1; i < hapd->iface->num_bss; i++)
+			if (hapd->iface->bss[i] == hapd)
+				return i;
+	}
+
+	return 0;
+}
+
+
 void hostapd_reconfig_encryption(struct hostapd_data *hapd)
 {
 	if (hapd->wpa_auth)
@@ -172,27 +195,34 @@ static void hostapd_reload_bss(struct hostapd_data *hapd)
 }
 
 
-static void hostapd_clear_old(struct hostapd_iface *iface)
+static void hostapd_clear_old_bss(struct hostapd_data *bss)
 {
-	size_t j;
+	wpa_printf(MSG_DEBUG, "BSS %s changed - clear old state",
+		   bss->conf->iface);
 
 	/*
 	 * Deauthenticate all stations since the new configuration may not
 	 * allow them to use the BSS anymore.
 	 */
-	for (j = 0; j < iface->num_bss; j++) {
-		hostapd_flush_old_stations(iface->bss[j],
-					   WLAN_REASON_PREV_AUTH_NOT_VALID);
+	hostapd_flush_old_stations(bss, WLAN_REASON_PREV_AUTH_NOT_VALID);
 #ifdef CONFIG_WEP
-		hostapd_broadcast_wep_clear(iface->bss[j]);
+	hostapd_broadcast_wep_clear(bss);
 #endif /* CONFIG_WEP */
 
 #ifndef CONFIG_NO_RADIUS
-		/* TODO: update dynamic data based on changed configuration
-		 * items (e.g., open/close sockets, etc.) */
-		radius_client_flush(iface->bss[j]->radius, 0);
+	/* TODO: update dynamic data based on changed configuration
+	 * items (e.g., open/close sockets, etc.) */
+	radius_client_flush(bss->radius, 0);
 #endif /* CONFIG_NO_RADIUS */
-	}
+}
+
+
+static void hostapd_clear_old(struct hostapd_iface *iface)
+{
+	size_t j;
+
+	for (j = 0; j < iface->num_bss; j++)
+		hostapd_clear_old_bss(iface->bss[j]);
 }
 
 
@@ -236,12 +266,12 @@ int hostapd_reload_config(struct hostapd_iface *iface)
 	if (newconf == NULL)
 		return -1;
 
-	hostapd_clear_old(iface);
-
 	oldconf = hapd->iconf;
 	if (hostapd_iface_conf_changed(newconf, oldconf)) {
 		char *fname;
 		int res;
+
+		hostapd_clear_old(iface);
 
 		wpa_printf(MSG_DEBUG,
 			   "Configuration changes include interface/BSS modification - force full disable+enable sequence");
@@ -272,6 +302,10 @@ int hostapd_reload_config(struct hostapd_iface *iface)
 
 	for (j = 0; j < iface->num_bss; j++) {
 		hapd = iface->bss[j];
+		if (!hapd->conf->config_id || !newconf->bss[j]->config_id ||
+		    os_strcmp(hapd->conf->config_id,
+			      newconf->bss[j]->config_id) != 0)
+			hostapd_clear_old_bss(hapd);
 		hapd->iconf = newconf;
 		hapd->iconf->channel = oldconf->channel;
 		hapd->iconf->acs = oldconf->acs;
@@ -525,6 +559,7 @@ void hostapd_cleanup_iface_partial(struct hostapd_iface *iface)
 	iface->current_rates = NULL;
 	os_free(iface->basic_rates);
 	iface->basic_rates = NULL;
+	iface->cac_started = 0;
 	ap_list_deinit(iface);
 	sta_track_deinit(iface);
 	airtime_policy_update_deinit(iface);
@@ -1104,18 +1139,55 @@ static int db_table_create_radius_attributes(sqlite3 *db)
 #endif /* CONFIG_NO_RADIUS */
 
 
+static int hostapd_start_beacon(struct hostapd_data *hapd,
+				bool flush_old_stations)
+{
+	struct hostapd_bss_config *conf = hapd->conf;
+
+	if (!conf->start_disabled && ieee802_11_set_beacon(hapd) < 0)
+		return -1;
+
+	if (flush_old_stations && !conf->start_disabled &&
+	    conf->broadcast_deauth) {
+		u8 addr[ETH_ALEN];
+
+		/* Should any previously associated STA not have noticed that
+		 * the AP had stopped and restarted, send one more
+		 * deauthentication notification now that the AP is ready to
+		 * operate. */
+		wpa_dbg(hapd->msg_ctx, MSG_DEBUG,
+			"Deauthenticate all stations at BSS start");
+		os_memset(addr, 0xff, ETH_ALEN);
+		hostapd_drv_sta_deauth(hapd, addr,
+				       WLAN_REASON_PREV_AUTH_NOT_VALID);
+	}
+
+	if (hapd->driver && hapd->driver->set_operstate)
+		hapd->driver->set_operstate(hapd->drv_priv, 1);
+
+	return 0;
+}
+
+
 /**
  * hostapd_setup_bss - Per-BSS setup (initialization)
  * @hapd: Pointer to BSS data
  * @first: Whether this BSS is the first BSS of an interface; -1 = not first,
  *	but interface may exist
+ * @start_beacon: Whether Beacon frame template should be configured and
+ *	transmission of Beaconf rames started at this time. This is used when
+ *	MBSSID element is enabled where the information regarding all BSSes
+ *	should be retrieved before configuring the Beacon frame template. The
+ *	calling functions are responsible for configuring the Beacon frame
+ *	explicitly if this is set to false.
  *
  * This function is used to initialize all per-BSS data structures and
  * resources. This gets called in a loop for each BSS when an interface is
  * initialized. Most of the modules that are initialized here will be
  * deinitialized in hostapd_cleanup().
  */
-static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
+static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
+			     bool start_beacon)
 {
 	struct hostapd_bss_config *conf = hapd->conf;
 	u8 ssid[SSID_MAX_LEN + 1];
@@ -1238,7 +1310,8 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 	 * Short SSID calculation is identical to FCS and it is defined in
 	 * IEEE P802.11-REVmd/D3.0, 9.4.2.170.3 (Calculating the Short-SSID).
 	 */
-	conf->ssid.short_ssid = crc32(conf->ssid.ssid, conf->ssid.ssid_len);
+	conf->ssid.short_ssid = ieee80211_crc32(conf->ssid.ssid,
+						conf->ssid.ssid_len);
 
 	if (!hostapd_drv_none(hapd)) {
 		wpa_printf(MSG_DEBUG, "Using interface %s with hwaddr " MACSTR
@@ -1362,6 +1435,22 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 		return -1;
 	}
 
+	if (conf->bridge[0]) {
+		/* Set explicitly configured bridge parameters that might have
+		 * been lost if the interface has been removed out of the
+		 * bridge. */
+
+		/* multicast to unicast on bridge ports */
+		if (conf->bridge_multicast_to_unicast)
+			hostapd_drv_br_port_set_attr(
+				hapd, DRV_BR_PORT_ATTR_MCAST2UCAST, 1);
+
+		/* hairpin mode */
+		if (conf->bridge_hairpin)
+			hostapd_drv_br_port_set_attr(
+				hapd, DRV_BR_PORT_ATTR_HAIRPIN_MODE, 1);
+	}
+
 	if (conf->proxy_arp) {
 		if (x_snoop_init(hapd)) {
 			wpa_printf(MSG_ERROR,
@@ -1387,29 +1476,11 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first)
 		return -1;
 	}
 
-	if (!conf->start_disabled && ieee802_11_set_beacon(hapd) < 0)
-		return -1;
-
-	if (flush_old_stations && !conf->start_disabled &&
-	    conf->broadcast_deauth) {
-		u8 addr[ETH_ALEN];
-
-		/* Should any previously associated STA not have noticed that
-		 * the AP had stopped and restarted, send one more
-		 * deauthentication notification now that the AP is ready to
-		 * operate. */
-		wpa_dbg(hapd->msg_ctx, MSG_DEBUG,
-			"Deauthenticate all stations at BSS start");
-		os_memset(addr, 0xff, ETH_ALEN);
-		hostapd_drv_sta_deauth(hapd, addr,
-				       WLAN_REASON_PREV_AUTH_NOT_VALID);
-	}
-
 	if (hapd->wpa_auth && wpa_init_keys(hapd->wpa_auth) < 0)
 		return -1;
 
-	if (hapd->driver && hapd->driver->set_operstate)
-		hapd->driver->set_operstate(hapd->drv_priv, 1);
+	if (start_beacon)
+		return hostapd_start_beacon(hapd, flush_old_stations);
 
 	return 0;
 }
@@ -1712,6 +1783,11 @@ static int setup_interface2(struct hostapd_iface *iface)
 		 * feature data. */
 	} else {
 		int ret;
+
+		if (iface->conf->acs) {
+			iface->freq = 0;
+			iface->conf->channel = 0;
+		}
 
 		ret = configured_fixed_chan_to_freq(iface);
 		if (ret < 0)
@@ -2134,7 +2210,7 @@ static int hostapd_setup_interface_complete_sync(struct hostapd_iface *iface,
 		hapd = iface->bss[j];
 		if (j)
 			os_memcpy(hapd->own_addr, prev_addr, ETH_ALEN);
-		if (hostapd_setup_bss(hapd, j == 0)) {
+		if (hostapd_setup_bss(hapd, j == 0, !iface->conf->mbssid)) {
 			for (;;) {
 				hapd = iface->bss[j];
 				hostapd_bss_deinit_no_free(hapd);
@@ -2148,6 +2224,24 @@ static int hostapd_setup_interface_complete_sync(struct hostapd_iface *iface,
 		if (is_zero_ether_addr(hapd->conf->bssid))
 			prev_addr = hapd->own_addr;
 	}
+
+	if (hapd->iconf->mbssid) {
+		for (j = 0; hapd->iconf->mbssid && j < iface->num_bss; j++) {
+			hapd = iface->bss[j];
+			if (hostapd_start_beacon(hapd, true)) {
+				for (;;) {
+					hapd = iface->bss[j];
+					hostapd_bss_deinit_no_free(hapd);
+					hostapd_free_hapd_data(hapd);
+					if (j == 0)
+						break;
+					j--;
+				}
+				goto fail;
+			}
+		}
+	}
+
 	hapd = iface->bss[0];
 
 	hostapd_tx_queue_params(iface);
@@ -2801,6 +2895,21 @@ int hostapd_reload_iface(struct hostapd_iface *hapd_iface)
 }
 
 
+int hostapd_reload_bss_only(struct hostapd_data *bss)
+{
+
+	wpa_printf(MSG_DEBUG, "Reload BSS %s", bss->conf->iface);
+	hostapd_set_security_params(bss->conf, 1);
+	if (hostapd_config_check(bss->iconf, 1) < 0) {
+		wpa_printf(MSG_ERROR, "Updated BSS configuration is invalid");
+		return -1;
+	}
+	hostapd_clear_old_bss(bss);
+	hostapd_reload_bss(bss);
+	return 0;
+}
+
+
 int hostapd_disable_iface(struct hostapd_iface *hapd_iface)
 {
 	size_t j;
@@ -3029,7 +3138,7 @@ int hostapd_add_iface(struct hapd_interfaces *interfaces, char *buf)
 
 			if (start_ctrl_iface_bss(hapd) < 0 ||
 			    (hapd_iface->state == HAPD_IFACE_ENABLED &&
-			     hostapd_setup_bss(hapd, -1))) {
+			     hostapd_setup_bss(hapd, -1, true))) {
 				hostapd_cleanup(hapd);
 				hapd_iface->bss[hapd_iface->num_bss - 1] = NULL;
 				hapd_iface->conf->num_bss--;
@@ -3546,6 +3655,9 @@ static int hostapd_fill_csa_settings(struct hostapd_data *hapd,
 	struct hostapd_iface *iface = hapd->iface;
 	struct hostapd_freq_params old_freq;
 	int ret;
+#ifdef CONFIG_IEEE80211BE
+	u16 old_punct_bitmap;
+#endif /* CONFIG_IEEE80211BE */
 	u8 chan, bandwidth;
 
 	os_memset(&old_freq, 0, sizeof(old_freq));
@@ -3591,9 +3703,16 @@ static int hostapd_fill_csa_settings(struct hostapd_data *hapd,
 	if (ret)
 		return ret;
 
+#ifdef CONFIG_IEEE80211BE
+	old_punct_bitmap = iface->conf->punct_bitmap;
+	iface->conf->punct_bitmap = settings->punct_bitmap;
+#endif /* CONFIG_IEEE80211BE */
 	ret = hostapd_build_beacon_data(hapd, &settings->beacon_after);
 
 	/* change back the configuration */
+#ifdef CONFIG_IEEE80211BE
+	iface->conf->punct_bitmap = old_punct_bitmap;
+#endif /* CONFIG_IEEE80211BE */
 	hostapd_change_config_freq(iface->bss[0], iface->conf,
 				   &old_freq, NULL);
 

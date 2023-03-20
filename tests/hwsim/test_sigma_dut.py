@@ -539,7 +539,8 @@ def run_sigma_dut_sae_pw_id_ft(dev, apdev, over_ds=False):
         params['r1_key_holder'] = bssid
         hapd2 = hostapd.add_ap(apdev[1], params)
         bssid = hapd2.own_addr()
-        sigma_dut_cmd_check("sta_reassoc,interface,%s,Channel,1,bssid,%s" % (ifname, bssid))
+        sigma_dut_cmd_check("sta_reassoc,interface,%s,Channel,1,bssid,%s" % (ifname, bssid),
+                            timeout=20)
         dev[0].wait_connected()
 
         sigma_dut_cmd_check("sta_disconnect,interface," + ifname)
@@ -1792,8 +1793,11 @@ def test_sigma_dut_dpp_qr_mutual_resp_enrollee_connector_privacy(dev, apdev):
     """sigma_dut DPP/QR (mutual) responder as Enrollee (Connector Privacy)"""
     check_dpp_capab(dev[0], min_ver=3)
     check_dpp_capab(dev[1], min_ver=3)
-    run_sigma_dut_dpp_qr_mutual_resp_enrollee(dev, apdev,
-                                              ",DPPPrivNetIntro,Yes")
+    try:
+        run_sigma_dut_dpp_qr_mutual_resp_enrollee(dev, apdev,
+                                                  ",DPPPrivNetIntro,Yes")
+    finally:
+        dev[0].set("dpp_connector_privacy_default", "0", allow_fail=True)
 
 def run_sigma_dut_dpp_qr_mutual_resp_enrollee(dev, apdev, extra=None):
     check_dpp_capab(dev[0])
@@ -2738,6 +2742,21 @@ def test_sigma_dut_ap_dpp_qr_legacy_psk(dev, apdev, params):
     run_sigma_dut_ap_dpp_qr(dev, apdev, params, "ap-psk", "sta-psk",
                             extra="psk=%s" % (32*"12"))
 
+def test_sigma_dut_ap_dpp_qr_sae(dev, apdev, params):
+    """sigma_dut controlled AP (SAE)"""
+    run_sigma_dut_ap_dpp_qr(dev, apdev, params, "ap-sae", "sta-sae",
+                            extra="pass=%s" % to_hex("qwertyuiop"))
+
+def test_sigma_dut_ap_dpp_qr_dpp_sae(dev, apdev, params):
+    """sigma_dut controlled AP (DPP+SAE)"""
+    run_sigma_dut_ap_dpp_qr(dev, apdev, params, "ap-sae-dpp", "sta-sae",
+                            extra="pass=%s" % to_hex("qwertyuiop"))
+
+def test_sigma_dut_ap_dpp_qr_dpp_sae2(dev, apdev, params):
+    """sigma_dut controlled AP (DPP+SAE)"""
+    run_sigma_dut_ap_dpp_qr(dev, apdev, params, "ap-sae-dpp", "sta-dpp",
+                            extra="pass=%s" % to_hex("qwertyuiop"))
+
 def test_sigma_dut_ap_dpp_qr_mud_url(dev, apdev, params):
     """sigma_dut controlled AP (DPP) with MUD URL"""
     run_sigma_dut_ap_dpp_qr(dev, apdev, params, "ap-dpp", "sta-dpp",
@@ -2746,6 +2765,8 @@ def test_sigma_dut_ap_dpp_qr_mud_url(dev, apdev, params):
 def run_sigma_dut_ap_dpp_qr(dev, apdev, params, ap_conf, sta_conf, extra="",
                             mud_url=False):
     check_dpp_capab(dev[0])
+    if "sae" in sta_conf:
+        check_sae_capab(dev[1])
     logdir = params['prefix'] + ".sigma-hostapd"
     with HWSimRadio() as (radio, iface):
         sigma = start_sigma_dut(iface, hostapd_logdir=logdir)
@@ -2782,6 +2803,7 @@ def run_sigma_dut_ap_dpp_qr(dev, apdev, params, ap_conf, sta_conf, extra="",
 
             id0b = dev[0].dpp_qr_code(uri1)
 
+            dev[1].set("sae_groups", "")
             dev[1].set("dpp_config_processing", "2")
             cmd = "DPP_LISTEN 2412"
             if "OK" not in dev[1].request(cmd):
@@ -4071,6 +4093,87 @@ def test_sigma_dut_dpp_reconfig_enrollee(dev, apdev):
         dev[0].set("dpp_config_processing", "0")
         stop_sigma_dut(sigma)
 
+def test_sigma_dut_dpp_reconfig_enrollee_sae(dev, apdev):
+    """sigma_dut DPP reconfiguration using SAE (Enrollee)"""
+    check_dpp_capab(dev[0])
+    check_dpp_capab(dev[1])
+    check_sae_capab(dev[0])
+    hapd = start_dpp_ap(apdev[0])
+    sigma = start_sigma_dut(dev[0].ifname)
+    try:
+        cmd = "DPP_CONFIGURATOR_ADD key=" + csign
+        res = dev[1].request(cmd)
+        if "FAIL" in res:
+            raise Exception("Failed to add configurator")
+        conf_id = int(res)
+
+        id0 = dev[1].dpp_bootstrap_gen(chan="81/6", mac=True)
+        uri0 = dev[1].request("DPP_BOOTSTRAP_GET_URI %d" % id0)
+
+        dev[1].set("dpp_configurator_params",
+                   "conf=sta-dpp ssid=%s configurator=%d" % (to_hex("DPPNET01"), conf_id))
+        cmd = "DPP_LISTEN 2437 role=configurator"
+        if "OK" not in dev[1].request(cmd):
+            raise Exception("Failed to start listen operation")
+
+        ifname = dev[0].ifname
+        sigma_dut_cmd_check("sta_reset_default,interface,%s,prog,DPP" % ifname)
+
+        res = sigma_dut_cmd("dev_exec_action,program,DPP,DPPActionType,SetPeerBootstrap,DPPBootstrappingdata,%s,DPPBS,QR" % to_hex(uri0))
+        if "status,COMPLETE" not in res:
+            raise Exception("dev_exec_action did not succeed: " + res)
+
+        res = sigma_dut_cmd("dev_exec_action,program,DPP,DPPActionType,AutomaticDPP,DPPAuthRole,Initiator,DPPAuthDirection,Single,DPPProvisioningRole,Enrollee,DPPBS,QR,DPPTimeout,6,DPPWaitForConnect,Yes", timeout=10)
+        if "BootstrapResult,OK,AuthResult,OK,ConfResult,OK,NetworkIntroResult,OK,NetworkConnectResult,OK" not in res:
+            raise Exception("Unexpected result: " + res)
+
+        hapd.disable()
+        dev[0].dump_monitor()
+
+        hapd = start_sae_pwe_ap(apdev[0], 2, ssid="DPPNET01")
+
+        dev[1].set("dpp_configurator_params",
+                   "conf=sta-sae ssid=%s pass=%s configurator=%d conn_status=1" % (to_hex("DPPNET01"), to_hex("12345678"), conf_id))
+        cmd = "DPP_LISTEN 2437 role=configurator"
+        if "OK" not in dev[1].request(cmd):
+            raise Exception("Failed to start listen operation")
+        dev[1].dump_monitor()
+
+        res = sigma_dut_cmd("dev_exec_action,program,DPP,DPPActionType,DPPReconfigure,DPPTimeout,6,DPPWaitForConnect,Yes", timeout=10)
+        if "status,COMPLETE,ReconfigAuthResult,OK,ConfResult,OK,NetworkConnectResult,OK" not in res:
+            raise Exception("Unexpected reconfiguration result: " + res)
+
+        ev = dev[1].wait_event(["DPP-CONF-SENT"], timeout=15)
+        if ev is None:
+            raise Exception("DPP Config Response (reconfig) not transmitted")
+
+        dev[0].wait_connected(timeout=20)
+        ev = dev[1].wait_event(["DPP-CONN-STATUS-RESULT"], timeout=20)
+        if ev is None:
+            raise Exception("No connection status reported")
+        if "result=0" not in ev:
+            raise Exception("Connection status did not report success: " + ev)
+
+        time.sleep(1)
+        cmd = "DPP_LISTEN 2437 role=configurator"
+        if "OK" not in dev[1].request(cmd):
+            raise Exception("Failed to start listen operation")
+        dev[0].dump_monitor()
+        dev[1].dump_monitor()
+
+        res = sigma_dut_cmd("dev_exec_action,program,DPP,DPPActionType,DPPReconfigure,DPPTimeout,6,DPPWaitForConnect,Yes", timeout=30)
+        if "status,COMPLETE,ReconfigAuthResult,OK,ConfResult,OK,NetworkConnectResult,OK" not in res:
+            raise Exception("Unexpected reconfiguration [2] result: " + res)
+
+        ev = dev[1].wait_event(["DPP-CONF-SENT"], timeout=5)
+        if ev is None:
+            raise Exception("DPP Config Response (reconfig) not transmitted [2]")
+
+        dev[0].wait_connected(timeout=20)
+    finally:
+        dev[0].set("dpp_config_processing", "0")
+        stop_sigma_dut(sigma)
+
 def test_sigma_dut_dpp_reconfig_configurator(dev, apdev):
     """sigma_dut DPP reconfiguration (Configurator)"""
     check_dpp_capab(dev[0])
@@ -5168,7 +5271,7 @@ def test_sigma_dut_eap_aka(dev, apdev, params):
 
     identity = "0232010000000000@wlan.mnc232.mcc02.3gppnetwork.org"
     password = "90dca4eda45b53cf0f12d7c9c3bc6a89:cb9cccc4b9258e6dca4760379fb82581:000000000123"
-    cmd = "sta_set_eapaka,interface,%s,ssid,%s,keymgmttype,wpa2,encpType,AES-CCMP,imsiPrivacyCert,%s,username,%s,password,%s" % (ifname, ssid, cert_file, identity, password)
+    cmd = "sta_set_eapaka,interface,%s,ssid,%s,keymgmttype,wpa2,encpType,AES-CCMP,imsiPrivacyCert,%s,imsiPrivacyCertID,serno=12345,username,%s,password,%s" % (ifname, ssid, cert_file, identity, password)
 
     try:
         sigma_dut_cmd_check("sta_reset_default,interface,%s,prog,WPA3" % ifname)
@@ -5182,9 +5285,8 @@ def test_sigma_dut_eap_aka(dev, apdev, params):
     finally:
         stop_sigma_dut(sigma)
 
-def start_sae_pwe_ap(apdev, sae_pwe):
-    ssid = "test-sae"
-    params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
+def start_sae_pwe_ap(apdev, sae_pwe, ssid="test-sae", password="12345678"):
+    params = hostapd.wpa2_params(ssid=ssid, passphrase=password)
     params['wpa_key_mgmt'] = 'SAE'
     params["ieee80211w"] = "2"
     params['sae_groups'] = '19'
@@ -5773,7 +5875,8 @@ def test_sigma_dut_ft_rsnxe_used_mismatch(dev, apdev):
         hapd2 = hostapd.add_ap(apdev[1], params)
         bssid2 = hapd2.own_addr()
 
-        sigma_dut_cmd_check("sta_reassoc,interface,%s,Channel,1,bssid,%s" % (ifname, bssid2))
+        sigma_dut_cmd_check("sta_reassoc,interface,%s,Channel,1,bssid,%s" % (ifname, bssid2),
+                            timeout=20)
         count = 0
         for i in range(5):
             ev = dev[0].wait_event(["Trying to associate",
@@ -5951,7 +6054,7 @@ def test_sigma_dut_gtk_rekey(dev, apdev):
 
         dev[0].dump_monitor()
         sigma_dut_cmd_check("dev_exec_action,interface,%s,program,WPA3,KeyRotation,1" % ifname)
-        ev = dev[0].wait_event(["WPA: Group rekeying completed"], timeout=5)
+        ev = dev[0].wait_event(["RSN: Group rekeying completed"], timeout=5)
         if ev is None:
             raise Exception("GTK rekeying not seen")
 
@@ -5978,7 +6081,7 @@ def test_sigma_dut_ap_gtk_rekey(dev, apdev, params):
 
             sigma_dut_cmd_check("dev_exec_action,name,AP,interface,%s,program,WPA3,KeyRotation,1" % iface)
 
-            ev = dev[0].wait_event(["WPA: Group rekeying completed"], timeout=5)
+            ev = dev[0].wait_event(["RSN: Group rekeying completed"], timeout=5)
             if ev is None:
                 raise Exception("GTK rekeying not seen")
 
