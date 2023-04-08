@@ -2515,6 +2515,7 @@ void wpa_supplicant_associate(struct wpa_supplicant *wpa_s,
 		if (bss)
 			ssid->frequency = bss->freq;
 		if (wpa_supplicant_join_mesh(wpa_s, ssid) < 0) {
+			wpa_supplicant_set_state(wpa_s, WPA_INACTIVE);
 			wpa_msg(wpa_s, MSG_ERROR, "Could not join mesh");
 			return;
 		}
@@ -2762,7 +2763,8 @@ static void ibss_mesh_select_40mhz(struct wpa_supplicant *wpa_s,
 	int i, res;
 	unsigned int j;
 	static const int ht40plus[] = {
-		36, 44, 52, 60, 100, 108, 116, 124, 132, 149, 157, 184, 192
+		36, 44, 52, 60, 100, 108, 116, 124, 132, 149, 157, 165, 173,
+		184, 192
 	};
 	int ht40 = -1;
 
@@ -2863,9 +2865,9 @@ static bool ibss_mesh_select_80_160mhz(struct wpa_supplicant *wpa_s,
 				       struct hostapd_freq_params *freq,
 				       int ieee80211_mode, bool is_6ghz) {
 	static const int bw80[] = {
-		5180, 5260, 5500, 5580, 5660, 5745, 5955,
-		6035, 6115, 6195, 6275, 6355, 6435, 6515,
-		6595, 6675, 6755, 6835, 6915, 6995
+		5180, 5260, 5500, 5580, 5660, 5745, 5825,
+		5955, 6035, 6115, 6195, 6275, 6355, 6435,
+		6515, 6595, 6675, 6755, 6835, 6915, 6995
 	};
 	static const int bw160[] = {
 		5955, 6115, 6275, 6435, 6595, 6755, 6915
