@@ -378,10 +378,12 @@ static void sme_auth_handle_rrm(struct wpa_supplicant *wpa_s,
 }
 
 
-static bool wpas_ml_element(struct wpa_supplicant *wpa_s, struct wpa_bss *bss)
+static bool wpas_ml_element(struct wpa_supplicant *wpa_s, struct wpa_bss *bss,
+			    struct wpa_ssid *ssid)
 {
 	struct wpabuf *mlbuf;
-	const u8 *rnr_ie, *pos;
+	const u8 *rnr_ie, *pos, *rsn_ie;
+	struct wpa_ie_data ie;
 	u8 ml_ie_len, rnr_ie_len;
 	const struct ieee80211_eht_ml *eht_ml;
 	const struct eht_ml_basic_common_info *ml_basic_common_info;
@@ -400,6 +402,26 @@ static bool wpas_ml_element(struct wpa_supplicant *wpa_s, struct wpa_bss *bss)
 	if (!mlbuf) {
 		wpa_dbg(wpa_s, MSG_DEBUG, "MLD: No ML element");
 		return false;
+	}
+
+	rsn_ie = wpa_bss_get_ie(bss, WLAN_EID_RSN);
+	if (!rsn_ie || wpa_parse_wpa_ie(rsn_ie, 2 + rsn_ie[1], &ie)) {
+		wpa_dbg(wpa_s, MSG_DEBUG, "MLD: No RSN element");
+		goto out;
+	}
+
+	if (!(ie.capabilities & WPA_CAPABILITY_MFPC) ||
+	    wpas_get_ssid_pmf(wpa_s, ssid) == NO_MGMT_FRAME_PROTECTION) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"MLD: No management frame protection");
+		goto out;
+	}
+
+	ie.key_mgmt &= ~(WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_FT_PSK |
+			 WPA_KEY_MGMT_PSK_SHA256);
+	if (!(ie.key_mgmt & ssid->key_mgmt)) {
+		wpa_dbg(wpa_s, MSG_DEBUG, "MLD: No valid key management");
+		goto out;
 	}
 
 	ml_ie_len = wpabuf_len(mlbuf);
@@ -531,7 +553,7 @@ static void wpas_sme_ml_auth(struct wpa_supplicant *wpa_s,
 
 	if (ieee802_11_parse_elems(data->auth.ies + ie_offset,
 				   data->auth.ies_len - ie_offset,
-				   &elems, 0) != ParseOK) {
+				   &elems, 0) == ParseFailed) {
 		wpa_printf(MSG_DEBUG, "MLD: Failed parsing elements");
 		goto out;
 	}
@@ -604,7 +626,7 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 	params.ssid_len = bss->ssid_len;
 	params.p2p = ssid->p2p_group;
 
-	if (wpas_ml_element(wpa_s, bss)) {
+	if (wpas_ml_element(wpa_s, bss, ssid)) {
 		wpa_printf(MSG_DEBUG, "MLD: In authentication");
 		params.mld = true;
 		params.mld_link_id = wpa_s->mlo_assoc_link_id;
@@ -1598,7 +1620,7 @@ static int sme_external_ml_auth(struct wpa_supplicant *wpa_s,
 	const u8 *mld_addr;
 
 	if (ieee802_11_parse_elems(data + ie_offset, len - ie_offset,
-				   &elems, 0) != ParseOK) {
+				   &elems, 0) == ParseFailed) {
 		wpa_printf(MSG_DEBUG, "MLD: Failed parsing elements");
 		return -1;
 	}
@@ -1619,7 +1641,8 @@ static int sme_external_ml_auth(struct wpa_supplicant *wpa_s,
 	if (os_memcmp(wpa_s->sme.ext_auth_ap_mld_addr, mld_addr, ETH_ALEN) !=
 	    0) {
 		wpa_printf(MSG_DEBUG, "MLD: Unexpected MLD address (expected "
-			   MACSTR ")", MAC2STR(wpa_s->ap_mld_addr));
+			   MACSTR ")",
+			   MAC2STR(wpa_s->sme.ext_auth_ap_mld_addr));
 		return -1;
 	}
 

@@ -1726,6 +1726,38 @@ struct wpa_driver_ap_params {
 	 * subchannel is punctured, otherwise active.
 	 */
 	u16 punct_bitmap;
+
+	/**
+	 * rnr_elem - This buffer contains all of reduced neighbor report (RNR)
+	 * elements
+	 */
+	u8 *rnr_elem;
+
+	/**
+	 * rnr_elem_len - Length of rnr_elem buffer
+	 */
+	size_t rnr_elem_len;
+
+	/**
+	 * rnr_elem_count - Number of RNR elements
+	 */
+	unsigned int rnr_elem_count;
+
+	/**
+	 * rnr_elem_offset - The offsets to the elements in rnr_elem.
+	 * The driver will use these to include RNR elements in EMA beacons.
+	 */
+	u8 **rnr_elem_offset;
+
+	/**
+	 * allowed_freqs - List of allowed 20 MHz channel center frequencies in
+	 * MHz for AP operation. Drivers which support this parameter will
+	 * generate a new list based on this provided list by filtering out
+	 * channels that cannot be used at that time due to regulatory or other
+	 * constraints. The resulting list is used as the list of all allowed
+	 * channels whenever performing operations like ACS and DFS.
+	 */
+	int *allowed_freqs;
 };
 
 struct wpa_driver_mesh_bss_params {

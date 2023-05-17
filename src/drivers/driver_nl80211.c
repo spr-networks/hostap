@@ -4725,10 +4725,78 @@ static int nl80211_mbssid(struct nl_msg *msg,
 		nla_nest_end(msg, elems);
 	}
 
+	if (!params->ema)
+		return 0;
+
+	if (params->rnr_elem_count && params->rnr_elem_len &&
+	    params->rnr_elem_offset && *params->rnr_elem_offset) {
+		u8 i, **offs = params->rnr_elem_offset;
+
+		elems = nla_nest_start(msg, NL80211_ATTR_EMA_RNR_ELEMS);
+		if (!elems)
+			return -1;
+
+		for (i = 0; i < params->rnr_elem_count - 1; i++) {
+			if (nla_put(msg, i + 1, offs[i + 1] - offs[i], offs[i]))
+				return -1;
+		}
+
+		if (nla_put(msg, i + 1, *offs + params->rnr_elem_len - offs[i],
+			    offs[i]))
+			return -1;
+		nla_nest_end(msg, elems);
+	}
+
 	return 0;
 }
 
 #endif /* CONFIG_IEEE80211AX */
+
+
+#ifdef CONFIG_DRIVER_NL80211_QCA
+static void qca_set_allowed_ap_freqs(struct wpa_driver_nl80211_data *drv,
+				    const int *freqs, int num_freqs)
+{
+	struct nl_msg *msg;
+	struct nlattr *params, *freqs_list;
+	int i, ret;
+
+	if (!drv->set_wifi_conf_vendor_cmd_avail || !drv->qca_ap_allowed_freqs)
+		return;
+
+	wpa_printf(MSG_DEBUG, "nl80211: Set AP allowed frequency list");
+
+	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_VENDOR)) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION) ||
+	    !(params = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA)))
+		goto err;
+
+	freqs_list = nla_nest_start(
+		msg, QCA_WLAN_VENDOR_ATTR_CONFIG_AP_ALLOWED_FREQ_LIST);
+	if (!freqs_list)
+		goto err;
+
+	for (i = 0; i < num_freqs; i++) {
+		if (nla_put_u32(msg, i, freqs[i]))
+			goto err;
+	}
+
+	nla_nest_end(msg, freqs_list);
+	nla_nest_end(msg, params);
+
+	ret = send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
+	if (ret)
+		wpa_printf(MSG_ERROR,
+			   "nl80211: Failed set AP alllowed frequency list: %d (%s)",
+			   ret, strerror(-ret));
+
+	return;
+err:
+	nlmsg_free(msg);
+}
+#endif /* CONFIG_DRIVER_NL80211_QCA */
 
 
 static int wpa_driver_nl80211_set_ap(void *priv,
@@ -5052,6 +5120,12 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 				params->punct_bitmap))
 			goto fail;
 	}
+
+#ifdef CONFIG_DRIVER_NL80211_QCA
+	if (cmd == NL80211_CMD_NEW_BEACON && params->allowed_freqs)
+		qca_set_allowed_ap_freqs(drv, params->allowed_freqs,
+					 int_array_len(params->allowed_freqs));
+#endif /* CONFIG_DRIVER_NL80211_QCA */
 
 	ret = send_and_recv_msgs_connect_handle(drv, msg, bss, 1);
 	if (ret) {
@@ -9467,6 +9541,11 @@ static int nl80211_set_param(void *priv, const char *param)
 				wpa_printf(MSG_DEBUG,
 					   "nl80211: Failed to re-register Action frame processing - ignore for now");
 		}
+	}
+
+	if (os_strstr(param, "secure_ltf=1")) {
+		drv->capa.flags2 |= WPA_DRIVER_FLAGS2_SEC_LTF_STA |
+			WPA_DRIVER_FLAGS2_SEC_LTF_AP;
 	}
 
 	return 0;
