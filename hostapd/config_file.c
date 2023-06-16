@@ -4744,6 +4744,8 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		}
 	} else if (os_strcmp(buf, "pasn_comeback_after") == 0) {
 		bss->pasn_comeback_after = atoi(pos);
+	} else if (os_strcmp(buf, "pasn_noauth") == 0) {
+		bss->pasn_noauth = atoi(pos);
 #endif /* CONFIG_PASN */
 	} else if (os_strcmp(buf, "ext_capa_mask") == 0) {
 		if (get_hex_config(bss->ext_capa_mask, EXT_CAPA_MAX_LEN,
@@ -4780,6 +4782,10 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 			return 1;
 		}
 		conf->punct_acs_threshold = val;
+	} else if (os_strcmp(buf, "mld_ap") == 0) {
+		bss->mld_ap = !!atoi(pos);
+	} else if (os_strcmp(buf, "mld_id") == 0) {
+		bss->mld_id = atoi(pos);
 #endif /* CONFIG_IEEE80211BE */
 	} else {
 		wpa_printf(MSG_ERROR,

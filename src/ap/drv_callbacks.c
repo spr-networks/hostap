@@ -1418,6 +1418,23 @@ static void hostapd_action_rx(struct hostapd_data *hapd,
 
 #ifdef NEED_AP_MLME
 
+static struct hostapd_data *
+switch_link_hapd(struct hostapd_data *hapd, int link_id)
+{
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap && link_id >= 0) {
+		struct hostapd_data *link_bss;
+
+		link_bss = hostapd_mld_get_link_bss(hapd, link_id);
+		if (link_bss)
+			return link_bss;
+	}
+#endif /* CONFIG_IEEE80211BE */
+
+	return hapd;
+}
+
+
 #define HAPD_BROADCAST ((struct hostapd_data *) -1)
 
 static struct hostapd_data * get_hapd_bssid(struct hostapd_iface *iface,
@@ -1454,11 +1471,15 @@ static void hostapd_rx_from_unknown_sta(struct hostapd_data *hapd,
 
 static int hostapd_mgmt_rx(struct hostapd_data *hapd, struct rx_mgmt *rx_mgmt)
 {
-	struct hostapd_iface *iface = hapd->iface;
+	struct hostapd_iface *iface;
 	const struct ieee80211_hdr *hdr;
 	const u8 *bssid;
 	struct hostapd_frame_info fi;
 	int ret;
+	bool is_mld = false;
+
+	hapd = switch_link_hapd(hapd, rx_mgmt->link_id);
+	iface = hapd->iface;
 
 #ifdef CONFIG_TESTING_OPTIONS
 	if (hapd->ext_mgmt_frame_handling) {
@@ -1480,8 +1501,16 @@ static int hostapd_mgmt_rx(struct hostapd_data *hapd, struct rx_mgmt *rx_mgmt)
 	if (bssid == NULL)
 		return 0;
 
-	hapd = get_hapd_bssid(iface, bssid);
-	if (hapd == NULL) {
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap &&
+	    os_memcmp(hapd->mld_addr, bssid, ETH_ALEN) == 0)
+		is_mld = true;
+#endif /* CONFIG_IEEE80211BE */
+
+	if (!is_mld)
+		hapd = get_hapd_bssid(iface, bssid);
+
+	if (!hapd) {
 		u16 fc = le_to_host16(hdr->frame_control);
 
 		/*
@@ -1526,15 +1555,34 @@ static int hostapd_mgmt_rx(struct hostapd_data *hapd, struct rx_mgmt *rx_mgmt)
 
 
 static void hostapd_mgmt_tx_cb(struct hostapd_data *hapd, const u8 *buf,
-			       size_t len, u16 stype, int ok)
+			       size_t len, u16 stype, int ok, int link_id)
 {
 	struct ieee80211_hdr *hdr;
-	struct hostapd_data *orig_hapd = hapd;
+	struct hostapd_data *orig_hapd, *tmp_hapd;
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap && link_id != -1) {
+		tmp_hapd = hostapd_mld_get_link_bss(hapd, link_id);
+		if (tmp_hapd)
+			hapd = tmp_hapd;
+	}
+#endif /* CONFIG_IEEE80211BE */
+	orig_hapd = hapd;
 
 	hdr = (struct ieee80211_hdr *) buf;
-	hapd = get_hapd_bssid(hapd->iface, get_hdr_bssid(hdr, len));
-	if (!hapd)
+	tmp_hapd = get_hapd_bssid(hapd->iface, get_hdr_bssid(hdr, len));
+	if (tmp_hapd) {
+		hapd = tmp_hapd;
+#ifdef CONFIG_IEEE80211BE
+	} else if (hapd->conf->mld_ap &&
+		   os_memcmp(hapd->mld_addr, get_hdr_bssid(hdr, len),
+			     ETH_ALEN) == 0) {
+		/* AP MLD address match - use hapd pointer as-is */
+#endif /* CONFIG_IEEE80211BE */
+	} else {
 		return;
+	}
+
 	if (hapd == HAPD_BROADCAST) {
 		if (stype != WLAN_FC_STYPE_ACTION || len <= 25 ||
 		    buf[24] != WLAN_ACTION_PUBLIC)
@@ -1575,20 +1623,75 @@ static int hostapd_event_new_sta(struct hostapd_data *hapd, const u8 *addr)
 }
 
 
-static void hostapd_event_eapol_rx(struct hostapd_data *hapd, const u8 *src,
-				   const u8 *data, size_t data_len,
-				   enum frame_encryption encrypted)
+static struct hostapd_data * hostapd_find_by_sta(struct hostapd_iface *iface,
+						 const u8 *src)
 {
-	struct hostapd_iface *iface = hapd->iface;
 	struct sta_info *sta;
-	size_t j;
+	unsigned int j;
 
 	for (j = 0; j < iface->num_bss; j++) {
 		sta = ap_get_sta(iface->bss[j], src);
-		if (sta && sta->flags & WLAN_STA_ASSOC) {
-			hapd = iface->bss[j];
-			break;
+		if (sta && sta->flags & WLAN_STA_ASSOC)
+			return iface->bss[j];
+	}
+
+	return NULL;
+}
+
+
+static void hostapd_event_eapol_rx(struct hostapd_data *hapd, const u8 *src,
+				   const u8 *data, size_t data_len,
+				   enum frame_encryption encrypted,
+				   int link_id)
+{
+	struct hostapd_data *orig_hapd = hapd;
+
+#ifdef CONFIG_IEEE80211BE
+	if (link_id != -1) {
+		struct hostapd_data *h_hapd;
+
+		hapd = switch_link_hapd(hapd, link_id);
+		h_hapd = hostapd_find_by_sta(hapd->iface, src);
+		if (!h_hapd)
+			h_hapd = hostapd_find_by_sta(orig_hapd->iface, src);
+		if (h_hapd)
+			hapd = h_hapd;
+	} else if (hapd->conf->mld_ap) {
+		unsigned int i;
+
+		/* Search for STA on other MLO BSSs */
+		for (i = 0; i < hapd->iface->interfaces->count; i++) {
+			struct hostapd_iface *h =
+				hapd->iface->interfaces->iface[i];
+			struct hostapd_data *h_hapd = h->bss[0];
+			struct hostapd_bss_config *hconf = h_hapd->conf;
+
+			if (!hconf->mld_ap ||
+			    hconf->mld_id != hapd->conf->mld_id)
+				continue;
+
+			h_hapd = hostapd_find_by_sta(h, src);
+			if (h_hapd) {
+				hapd = h_hapd;
+				break;
+			}
 		}
+	} else {
+		hapd = hostapd_find_by_sta(hapd->iface, src);
+	}
+#else /* CONFIG_IEEE80211BE */
+	hapd = hostapd_find_by_sta(hapd->iface, src);
+#endif /* CONFIG_IEEE80211BE */
+
+	if (!hapd) {
+		/* WLAN cases need to have an existing association, but non-WLAN
+		 * cases (mainly, wired IEEE 802.1X) need to be able to process
+		 * EAPOL frames from new devices that do not yet have a STA
+		 * entry and as such, do not get a match in
+		 * hostapd_find_by_sta(). */
+		wpa_printf(MSG_DEBUG,
+			   "No STA-specific hostapd instance for EAPOL RX found - fall back to initial context");
+		hapd = orig_hapd;
 	}
 
 	ieee802_1x_receive(hapd, src, data, data_len, encrypted);
@@ -1932,7 +2035,8 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 			hostapd_mgmt_tx_cb(hapd, data->tx_status.data,
 					   data->tx_status.data_len,
 					   data->tx_status.stype,
-					   data->tx_status.ack);
+					   data->tx_status.ack,
+					   data->tx_status.link_id);
 			break;
 		case WLAN_FC_TYPE_DATA:
 			hostapd_tx_status(hapd, data->tx_status.dst,
@@ -1943,6 +2047,7 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		}
 		break;
 	case EVENT_EAPOL_TX_STATUS:
+		hapd = switch_link_hapd(hapd, data->eapol_tx_status.link_id);
 		hostapd_eapol_tx_status(hapd, data->eapol_tx_status.dst,
 					data->eapol_tx_status.data,
 					data->eapol_tx_status.data_len,
@@ -1984,7 +2089,8 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		hostapd_event_eapol_rx(hapd, data->eapol_rx.src,
 				       data->eapol_rx.data,
 				       data->eapol_rx.data_len,
-				       data->eapol_rx.encrypted);
+				       data->eapol_rx.encrypted,
+				       data->eapol_rx.link_id);
 		break;
 	case EVENT_ASSOC:
 		if (!data)

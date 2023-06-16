@@ -393,6 +393,25 @@ static int hostapd_broadcast_wep_set(struct hostapd_data *hapd)
 #endif /* CONFIG_WEP */
 
 
+static void hostapd_clear_drv_priv(struct hostapd_data *hapd)
+{
+	unsigned int i;
+
+	for (i = 0; i < hapd->iface->interfaces->count; i++) {
+		struct hostapd_iface *iface = hapd->iface->interfaces->iface[i];
+
+		if (hapd->iface == iface)
+			continue;
+
+		if (iface->bss && iface->bss[0] &&
+		    iface->bss[0]->mld_first_bss == hapd)
+			iface->bss[0]->drv_priv = NULL;
+	}
+
+	hapd->drv_priv = NULL;
+}
+
+
 void hostapd_free_hapd_data(struct hostapd_data *hapd)
 {
 	os_free(hapd->probereq_cb);
@@ -420,9 +439,11 @@ void hostapd_free_hapd_data(struct hostapd_data *hapd)
 	vlan_deinit(hapd);
 	hostapd_acl_deinit(hapd);
 #ifndef CONFIG_NO_RADIUS
-	radius_client_deinit(hapd->radius);
+	if (!hapd->mld_first_bss) {
+		radius_client_deinit(hapd->radius);
+		radius_das_deinit(hapd->radius_das);
+	}
 	hapd->radius = NULL;
-	radius_das_deinit(hapd->radius_das);
 	hapd->radius_das = NULL;
 #endif /* CONFIG_NO_RADIUS */
 
@@ -449,7 +470,7 @@ void hostapd_free_hapd_data(struct hostapd_data *hapd)
 			 * driver wrapper may have removed its internal instance
 			 * and hapd->drv_priv is not valid anymore.
 			 */
-			hapd->drv_priv = NULL;
+			hostapd_clear_drv_priv(hapd);
 		}
 	}
 
@@ -1196,6 +1217,10 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
 	u8 if_addr[ETH_ALEN];
 	int flush_old_stations = 1;
 
+	if (hapd->mld_first_bss)
+		wpa_printf(MSG_DEBUG,
+			   "MLD: %s: Setting non-first BSS", __func__);
+
 	wpa_printf(MSG_DEBUG, "%s(hapd=%p (%s), first=%d)",
 		   __func__, hapd, conf->iface, first);
 
@@ -1354,34 +1379,43 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
 	}
 #endif /* CONFIG_SQLITE */
 
-	hapd->radius = radius_client_init(hapd, conf->radius);
-	if (hapd->radius == NULL) {
-		wpa_printf(MSG_ERROR, "RADIUS client initialization failed.");
-		return -1;
-	}
-
-	if (conf->radius_das_port) {
-		struct radius_das_conf das_conf;
-		os_memset(&das_conf, 0, sizeof(das_conf));
-		das_conf.port = conf->radius_das_port;
-		das_conf.shared_secret = conf->radius_das_shared_secret;
-		das_conf.shared_secret_len =
-			conf->radius_das_shared_secret_len;
-		das_conf.client_addr = &conf->radius_das_client_addr;
-		das_conf.time_window = conf->radius_das_time_window;
-		das_conf.require_event_timestamp =
-			conf->radius_das_require_event_timestamp;
-		das_conf.require_message_authenticator =
-			conf->radius_das_require_message_authenticator;
-		das_conf.ctx = hapd;
-		das_conf.disconnect = hostapd_das_disconnect;
-		das_conf.coa = hostapd_das_coa;
-		hapd->radius_das = radius_das_init(&das_conf);
-		if (hapd->radius_das == NULL) {
-			wpa_printf(MSG_ERROR, "RADIUS DAS initialization "
-				   "failed.");
+	if (!hapd->mld_first_bss) {
+		hapd->radius = radius_client_init(hapd, conf->radius);
+		if (!hapd->radius) {
+			wpa_printf(MSG_ERROR,
+				   "RADIUS client initialization failed.");
 			return -1;
 		}
+
+		if (conf->radius_das_port) {
+			struct radius_das_conf das_conf;
+
+			os_memset(&das_conf, 0, sizeof(das_conf));
+			das_conf.port = conf->radius_das_port;
+			das_conf.shared_secret = conf->radius_das_shared_secret;
+			das_conf.shared_secret_len =
+				conf->radius_das_shared_secret_len;
+			das_conf.client_addr = &conf->radius_das_client_addr;
+			das_conf.time_window = conf->radius_das_time_window;
+			das_conf.require_event_timestamp =
+				conf->radius_das_require_event_timestamp;
+			das_conf.require_message_authenticator =
+				conf->radius_das_require_message_authenticator;
+			das_conf.ctx = hapd;
+			das_conf.disconnect = hostapd_das_disconnect;
+			das_conf.coa = hostapd_das_coa;
+			hapd->radius_das = radius_das_init(&das_conf);
+			if (!hapd->radius_das) {
+				wpa_printf(MSG_ERROR,
+					   "RADIUS DAS initialization failed.");
+				return -1;
+			}
+		}
+	} else {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Using RADIUS client of the first BSS");
+		hapd->radius = hapd->mld_first_bss->radius;
+		hapd->radius_das = hapd->mld_first_bss->radius_das;
 	}
 #endif /* CONFIG_NO_RADIUS */
 
@@ -1607,6 +1641,125 @@ static int start_ctrl_iface(struct hostapd_iface *iface)
 }
 
 
+/* When NO_IR flag is set and AP is stopped, clean up BSS parameters without
+ * deinitializing the driver and the control interfaces. A subsequent
+ * REG_CHANGE event can bring the AP back up.
+ */
+static void hostapd_no_ir_cleanup(struct hostapd_data *bss)
+{
+	hostapd_bss_deinit_no_free(bss);
+	hostapd_free_hapd_data(bss);
+	hostapd_cleanup_iface_partial(bss->iface);
+}
+
+
+static int hostapd_no_ir_channel_list_updated(struct hostapd_iface *iface,
+					      void *ctx)
+{
+	bool all_no_ir, is_6ghz;
+	int i, j;
+	struct hostapd_hw_modes *mode = NULL;
+
+	if (hostapd_get_hw_features(iface))
+		return 0;
+
+	all_no_ir = true;
+	is_6ghz = false;
+
+	for (i = 0; i < iface->num_hw_features; i++) {
+		mode = &iface->hw_features[i];
+
+		if (mode->mode == iface->conf->hw_mode) {
+			if (iface->freq > 0 &&
+			    !hw_mode_get_channel(mode, iface->freq, NULL)) {
+				mode = NULL;
+				continue;
+			}
+
+			for (j = 0; j < mode->num_channels; j++) {
+				if (!(mode->channels[j].flag &
+				      HOSTAPD_CHAN_NO_IR))
+					all_no_ir = false;
+
+				if (is_6ghz_freq(mode->channels[j].freq))
+					is_6ghz = true;
+			}
+			break;
+		}
+	}
+
+	if (!mode || !is_6ghz)
+		return 0;
+	iface->current_mode = mode;
+
+	if (iface->state == HAPD_IFACE_ENABLED) {
+		if (!all_no_ir) {
+			struct hostapd_channel_data *chan;
+
+			chan = hw_get_channel_freq(iface->current_mode->mode,
+						   iface->freq, NULL,
+						   iface->hw_features,
+						   iface->num_hw_features);
+
+			if (!chan) {
+				wpa_printf(MSG_ERROR,
+					   "NO_IR: Could not derive chan from freq");
+				return 0;
+			}
+
+			if (!(chan->flag & HOSTAPD_CHAN_NO_IR))
+				return 0;
+			wpa_printf(MSG_DEBUG,
+				   "NO_IR: The current channel has NO_IR flag now, stop AP.");
+		} else {
+			wpa_printf(MSG_DEBUG,
+				   "NO_IR: All chan in new chanlist are NO_IR, stop AP.");
+		}
+
+		hostapd_set_state(iface, HAPD_IFACE_NO_IR);
+		iface->is_no_ir = true;
+		hostapd_drv_stop_ap(iface->bss[0]);
+		hostapd_no_ir_cleanup(iface->bss[0]);
+		wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, AP_EVENT_NO_IR);
+	} else if (iface->state == HAPD_IFACE_NO_IR) {
+		if (all_no_ir) {
+			wpa_printf(MSG_DEBUG,
+				   "NO_IR: AP in NO_IR and all chan in the new chanlist are NO_IR. Ignore");
+			return 0;
+		}
+
+		if (!iface->conf->acs) {
+			struct hostapd_channel_data *chan;
+
+			chan = hw_get_channel_freq(iface->current_mode->mode,
+						   iface->freq, NULL,
+						   iface->hw_features,
+						   iface->num_hw_features);
+			if (!chan) {
+				wpa_printf(MSG_ERROR,
+					   "NO_IR: Could not derive chan from freq");
+				return 0;
+			}
+
+			/* If the last operating channel is NO_IR, trigger ACS.
+			 */
+			if (chan->flag & HOSTAPD_CHAN_NO_IR) {
+				iface->freq = 0;
+				iface->conf->channel = 0;
+				if (acs_init(iface) != HOSTAPD_CHAN_ACS)
+					wpa_printf(MSG_ERROR,
+						   "NO_IR: Could not start ACS");
+				return 0;
+			}
+		}
+
+		setup_interface2(iface);
+	}
+
+	return 0;
+}
+
+
 static void channel_list_update_timeout(void *eloop_ctx, void *timeout_ctx)
 {
 	struct hostapd_iface *iface = eloop_ctx;
@@ -1627,6 +1780,13 @@ static void channel_list_update_timeout(void *eloop_ctx, void *timeout_ctx)
 
 void hostapd_channel_list_updated(struct hostapd_iface *iface, int initiator)
 {
+	if (initiator == REGDOM_SET_BY_DRIVER) {
+		hostapd_for_each_interface(iface->interfaces,
+					   hostapd_no_ir_channel_list_updated,
+					   NULL);
+		return;
+	}
+
 	if (!iface->wait_channel_update || initiator != REGDOM_SET_BY_USER)
 		return;
 
@@ -1776,6 +1936,7 @@ static void hostapd_set_6ghz_sec_chan(struct hostapd_iface *iface)
 static int setup_interface2(struct hostapd_iface *iface)
 {
 	iface->wait_channel_update = 0;
+	iface->is_no_ir = false;
 
 	if (hostapd_get_hw_features(iface)) {
 		/* Not all drivers support this yet, so continue without hw
@@ -1831,6 +1992,14 @@ static int setup_interface2(struct hostapd_iface *iface)
 	return hostapd_setup_interface_complete(iface, 0);
 
 fail:
+	if (iface->is_no_ir) {
+		/* If AP is in NO_IR state, it can be reenabled by the driver
+		 * regulatory update and EVENT_CHANNEL_LIST_CHANGED. */
+		hostapd_set_state(iface, HAPD_IFACE_NO_IR);
+		wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, AP_EVENT_NO_IR);
+		return 0;
+	}
+
 	hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 	wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
 	if (iface->interfaces && iface->interfaces->terminate_on_error)
@@ -2317,10 +2486,20 @@ dfs_offload:
 	for (j = 0; j < iface->num_bss; j++)
 		hostapd_neighbor_set_own_report(iface->bss[j]);
 
+	if (iface->interfaces && iface->interfaces->count > 1)
+		ieee802_11_set_beacons(iface);
+
 	return 0;
 
 fail:
 	wpa_printf(MSG_ERROR, "Interface initialization failed");
+
+	if (iface->is_no_ir) {
+		hostapd_set_state(iface, HAPD_IFACE_NO_IR);
+		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_NO_IR);
+		return 0;
+	}
+
 	hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 	wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
 #ifdef CONFIG_FST
@@ -2366,8 +2545,15 @@ int hostapd_setup_interface_complete(struct hostapd_iface *iface, int err)
 
 	if (err) {
 		wpa_printf(MSG_ERROR, "Interface initialization failed");
-		hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 		iface->need_to_start_in_sync = 0;
+
+		if (iface->is_no_ir) {
+			hostapd_set_state(iface, HAPD_IFACE_NO_IR);
+			wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_NO_IR);
+			return 0;
+		}
+
+		hostapd_set_state(iface, HAPD_IFACE_DISABLED);
 		wpa_msg(hapd->msg_ctx, MSG_INFO, AP_EVENT_DISABLED);
 		if (interfaces && interfaces->terminate_on_error)
 			eloop_terminate();
@@ -2536,6 +2722,7 @@ void hostapd_interface_deinit(struct hostapd_iface *iface)
 
 	eloop_cancel_timeout(channel_list_update_timeout, iface, NULL);
 	iface->wait_channel_update = 0;
+	iface->is_no_ir = false;
 
 #ifdef CONFIG_FST
 	if (iface->fst) {
@@ -2800,8 +2987,9 @@ void hostapd_interface_deinit_free(struct hostapd_iface *iface)
 	wpa_printf(MSG_DEBUG, "%s: driver=%p drv_priv=%p -> hapd_deinit",
 		   __func__, driver, drv_priv);
 	if (driver && driver->hapd_deinit && drv_priv) {
-		driver->hapd_deinit(drv_priv);
-		iface->bss[0]->drv_priv = NULL;
+		if (!iface->bss[0]->mld_first_bss)
+			driver->hapd_deinit(drv_priv);
+		hostapd_clear_drv_priv(iface->bss[0]);
 	}
 	hostapd_interface_free(iface);
 }
@@ -2816,13 +3004,14 @@ static void hostapd_deinit_driver(const struct wpa_driver_ops *driver,
 	wpa_printf(MSG_DEBUG, "%s: driver=%p drv_priv=%p -> hapd_deinit",
 		   __func__, driver, drv_priv);
 	if (driver && driver->hapd_deinit && drv_priv) {
-		driver->hapd_deinit(drv_priv);
+		if (!hapd_iface->bss[0]->mld_first_bss)
+			driver->hapd_deinit(drv_priv);
 		for (j = 0; j < hapd_iface->num_bss; j++) {
 			wpa_printf(MSG_DEBUG, "%s:bss[%d]->drv_priv=%p",
 				   __func__, (int) j,
 				   hapd_iface->bss[j]->drv_priv);
 			if (hapd_iface->bss[j]->drv_priv == drv_priv) {
-				hapd_iface->bss[j]->drv_priv = NULL;
+				hostapd_clear_drv_priv(hapd_iface->bss[j]);
 				hapd_iface->extended_capa = NULL;
 				hapd_iface->extended_capa_mask = NULL;
 				hapd_iface->extended_capa_len = 0;
@@ -3163,8 +3352,14 @@ int hostapd_add_iface(struct hapd_interfaces *interfaces, char *buf)
 		conf_file = ptr + 7;
 
 	for (i = 0; i < interfaces->count; i++) {
+		bool mld_ap = false;
+
+#ifdef CONFIG_IEEE80211BE
+		mld_ap = interfaces->iface[i]->conf->bss[0]->mld_ap;
+#endif /* CONFIG_IEEE80211BE */
+
 		if (!os_strcmp(interfaces->iface[i]->conf->bss[0]->iface,
-			       buf)) {
+			       buf) && !mld_ap) {
 			wpa_printf(MSG_INFO, "Cannot add interface - it "
 				   "already exists");
 			return -1;
@@ -3339,7 +3534,12 @@ void hostapd_new_assoc_sta(struct hostapd_data *hapd, struct sta_info *sta,
 		return;
 	}
 
-	hostapd_prune_associations(hapd, sta->addr);
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap && sta->mld_info.mld_sta &&
+	    sta->mld_assoc_link_id != hapd->mld_link_id)
+		return;
+#endif /* CONFIG_IEEE80211BE */
+
 	ap_sta_clear_disconnect_timeouts(hapd, sta);
 	sta->post_csa_sa_query = 0;
 
@@ -3422,6 +3622,8 @@ const char * hostapd_state_text(enum hostapd_iface_state s)
 		return "DFS";
 	case HAPD_IFACE_ENABLED:
 		return "ENABLED";
+	case HAPD_IFACE_NO_IR:
+		return "NO_IR";
 	}
 
 	return "UNKNOWN";
@@ -4064,3 +4266,26 @@ void hostapd_ocv_check_csa_sa_query(void *eloop_ctx, void *timeout_ctx)
 	}
 }
 #endif /* CONFIG_OCV */
+
+
+#ifdef CONFIG_IEEE80211BE
+struct hostapd_data * hostapd_mld_get_link_bss(struct hostapd_data *hapd,
+					       u8 link_id)
+{
+	unsigned int i;
+
+	for (i = 0; i < hapd->iface->interfaces->count; i++) {
+		struct hostapd_iface *h = hapd->iface->interfaces->iface[i];
+		struct hostapd_data *h_hapd = h->bss[0];
+		struct hostapd_bss_config *hconf = h_hapd->conf;
+
+		if (!hconf->mld_ap || hconf->mld_id != hapd->conf->mld_id)
+			continue;
+
+		if (h_hapd->mld_link_id == link_id)
+			return h_hapd;
+	}
+
+	return NULL;
+}
+#endif /* CONFIG_IEEE80211BE */

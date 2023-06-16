@@ -8,6 +8,7 @@
 
 #include "utils/includes.h"
 #include "utils/common.h"
+#include "crypto/dh_groups.h"
 #include "hostapd.h"
 #include "sta_info.h"
 #include "ieee802_11.h"
@@ -416,4 +417,723 @@ void hostapd_get_eht_capab(struct hostapd_data *hapd,
 
 	os_memset(dest, 0, sizeof(*dest));
 	os_memcpy(dest, src, len);
+}
+
+
+u8 * hostapd_eid_eht_basic_ml(struct hostapd_data *hapd, u8 *eid,
+			      struct sta_info *info, bool include_mld_id)
+{
+	struct wpabuf *buf;
+	u16 control;
+	u8 *pos = eid;
+	const u8 *ptr;
+	size_t len, slice_len;
+	u8 link_id;
+	u8 common_info_len;
+
+	/*
+	 * As the Multi-Link element can exceed the size of 255 bytes need to
+	 * first build it and then handle fragmentation.
+	 */
+	buf = wpabuf_alloc(1024);
+	if (!buf)
+		return pos;
+
+	/* Multi-Link Control field */
+	control = MULTI_LINK_CONTROL_TYPE_BASIC |
+		BASIC_MULTI_LINK_CTRL_PRES_LINK_ID |
+		BASIC_MULTI_LINK_CTRL_PRES_BSS_PARAM_CH_COUNT |
+		BASIC_MULTI_LINK_CTRL_PRES_EML_CAPA |
+		BASIC_MULTI_LINK_CTRL_PRES_MLD_CAPA;
+
+	/*
+	 * Set the basic Multi-Link common information. Hard code the common
+	 * info length to 13 based on the length of the present fields:
+	 * Length (1) + MLD address (6) + Link ID (1) +
+	 * BSS Parameters Change Count (1) + EML Capabilities (2) +
+	 * MLD Capabilities and Operations (2)
+	 */
+	common_info_len = 13;
+
+	if (include_mld_id) {
+		/* AP MLD ID */
+		control |= BASIC_MULTI_LINK_CTRL_PRES_AP_MLD_ID;
+		common_info_len++;
+	}
+
+	wpabuf_put_le16(buf, control);
+
+	wpabuf_put_u8(buf, common_info_len);
+
+	/* Own MLD MAC Address */
+	wpabuf_put_data(buf, hapd->mld_addr, ETH_ALEN);
+
+	/* Own Link ID */
+	wpabuf_put_u8(buf, hapd->mld_link_id);
+
+	/* Currently hard code the BSS Parameters Change Count to 0x1 */
+	wpabuf_put_u8(buf, 0x1);
+
+	wpa_printf(MSG_DEBUG, "MLD: EML Capabilities=0x%x",
+		   hapd->iface->mld_eml_capa);
+	wpabuf_put_le16(buf, hapd->iface->mld_eml_capa);
+
+	wpa_printf(MSG_DEBUG, "MLD: MLD Capabilities and Operations=0x%x",
+		   hapd->iface->mld_mld_capa);
+	wpabuf_put_le16(buf, hapd->iface->mld_mld_capa);
+
+	if (include_mld_id) {
+		wpa_printf(MSG_DEBUG, "MLD: AP MLD ID=0x%x",
+			   hapd->conf->mld_id);
+		wpabuf_put_u8(buf, hapd->conf->mld_id);
+	}
+
+	if (!info)
+		goto out;
+
+	/* Add link info for the other links */
+	for (link_id = 0; link_id < MAX_NUM_MLD_LINKS; link_id++) {
+		struct mld_link_info *link = &info->mld_info.links[link_id];
+		struct hostapd_data *link_bss;
+
+		/*
+		 * control (2) + station info length (1) + MAC address (6) +
+		 * beacon interval (2) + TSF offset (8) + DTIM info (2) + BSS
+		 * parameters change counter (1) + station profile length.
+		 */
+		const size_t fixed_len = 22;
+		size_t total_len = fixed_len + link->resp_sta_profile_len;
+
+		/* Skip the local one */
+		if (link_id == hapd->mld_link_id || !link->valid)
+			continue;
+
+		link_bss = hostapd_mld_get_link_bss(hapd, link_id);
+		if (!link_bss) {
+			wpa_printf(MSG_ERROR,
+				   "MLD: Couldn't find link BSS - skip it");
+			continue;
+		}
+
+		/* Per-STA Profile subelement */
+		wpabuf_put_u8(buf, EHT_ML_SUB_ELEM_PER_STA_PROFILE);
+
+		if (total_len <= 255)
+			wpabuf_put_u8(buf, total_len);
+		else
+			wpabuf_put_u8(buf, 255);
+
+		/* STA Control */
+		control = (link_id & 0xf) |
+			EHT_PER_STA_CTRL_MAC_ADDR_PRESENT_MSK |
+			EHT_PER_STA_CTRL_COMPLETE_PROFILE_MSK |
+			EHT_PER_STA_CTRL_TSF_OFFSET_PRESENT_MSK |
+			EHT_PER_STA_CTRL_BEACON_INTERVAL_PRESENT_MSK |
+			EHT_PER_STA_CTRL_DTIM_INFO_PRESENT_MSK |
+			EHT_PER_STA_CTRL_BSS_PARAM_CNT_PRESENT_MSK;
+		wpabuf_put_le16(buf, control);
+
+		/* STA Info */
+
+		/* STA Info Length */
+		wpabuf_put_u8(buf, fixed_len - 2);
+		wpabuf_put_data(buf, link->local_addr, ETH_ALEN);
+		wpabuf_put_le16(buf, link_bss->iconf->beacon_int);
+
+		/* TSF Offset */
+		/*
+		 * TODO: Currently setting TSF offset to zero. However, this
+		 * information needs to come from the driver.
+		 */
+		wpabuf_put_le64(buf, 0);
+
+		/* DTIM Info */
+		wpabuf_put_le16(buf, link_bss->conf->dtim_period);
+
+		/* BSS Parameters Change Count */
+		/* TODO: Currently hard code the BSS Parameters Change Count to
+		 * 0x1 */
+		wpabuf_put_u8(buf, 0x1);
+
+		/* Fragment the sub element if needed */
+		if (total_len <= 255) {
+			wpabuf_put_data(buf, link->resp_sta_profile,
+					link->resp_sta_profile_len);
+		} else {
+			ptr = link->resp_sta_profile;
+			len = link->resp_sta_profile_len;
+
+			slice_len = 255 - fixed_len;
+
+			wpabuf_put_data(buf, ptr, slice_len);
+			len -= slice_len;
+			ptr += slice_len;
+
+			while (len) {
+				if (len <= 255)
+					slice_len = len;
+				else
+					slice_len = 255;
+
+				wpabuf_put_u8(buf, EHT_ML_SUB_ELEM_FRAGMENT);
+				wpabuf_put_u8(buf, slice_len);
+				wpabuf_put_data(buf, ptr, slice_len);
+
+				len -= slice_len;
+				ptr += slice_len;
+			}
+		}
+	}
+
+out:
+	/* Fragment the Multi-Link element, if needed */
+	len = wpabuf_len(buf);
+	ptr = wpabuf_head(buf);
+
+	if (len <= 254)
+		slice_len = len;
+	else
+		slice_len = 254;
+
+	*pos++ = WLAN_EID_EXTENSION;
+	*pos++ = slice_len + 1;
+	*pos++ = WLAN_EID_EXT_MULTI_LINK;
+	os_memcpy(pos, ptr, slice_len);
+
+	ptr += slice_len;
+	pos += slice_len;
+	len -= slice_len;
+
+	while (len) {
+		if (len <= 255)
+			slice_len = len;
+		else
+			slice_len = 255;
+
+		*pos++ = WLAN_EID_FRAGMENT;
+		*pos++ = slice_len;
+		os_memcpy(pos, ptr, slice_len);
+
+		ptr += slice_len;
+		pos += slice_len;
+		len -= slice_len;
+	}
+
+	wpabuf_free(buf);
+	return pos;
+}
+
+
+struct wpabuf * hostapd_ml_auth_resp(struct hostapd_data *hapd)
+{
+	struct wpabuf *buf = wpabuf_alloc(12);
+
+	if (!buf)
+		return NULL;
+
+	wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
+	wpabuf_put_u8(buf, 10);
+	wpabuf_put_u8(buf, WLAN_EID_EXT_MULTI_LINK);
+	wpabuf_put_le16(buf, MULTI_LINK_CONTROL_TYPE_BASIC);
+	wpabuf_put_u8(buf, ETH_ALEN + 1);
+	wpabuf_put_data(buf, hapd->mld_addr, ETH_ALEN);
+
+	return buf;
+}
+
+
+static const u8 *
+sae_commit_skip_fixed_fields(const struct ieee80211_mgmt *mgmt, size_t len,
+			     const u8 *pos, u16 status_code)
+{
+	u16 group;
+	size_t prime_len;
+	struct crypto_ec *ec;
+
+	if (status_code != WLAN_STATUS_SAE_HASH_TO_ELEMENT)
+		return pos;
+
+	/* SAE H2E commit message (group, scalar, FFE) */
+	if (len < 2) {
+		wpa_printf(MSG_DEBUG,
+			   "EHT: SAE Group is not present");
+		return NULL;
+	}
+
+	group = WPA_GET_LE16(pos);
+	pos += 2;
+
+	/* TODO: How to parse when the group is unknown? */
+	ec = crypto_ec_init(group);
+	if (!ec) {
+		const struct dh_group *dh = dh_groups_get(group);
+
+		if (!dh) {
+			wpa_printf(MSG_DEBUG, "EHT: Unknown SAE group %u",
+				   group);
+			return NULL;
+		}
+
+		prime_len = dh->prime_len;
+	} else {
+		prime_len = crypto_ec_prime_len(ec);
+	}
+
+	wpa_printf(MSG_DEBUG, "EHT: SAE scalar length is %zu", prime_len);
+
+	/* scalar */
+	pos += prime_len;
+
+	if (ec) {
+		pos += prime_len * 2;
+		crypto_ec_deinit(ec);
+	} else {
+		pos += prime_len;
+	}
+
+	if (pos - mgmt->u.auth.variable > (int) len) {
+		wpa_printf(MSG_DEBUG,
+			   "EHT: Too short SAE commit Authentication frame");
+		return NULL;
+	}
+
+	wpa_hexdump(MSG_DEBUG, "EHT: SAE: Authentication frame elements",
+		    pos, (int) len - (pos - mgmt->u.auth.variable));
+
+	return pos;
+}
+
+
+static const u8 *
+sae_confirm_skip_fixed_fields(struct hostapd_data *hapd,
+			      const struct ieee80211_mgmt *mgmt, size_t len,
+			      const u8 *pos, u16 status_code)
+{
+	struct sta_info *sta;
+
+	if (status_code == WLAN_STATUS_REJECTED_WITH_SUGGESTED_BSS_TRANSITION)
+		return pos;
+
+	/* send confirm integer */
+	pos += 2;
+
+	/*
+	 * At this stage we should already have an MLD station and actually SA
+	 * will be replaced with the MLD MAC address by the driver.
+	 */
+	sta = ap_get_sta(hapd, mgmt->sa);
+	if (!sta) {
+		wpa_printf(MSG_DEBUG, "SAE: No MLD STA for SAE confirm");
+		return NULL;
+	}
+
+	if (!sta->sae || sta->sae->state < SAE_COMMITTED || !sta->sae->tmp) {
+		if (sta->sae)
+			wpa_printf(MSG_DEBUG, "SAE: Invalid state=%u",
+				   sta->sae->state);
+		else
+			wpa_printf(MSG_DEBUG, "SAE: No SAE context");
+		return NULL;
+	}
+
+	wpa_printf(MSG_DEBUG, "SAE: confirm: kck_len=%zu",
+		   sta->sae->tmp->kck_len);
+
+	pos += sta->sae->tmp->kck_len;
+
+	if (pos - mgmt->u.auth.variable > (int) len) {
+		wpa_printf(MSG_DEBUG,
+			   "EHT: Too short SAE confirm Authentication frame");
+		return NULL;
+	}
+
+	return pos;
+}
+
+
+static const u8 * auth_skip_fixed_fields(struct hostapd_data *hapd,
+					 const struct ieee80211_mgmt *mgmt,
+					 size_t len)
+{
+	u16 auth_alg = le_to_host16(mgmt->u.auth.auth_alg);
+	u16 auth_transaction = le_to_host16(mgmt->u.auth.auth_transaction);
+	u16 status_code = le_to_host16(mgmt->u.auth.status_code);
+	const u8 *pos = mgmt->u.auth.variable;
+
+	/* Skip fixed fields as based on IEE P802.11-REVme/D3.0, Table 9-69
+	 * (Presence of fields and elements in Authentications frames) */
+	switch (auth_alg) {
+	case WLAN_AUTH_OPEN:
+		return pos;
+	case WLAN_AUTH_SAE:
+		if (auth_transaction == 1) {
+			if (status_code == WLAN_STATUS_SUCCESS) {
+				wpa_printf(MSG_DEBUG,
+					   "EHT: SAE H2E is mandatory for MLD");
+				goto out;
+			}
+
+			return sae_commit_skip_fixed_fields(mgmt, len, pos,
+							    status_code);
+		} else if (auth_transaction == 2) {
+			return sae_confirm_skip_fixed_fields(hapd, mgmt, len,
+							     pos, status_code);
+		}
+
+		return pos;
+	/* TODO: Support additional algorithms that can be used for MLO */
+	case WLAN_AUTH_FT:
+	case WLAN_AUTH_FILS_SK:
+	case WLAN_AUTH_FILS_SK_PFS:
+	case WLAN_AUTH_FILS_PK:
+	case WLAN_AUTH_PASN:
+	default:
+		break;
+	}
+
+out:
+	wpa_printf(MSG_DEBUG,
+		   "TODO: Authentication algorithm %u not supported with MLD",
+		   auth_alg);
+	return NULL;
+}
+
+
+const u8 * hostapd_process_ml_auth(struct hostapd_data *hapd,
+				   const struct ieee80211_mgmt *mgmt,
+				   size_t len)
+{
+	struct ieee802_11_elems elems;
+	const u8 *pos;
+
+	if (!hapd->conf->mld_ap)
+		return NULL;
+
+	len -= offsetof(struct ieee80211_mgmt, u.auth.variable);
+
+	pos = auth_skip_fixed_fields(hapd, mgmt, len);
+	if (!pos)
+		return NULL;
+
+	if (ieee802_11_parse_elems(pos,
+				   (int)len - (pos - mgmt->u.auth.variable),
+				   &elems, 0) == ParseFailed) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Failed parsing Authentication frame");
+	}
+
+	if (!elems.basic_mle || !elems.basic_mle_len)
+		return NULL;
+
+	return get_basic_mle_mld_addr(elems.basic_mle, elems.basic_mle_len);
+}
+
+
+static int hostapd_mld_validate_assoc_info(struct hostapd_data *hapd,
+					   struct mld_info *info)
+{
+	u8 i, link_id;
+
+	if (!info->mld_sta) {
+		wpa_printf(MSG_DEBUG, "MLD: Not a non-AP MLD");
+		return 0;
+	}
+
+	/*
+	 * Iterate over the links negotiated in the (Re)Association Request
+	 * frame and validate that they are indeed valid links in the local AP
+	 * MLD.
+	 *
+	 * While at it, also update the local address for the links in the
+	 * mld_info, so it could be easily available for later flows, e.g., for
+	 * the RSN Authenticator, etc.
+	 */
+	for (link_id = 0; link_id < MAX_NUM_MLD_LINKS; link_id++) {
+		struct hostapd_data *other_hapd;
+
+		if (!info->links[link_id].valid)
+			continue;
+
+		for (i = 0; i < hapd->iface->interfaces->count; i++) {
+			other_hapd = hapd->iface->interfaces->iface[i]->bss[0];
+
+			if (hapd == other_hapd)
+				continue;
+
+			if (other_hapd->conf->mld_ap &&
+			    other_hapd->conf->mld_id == hapd->conf->mld_id &&
+			    link_id == other_hapd->mld_link_id)
+				break;
+		}
+
+		if (i == hapd->iface->interfaces->count &&
+		    link_id != hapd->mld_link_id) {
+			wpa_printf(MSG_DEBUG, "MLD: Invalid link ID=%u",
+				   link_id);
+			return -1;
+		}
+
+		if (i < hapd->iface->interfaces->count)
+			os_memcpy(info->links[link_id].local_addr,
+				  other_hapd->own_addr,
+				  ETH_ALEN);
+	}
+
+	return 0;
+}
+
+
+u16 hostapd_process_ml_assoc_req(struct hostapd_data *hapd,
+				 struct ieee802_11_elems *elems,
+				 struct sta_info *sta)
+{
+	struct wpabuf *mlbuf;
+	const struct ieee80211_eht_ml *ml;
+	const struct eht_ml_basic_common_info *common_info;
+	size_t ml_len, common_info_len;
+	struct mld_link_info *link_info;
+	struct mld_info *info = &sta->mld_info;
+	const u8 *pos;
+	int ret = -1;
+	u16 ml_control;
+
+	mlbuf = ieee802_11_defrag_mle(elems, MULTI_LINK_CONTROL_TYPE_BASIC);
+	if (!mlbuf)
+		return WLAN_STATUS_SUCCESS;
+
+	ml = wpabuf_head(mlbuf);
+	ml_len = wpabuf_len(mlbuf);
+
+	ml_control = le_to_host16(ml->ml_control);
+	if ((ml_control & MULTI_LINK_CONTROL_TYPE_MASK) !=
+	    MULTI_LINK_CONTROL_TYPE_BASIC) {
+		wpa_printf(MSG_DEBUG, "MLD: Invalid ML type=%u",
+			   ml_control & MULTI_LINK_CONTROL_TYPE_MASK);
+		goto out;
+	}
+
+	/* Common Info length and MLD MAC address must always be present */
+	common_info_len = 1 + ETH_ALEN;
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_LINK_ID) {
+		wpa_printf(MSG_DEBUG, "MLD: Link ID info not expected");
+		goto out;
+	}
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_BSS_PARAM_CH_COUNT) {
+		wpa_printf(MSG_DEBUG, "MLD: BSS params change not expected");
+		goto out;
+	}
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_MSD_INFO) {
+		wpa_printf(MSG_DEBUG, "MLD: Sync delay not expected");
+		goto out;
+	}
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_EML_CAPA) {
+		common_info_len += 2;
+	} else {
+		wpa_printf(MSG_DEBUG, "MLD: EML capabilities not present");
+	}
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_MLD_CAPA) {
+		common_info_len += 2;
+
+	} else {
+		wpa_printf(MSG_DEBUG, "MLD: MLD capabilities not present");
+		goto out;
+	}
+
+	wpa_printf(MSG_DEBUG, "MLD: expected_common_info_len=%lu",
+		   common_info_len);
+
+	if (sizeof(*ml) + common_info_len > ml_len) {
+		wpa_printf(MSG_DEBUG, "MLD: Not enough bytes for common info");
+		goto out;
+	}
+
+	common_info = (const struct eht_ml_basic_common_info *) ml->variable;
+
+	/* Common information length includes the length octet */
+	if (common_info->len != common_info_len) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Invalid common info len=%u (expected %zu)",
+			   common_info->len, common_info_len);
+		goto out;
+	}
+
+	pos = common_info->variable;
+
+	if (ml_control & BASIC_MULTI_LINK_CTRL_PRES_EML_CAPA) {
+		info->common_info.eml_capa = WPA_GET_LE16(pos);
+		pos += 2;
+	} else {
+		info->common_info.eml_capa = 0;
+	}
+
+	info->common_info.mld_capa = WPA_GET_LE16(pos);
+	pos += 2;
+
+	wpa_printf(MSG_DEBUG, "MLD: addr=" MACSTR ", eml=0x%x, mld=0x%x",
+		   MAC2STR(info->common_info.mld_addr),
+		   info->common_info.eml_capa, info->common_info.mld_capa);
+
+	/* Check the MLD MAC Address */
+	if (os_memcmp(info->common_info.mld_addr, common_info->mld_addr,
+		      ETH_ALEN) != 0) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: MLD address mismatch between authentication ("
+			   MACSTR ") and association (" MACSTR ")",
+			   MAC2STR(info->common_info.mld_addr),
+			   MAC2STR(common_info->mld_addr));
+		goto out;
+	}
+
+	info->links[hapd->mld_link_id].valid = true;
+
+	/* Parse the link info field */
+	ml_len -= sizeof(*ml) + common_info_len;
+
+	while (ml_len > 2) {
+		size_t sub_elem_len = *(pos + 1);
+		size_t sta_info_len;
+		u16 control;
+
+		wpa_printf(MSG_DEBUG, "MLD: sub element len=%zu",
+			   sub_elem_len);
+
+		if (2 + sub_elem_len > ml_len) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: Invalid link info len: %zu %zu",
+				   2 + sub_elem_len, ml_len);
+			goto out;
+		}
+
+		if (*pos == MULTI_LINK_SUB_ELEM_ID_VENDOR) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: Skip vendor specific subelement");
+
+			pos += 2 + sub_elem_len;
+			ml_len -= 2 + sub_elem_len;
+			continue;
+		}
+
+		if (*pos != MULTI_LINK_SUB_ELEM_ID_PER_STA_PROFILE) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: Unexpected Multi-Link element subelement ID=%u",
+				   *pos);
+			goto out;
+		}
+
+		/* Skip the subelement ID and the length */
+		pos += 2;
+		ml_len -= 2;
+
+		/* Get the station control field */
+		if (sub_elem_len < 2) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: Too short Per-STA Profile subelement");
+			goto out;
+		}
+		control = WPA_GET_LE16(pos);
+		link_info = &info->links[control &
+					 EHT_PER_STA_CTRL_LINK_ID_MSK];
+		pos += 2;
+		ml_len -= 2;
+		sub_elem_len -= 2;
+
+		if (!(control & EHT_PER_STA_CTRL_COMPLETE_PROFILE_MSK)) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: Per-STA complete profile expected");
+			goto out;
+		}
+
+		if (!(control & EHT_PER_STA_CTRL_MAC_ADDR_PRESENT_MSK)) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: Per-STA MAC address not present");
+			goto out;
+		}
+
+		if ((control & (EHT_PER_STA_CTRL_BEACON_INTERVAL_PRESENT_MSK |
+				EHT_PER_STA_CTRL_DTIM_INFO_PRESENT_MSK))) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: Beacon/DTIM interval not expected");
+			goto out;
+		}
+
+		/* The length octet and the MAC address must be present */
+		sta_info_len = 1 + ETH_ALEN;
+
+		if (control & EHT_PER_STA_CTRL_NSTR_LINK_PAIR_PRESENT_MSK) {
+			if (control & EHT_PER_STA_CTRL_NSTR_BM_SIZE_MSK)
+				link_info->nstr_bitmap_len = 2;
+			else
+				link_info->nstr_bitmap_len = 1;
+		}
+
+		sta_info_len += link_info->nstr_bitmap_len;
+
+		if (sta_info_len > ml_len || sta_info_len != *pos ||
+		    sta_info_len > sub_elem_len) {
+			wpa_printf(MSG_DEBUG, "MLD: Invalid STA Info length");
+			goto out;
+		}
+
+		/* skip the length */
+		pos++;
+		ml_len--;
+
+		/* get the link address */
+		os_memcpy(link_info->peer_addr, pos, ETH_ALEN);
+		wpa_printf(MSG_DEBUG,
+			   "MLD: assoc: link id=%u, addr=" MACSTR,
+			   control & EHT_PER_STA_CTRL_LINK_ID_MSK,
+			   MAC2STR(link_info->peer_addr));
+
+		pos += ETH_ALEN;
+		ml_len -= ETH_ALEN;
+
+		/* Get the NSTR bitmap */
+		if (link_info->nstr_bitmap_len) {
+			os_memcpy(link_info->nstr_bitmap, pos,
+				  link_info->nstr_bitmap_len);
+			pos += link_info->nstr_bitmap_len;
+			ml_len -= link_info->nstr_bitmap_len;
+		}
+
+		sub_elem_len -= sta_info_len;
+
+		wpa_printf(MSG_DEBUG, "MLD: STA Profile len=%zu", sub_elem_len);
+		if (sub_elem_len > ml_len)
+			goto out;
+
+		if (sub_elem_len > 2)
+			link_info->capability = WPA_GET_LE16(pos);
+
+		pos += sub_elem_len;
+		ml_len -= sub_elem_len;
+
+		wpa_printf(MSG_DEBUG, "MLD: link ctrl=0x%x, " MACSTR
+			   ", nstr bitmap len=%lu",
+			   control, MAC2STR(link_info->peer_addr),
+			   link_info->nstr_bitmap_len);
+
+		link_info->valid = true;
+	}
+
+	if (ml_len) {
+		wpa_printf(MSG_DEBUG, "MLD: %zu bytes left after parsing. fail",
+			   ml_len);
+		goto out;
+	}
+
+	ret = hostapd_mld_validate_assoc_info(hapd, info);
+out:
+	wpabuf_free(mlbuf);
+	if (ret) {
+		os_memset(info, 0, sizeof(*info));
+		return WLAN_STATUS_UNSPECIFIED_FAILURE;
+	}
+
+	return WLAN_STATUS_SUCCESS;
 }

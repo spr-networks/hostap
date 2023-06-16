@@ -605,6 +605,14 @@ static u8 * hostapd_gen_probe_resp(struct hostapd_data *hapd,
 		buflen += 3 + sizeof(struct ieee80211_eht_operation);
 		if (hapd->iconf->punct_bitmap)
 			buflen += EHT_OPER_DISABLED_SUBCHAN_BITMAP_SIZE;
+
+		/*
+		 * TODO: Multi-Link element has variable length and can be
+		 * long based on the common info and number of per
+		 * station profiles. For now use 256.
+		 */
+		if (hapd->conf->mld_ap)
+			buflen += 256;
 	}
 #endif /* CONFIG_IEEE80211BE */
 
@@ -755,6 +763,8 @@ static u8 * hostapd_gen_probe_resp(struct hostapd_data *hapd,
 
 #ifdef CONFIG_IEEE80211BE
 	if (hapd->iconf->ieee80211be && !hapd->conf->disable_11be) {
+		if (hapd->conf->mld_ap)
+			pos = hostapd_eid_eht_basic_ml(hapd, pos, NULL, true);
 		pos = hostapd_eid_eht_capab(hapd, pos, IEEE80211_MODE_AP);
 		pos = hostapd_eid_eht_operation(hapd, pos);
 	}
@@ -1711,6 +1721,14 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 		tail_len += 3 + sizeof(struct ieee80211_eht_operation);
 		if (hapd->iconf->punct_bitmap)
 			tail_len += EHT_OPER_DISABLED_SUBCHAN_BITMAP_SIZE;
+
+		/*
+		 * TODO: Multi-Link element has variable length and can be
+		 * long based on the common info and number of per
+		 * station profiles. For now use 256.
+		 */
+		if (hapd->conf->mld_ap)
+			tail_len += 256;
 	}
 #endif /* CONFIG_IEEE80211BE */
 
@@ -1881,6 +1899,9 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 
 #ifdef CONFIG_IEEE80211BE
 	if (hapd->iconf->ieee80211be && !hapd->conf->disable_11be) {
+		if (hapd->conf->mld_ap)
+			tailpos = hostapd_eid_eht_basic_ml(hapd, tailpos, NULL,
+							   true);
 		tailpos = hostapd_eid_eht_capab(hapd, tailpos,
 						IEEE80211_MODE_AP);
 		tailpos = hostapd_eid_eht_operation(hapd, tailpos);
@@ -2029,6 +2050,14 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 				   "Not configuring FTM responder as the driver doesn't advertise support for it");
 		}
 	}
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap && hapd->iconf->ieee80211be &&
+	    !hapd->conf->disable_11be) {
+		params->mld_ap = true;
+		params->mld_link_id = hapd->mld_link_id;
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 	return 0;
 }
@@ -2186,21 +2215,29 @@ int ieee802_11_set_beacon(struct hostapd_data *hapd)
 	if (!iface->interfaces || iface->interfaces->count <= 1)
 		return 0;
 
-	/* Update Beacon frames in case of 6 GHz colocation */
+	/* Update Beacon frames in case of 6 GHz colocation or AP MLD */
 	is_6g = is_6ghz_op_class(iface->conf->op_class);
 	for (j = 0; j < iface->interfaces->count; j++) {
-		struct hostapd_iface *colocated;
+		struct hostapd_iface *other;
+		bool mld_ap = false;
 
-		colocated = iface->interfaces->iface[j];
-		if (colocated == iface || !colocated || !colocated->conf)
+		other = iface->interfaces->iface[j];
+		if (other == iface || !other || !other->conf)
 			continue;
 
-		if (is_6g == is_6ghz_op_class(colocated->conf->op_class))
+#ifdef CONFIG_IEEE80211BE
+		if (hapd->conf->mld_ap && other->bss[0]->conf->mld_ap &&
+		    hapd->conf->mld_id == other->bss[0]->conf->mld_id)
+			mld_ap = true;
+#endif /* CONFIG_IEEE80211BE */
+
+		if (is_6g == is_6ghz_op_class(other->conf->op_class) &&
+		    !mld_ap)
 			continue;
 
-		for (i = 0; i < colocated->num_bss; i++) {
-			if (colocated->bss[i] && colocated->bss[i]->started)
-				__ieee802_11_set_beacon(colocated->bss[i]);
+		for (i = 0; i < other->num_bss; i++) {
+			if (other->bss[i] && other->bss[i]->started)
+				__ieee802_11_set_beacon(other->bss[i]);
 		}
 	}
 

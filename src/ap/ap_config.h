@@ -908,6 +908,9 @@ struct hostapd_bss_config {
 #endif /* CONFIG_MACSEC */
 
 #ifdef CONFIG_PASN
+	/* Whether to allow PASN-UNAUTH */
+	int pasn_noauth;
+
 #ifdef CONFIG_TESTING_OPTIONS
 	/*
 	 * Normally, KDK should be derived if and only if both sides support
@@ -936,6 +939,14 @@ struct hostapd_bss_config {
 	u8 rnr;
 	char *config_id;
 	bool xrates_supported;
+
+#ifdef CONFIG_IEEE80211BE
+	/* The AP is part of an AP MLD */
+	u8 mld_ap;
+
+	/* The MLD ID to which the AP MLD is affiliated with */
+	u8 mld_id;
+#endif /* CONFIG_IEEE80211BE */
 };
 
 /**
