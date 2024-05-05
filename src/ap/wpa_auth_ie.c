@@ -10,6 +10,7 @@
 
 #include "utils/common.h"
 #include "common/ieee802_11_defs.h"
+#include "drivers/driver.h"
 #include "eapol_auth/eapol_auth_sm.h"
 #include "ap_config.h"
 #include "ieee802_11.h"
@@ -212,6 +213,13 @@ int wpa_write_rsn_ie(struct wpa_auth_config *conf, u8 *buf, size_t len,
 		num_suites++;
 	}
 #endif /* CONFIG_IEEE80211R_AP */
+#ifdef CONFIG_SHA384
+	if (conf->wpa_key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA384) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_802_1X_SHA384);
+		pos += RSN_SELECTOR_LEN;
+		num_suites++;
+	}
+#endif /* CONFIG_SHA384 */
 	if (conf->wpa_key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA256) {
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_802_1X_SHA256);
 		pos += RSN_SELECTOR_LEN;
@@ -600,7 +608,8 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 		    const u8 *wpa_ie, size_t wpa_ie_len,
 		    const u8 *rsnxe, size_t rsnxe_len,
 		    const u8 *mdie, size_t mdie_len,
-		    const u8 *owe_dh, size_t owe_dh_len)
+		    const u8 *owe_dh, size_t owe_dh_len,
+		    struct wpa_state_machine *assoc_sm)
 {
 	struct wpa_auth_config *conf = &wpa_auth->conf;
 	struct wpa_ie_data data;
@@ -705,6 +714,10 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 		else if (data.key_mgmt & WPA_KEY_MGMT_OSEN)
 			selector = RSN_AUTH_KEY_MGMT_OSEN;
 #endif /* CONFIG_HS20 */
+#ifdef CONFIG_SHA384
+		else if (data.key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA384)
+			selector = RSN_AUTH_KEY_MGMT_802_1X_SHA384;
+#endif /* CONFIG_SHA384 */
 		wpa_auth->dot11RSNAAuthenticationSuiteSelected = selector;
 
 		selector = wpa_cipher_to_suite(WPA_PROTO_RSN,
@@ -787,6 +800,10 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 	else if (key_mgmt & WPA_KEY_MGMT_FT_PSK)
 		sm->wpa_key_mgmt = WPA_KEY_MGMT_FT_PSK;
 #endif /* CONFIG_IEEE80211R_AP */
+#ifdef CONFIG_SHA384
+	else if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA384)
+		sm->wpa_key_mgmt = WPA_KEY_MGMT_IEEE8021X_SHA384;
+#endif /* CONFIG_SHA384 */
 	else if (key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA256)
 		sm->wpa_key_mgmt = WPA_KEY_MGMT_IEEE8021X_SHA256;
 	else if (key_mgmt & WPA_KEY_MGMT_PSK_SHA256)
@@ -940,6 +957,15 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 	else
 		sm->wpa = WPA_VERSION_WPA;
 
+	if (assoc_sm) {
+		/* For ML association link STA cannot choose a different
+		 * AKM or pairwise cipher from association STA */
+		if (sm->wpa_key_mgmt != assoc_sm->wpa_key_mgmt)
+			return WPA_INVALID_AKMP;
+		if (sm->pairwise != assoc_sm->pairwise)
+			return WPA_INVALID_PAIRWISE;
+	}
+
 #if defined(CONFIG_IEEE80211R_AP) && defined(CONFIG_FILS)
 	if ((sm->wpa_key_mgmt == WPA_KEY_MGMT_FT_FILS_SHA256 ||
 	     sm->wpa_key_mgmt == WPA_KEY_MGMT_FT_FILS_SHA384) &&
@@ -998,11 +1024,24 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 	}
 
 #ifdef CONFIG_SAE
-	if (sm->wpa_key_mgmt == WPA_KEY_MGMT_SAE && data.num_pmkid &&
-	    !sm->pmksa) {
-		wpa_auth_vlogger(wpa_auth, sm->addr, LOGGER_DEBUG,
-				 "No PMKSA cache entry found for SAE");
-		return WPA_INVALID_PMKID;
+	if (sm->wpa_key_mgmt == WPA_KEY_MGMT_SAE ||
+	    sm->wpa_key_mgmt == WPA_KEY_MGMT_SAE_EXT_KEY) {
+		u64 drv_flags = 0;
+		u64 drv_flags2 = 0;
+		bool ap_sae_offload = false;
+
+		if (wpa_auth->cb->get_drv_flags &&
+		    wpa_auth->cb->get_drv_flags(wpa_auth->cb_ctx, &drv_flags,
+						&drv_flags2) == 0)
+			ap_sae_offload =
+				!!(drv_flags2 &
+				   WPA_DRIVER_FLAGS2_SAE_OFFLOAD_AP);
+
+		if (!ap_sae_offload && data.num_pmkid && !sm->pmksa) {
+			wpa_auth_vlogger(wpa_auth, sm->addr, LOGGER_DEBUG,
+					 "No PMKSA cache entry found for SAE");
+			return WPA_INVALID_PMKID;
+		}
 	}
 #endif /* CONFIG_SAE */
 

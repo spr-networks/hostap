@@ -56,7 +56,7 @@ struct wlantest_sta {
 	struct wlantest_bss *bss;
 	u8 addr[ETH_ALEN];
 	u8 mld_mac_addr[ETH_ALEN];
-	u8 link_addr[MAX_NUM_MLO_LINKS][ETH_ALEN];
+	u8 link_addr[MAX_NUM_MLD_LINKS][ETH_ALEN];
 	enum {
 		STATE1 /* not authenticated */,
 		STATE2 /* authenticated */,
@@ -120,6 +120,7 @@ struct wlantest_sta {
 	u32 rx_tid[16 + 1];
 
 	u16 sae_group;
+	u16 owe_group;
 };
 
 struct wlantest_tdls {
@@ -143,6 +144,8 @@ struct wlantest_bss {
 	struct dl_list list;
 	u8 bssid[ETH_ALEN];
 	u8 mld_mac_addr[ETH_ALEN];
+	u8 link_id;
+	bool link_id_set;
 	u16 capab_info;
 	u16 prev_capab_info;
 	u8 ssid[32];
@@ -293,6 +296,8 @@ void rx_data_80211_encap(struct wlantest *wt, const u8 *bssid,
 			 const u8 *data, size_t len);
 
 struct wlantest_bss * bss_find(struct wlantest *wt, const u8 *bssid);
+struct wlantest_bss * bss_find_mld(struct wlantest *wt, const u8 *mld_mac_addr,
+				   int link_id);
 struct wlantest_bss * bss_get(struct wlantest *wt, const u8 *bssid);
 void bss_deinit(struct wlantest_bss *bss);
 void bss_update(struct wlantest *wt, struct wlantest_bss *bss,
@@ -348,8 +353,14 @@ u8 * wep_decrypt(struct wlantest *wt, const struct ieee80211_hdr *hdr,
 
 u8 * bip_protect(const u8 *igtk, size_t igtk_len, u8 *frame, size_t len,
 		 u8 *ipn, int keyid, size_t *prot_len);
+u8 * bip_protect_s1g_beacon(const u8 *igtk, size_t igtk_len, const u8 *frame,
+			    size_t len, const u8 *ipn, int keyid, bool bce,
+			    size_t *prot_len);
 u8 * bip_gmac_protect(const u8 *igtk, size_t igtk_len, u8 *frame, size_t len,
 		      u8 *ipn, int keyid, size_t *prot_len);
+u8 * bip_gmac_protect_s1g_beacon(const u8 *igtk, size_t igtk_len,
+				 const u8 *frame, size_t len, const u8 *ipn,
+				 int keyid, bool bce, size_t *prot_len);
 
 u8 * gcmp_decrypt(const u8 *tk, size_t tk_len, const struct ieee80211_hdr *hdr,
 		  const u8 *a1, const u8 *a2, const u8 *a3,

@@ -83,6 +83,8 @@ void wpas_notify_bss_ies_changed(struct wpa_supplicant *wpa_s,
 void wpas_notify_bss_rates_changed(struct wpa_supplicant *wpa_s,
 				   unsigned int id);
 void wpas_notify_bss_seen(struct wpa_supplicant *wpa_s, unsigned int id);
+void wpas_notify_bss_anqp_changed(struct wpa_supplicant *wpa_s,
+				  unsigned int id);
 void wpas_notify_blob_added(struct wpa_supplicant *wpa_s, const char *name);
 void wpas_notify_blob_removed(struct wpa_supplicant *wpa_s, const char *name);
 
@@ -94,7 +96,7 @@ void wpas_notify_resume(struct wpa_global *global);
 
 void wpas_notify_sta_authorized(struct wpa_supplicant *wpa_s,
 				const u8 *mac_addr, int authorized,
-				const u8 *p2p_dev_addr);
+				const u8 *p2p_dev_addr, const u8 *ip);
 void wpas_notify_p2p_find_stopped(struct wpa_supplicant *wpa_s);
 void wpas_notify_p2p_device_found(struct wpa_supplicant *wpa_s,
 				  const u8 *dev_addr, int new_device);
@@ -166,8 +168,12 @@ void wpas_notify_interworking_ap_added(struct wpa_supplicant *wpa_s,
 				       const char *type, int bh, int bss_load,
 				       int conn_capab);
 void wpas_notify_interworking_select_done(struct wpa_supplicant *wpa_s);
+void wpas_notify_anqp_query_done(struct wpa_supplicant *wpa_s,
+				 const u8 *dst, const char *result);
 void wpas_notify_pmk_cache_added(struct wpa_supplicant *wpa_s,
 				 struct rsn_pmksa_cache_entry *entry);
 void wpas_notify_signal_change(struct wpa_supplicant *wpa_s);
+void wpas_notify_hs20_t_c_acceptance(struct wpa_supplicant *wpa_s,
+				     const char *url);
 
 #endif /* NOTIFY_H */

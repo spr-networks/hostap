@@ -266,6 +266,10 @@ class Hostapd:
         if "OK" not in self.request("DISABLE"):
             raise Exception("Failed to disable hostapd interface " + self.ifname)
 
+    def link_remove(self, count=10):
+        if "OK" not in self.request("LINK_REMOVE %u" % count):
+            raise Exception("Failed to remove hostapd link " + self.ifname)
+
     def dump_monitor(self):
         while self.mon.pending():
             ev = self.mon.recv()
@@ -290,12 +294,35 @@ class Hostapd:
                 break
         return None
 
-    def wait_sta(self, addr=None, timeout=2):
+    def wait_sta(self, addr=None, timeout=2, wait_4way_hs=False):
         ev = self.wait_event(["AP-STA-CONNECT"], timeout=timeout)
         if ev is None:
             raise Exception("AP did not report STA connection")
         if addr and addr not in ev:
             raise Exception("Unexpected STA address in connection event: " + ev)
+        if wait_4way_hs:
+            ev2 = self.wait_event(["EAPOL-4WAY-HS-COMPLETED"],
+                                  timeout=timeout)
+            if ev2 is None:
+                raise Exception("AP did not report 4-way handshake completion")
+            if addr and addr not in ev2:
+                raise Exception("Unexpected STA address in 4-way handshake completion event: " + ev2)
+        return ev
+
+    def wait_sta_disconnect(self, addr=None, timeout=2):
+        ev = self.wait_event(["AP-STA-DISCONNECT"], timeout=timeout)
+        if ev is None:
+            raise Exception("AP did not report STA disconnection")
+        if addr and addr not in ev:
+            raise Exception("Unexpected STA address in disconnection event: " + ev)
+        return ev
+
+    def wait_4way_hs(self, addr=None, timeout=1):
+        ev = self.wait_event(["EAPOL-4WAY-HS-COMPLETED"], timeout=timeout)
+        if ev is None:
+            raise Exception("hostapd did not report 4-way handshake completion")
+        if addr and addr not in ev:
+            raise Exception("Unexpected STA address in 4-way handshake completion event: " + ev)
         return ev
 
     def wait_ptkinitdone(self, addr, timeout=2):
@@ -739,6 +766,9 @@ def remove_bss(apdev, ifname=None):
     hapd_global = HostapdGlobal(apdev)
     hapd_global.remove(ifname)
 
+    # wait little to make sure the AP stops beaconing
+    time.sleep(0.1)
+
 def terminate(apdev):
     try:
         hostname = apdev['hostname']
@@ -871,6 +901,40 @@ def ht40_minus_params(channel="1", ssid=None, country=None):
     params['ht_capab'] = "[HT40-]"
     return params
 
+def he_params(ssid=None):
+    params = {"ssid": "he6ghz",
+              "ieee80211n": "1",
+              "ieee80211ac": "1",
+              "wmm_enabled": "1",
+              "channel": "5",
+              "op_class": "131",
+              "ieee80211ax": "1",
+              "hw_mode": "a",
+              "he_oper_centr_freq_seg0_idx": "15",
+              "he_oper_chwidth": "2",
+              "vht_oper_chwidth": "2"}
+    if ssid:
+        params["ssid"] = ssid
+
+    return params
+
+def he_wpa2_params(ssid=None, wpa_key_mgmt="SAE", rsn_pairwise="CCMP",
+                   group_cipher="CCMP", sae_pwe="1", passphrase=None):
+    params = he_params(ssid)
+    params["wpa"] = "2"
+    params["wpa_key_mgmt"] = wpa_key_mgmt
+    params["rsn_pairwise"] = rsn_pairwise
+    params["group_cipher"] = group_cipher
+    params["ieee80211w"] = "2"
+    if "SAE" in wpa_key_mgmt:
+        params["sae_pwe"] = sae_pwe
+        params["sae_groups"] = "19"
+
+    if passphrase:
+        params["wpa_passphrase"] = passphrase
+
+    return params
+
 def cmd_execute(apdev, cmd, shell=False):
     hapd_global = HostapdGlobal(apdev)
     return hapd_global.cmd_execute(cmd, shell=shell)
@@ -965,12 +1029,14 @@ def cfg_mld_link_file(ifname, params):
     f.write("ctrl_interface=%s\n" % ctrl_iface)
     f.write("driver=nl80211\n")
     f.write("ieee80211n=1\n")
-    f.write("ieee80211ac=1\n")
+    if 'hw_mode' in params and params['hw_mode'] == 'a' and \
+       ('op_class' not in params or \
+        int(params['op_class']) not in [131, 132, 133, 134, 135, 136, 137]):
+        f.write("ieee80211ac=1\n")
     f.write("ieee80211ax=1\n")
     f.write("ieee80211be=1\n")
     f.write("interface=%s\n" % ifname)
     f.write("mld_ap=1\n")
-    f.write("mld_id=0\n")
 
     for k, v in list(params.items()):
         f.write("{}={}\n".format(k,v))

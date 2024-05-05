@@ -44,6 +44,20 @@ static int ieee80211_11_set_tfs_ie(struct hostapd_data *hapd, const u8 *addr,
 }
 
 
+static const u8 * wnm_ap_get_own_addr(struct hostapd_data *hapd,
+				      struct sta_info *sta)
+{
+	const u8 *own_addr = hapd->own_addr;
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap && (!sta || ap_sta_is_mld(hapd, sta)))
+		own_addr = hapd->mld->mld_addr;
+#endif /* CONFIG_IEEE80211BE */
+
+	return own_addr;
+}
+
+
 /* MLME-SLEEPMODE.response */
 static int ieee802_11_send_wnmsleep_resp(struct hostapd_data *hapd,
 					 const u8 *addr, u8 dialog_token,
@@ -63,6 +77,7 @@ static int ieee802_11_send_wnmsleep_resp(struct hostapd_data *hapd,
 	struct sta_info *sta;
 	enum wnm_oper tfs_oper = action_type == WNM_SLEEP_MODE_ENTER ?
 		WNM_SLEEP_TFS_RESP_IE_ADD : WNM_SLEEP_TFS_RESP_IE_NONE;
+	const u8 *own_addr;
 
 	sta = ap_get_sta(hapd, addr);
 	if (sta == NULL) {
@@ -143,9 +158,12 @@ static int ieee802_11_send_wnmsleep_resp(struct hostapd_data *hapd,
 		res = -1;
 		goto fail;
 	}
+
+	own_addr = wnm_ap_get_own_addr(hapd, sta);
+
 	os_memcpy(mgmt->da, addr, ETH_ALEN);
-	os_memcpy(mgmt->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(mgmt->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(mgmt->sa, own_addr, ETH_ALEN);
+	os_memcpy(mgmt->bssid, own_addr, ETH_ALEN);
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	mgmt->u.action.category = WLAN_ACTION_WNM;
@@ -366,6 +384,8 @@ static int ieee802_11_send_bss_trans_mgmt_request(struct hostapd_data *hapd,
 						  u8 dialog_token)
 {
 	struct ieee80211_mgmt *mgmt;
+	const u8 *own_addr;
+	struct sta_info *sta;
 	size_t len;
 	u8 *pos;
 	int res;
@@ -373,9 +393,13 @@ static int ieee802_11_send_bss_trans_mgmt_request(struct hostapd_data *hapd,
 	mgmt = os_zalloc(sizeof(*mgmt));
 	if (mgmt == NULL)
 		return -1;
+
+	sta = ap_get_sta(hapd, addr);
+	own_addr = wnm_ap_get_own_addr(hapd, sta);
+
 	os_memcpy(mgmt->da, addr, ETH_ALEN);
-	os_memcpy(mgmt->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(mgmt->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(mgmt->sa, own_addr, ETH_ALEN);
+	os_memcpy(mgmt->bssid, own_addr, ETH_ALEN);
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	mgmt->u.action.category = WLAN_ACTION_WNM;
@@ -821,14 +845,15 @@ int wnm_send_disassoc_imminent(struct hostapd_data *hapd,
 {
 	u8 buf[1000], *pos;
 	struct ieee80211_mgmt *mgmt;
+	const u8 *own_addr = wnm_ap_get_own_addr(hapd, sta);
 
 	os_memset(buf, 0, sizeof(buf));
 	mgmt = (struct ieee80211_mgmt *) buf;
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	os_memcpy(mgmt->da, sta->addr, ETH_ALEN);
-	os_memcpy(mgmt->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(mgmt->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(mgmt->sa, own_addr, ETH_ALEN);
+	os_memcpy(mgmt->bssid, own_addr, ETH_ALEN);
 	mgmt->u.action.category = WLAN_ACTION_WNM;
 	mgmt->u.action.u.bss_tm_req.action = WNM_BSS_TRANS_MGMT_REQ;
 	mgmt->u.action.u.bss_tm_req.dialog_token = 1;
@@ -887,14 +912,15 @@ int wnm_send_ess_disassoc_imminent(struct hostapd_data *hapd,
 	u8 buf[1000], *pos;
 	struct ieee80211_mgmt *mgmt;
 	size_t url_len;
+	const u8 *own_addr = wnm_ap_get_own_addr(hapd, sta);
 
 	os_memset(buf, 0, sizeof(buf));
 	mgmt = (struct ieee80211_mgmt *) buf;
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	os_memcpy(mgmt->da, sta->addr, ETH_ALEN);
-	os_memcpy(mgmt->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(mgmt->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(mgmt->sa, own_addr, ETH_ALEN);
+	os_memcpy(mgmt->bssid, own_addr, ETH_ALEN);
 	mgmt->u.action.category = WLAN_ACTION_WNM;
 	mgmt->u.action.u.bss_tm_req.action = WNM_BSS_TRANS_MGMT_REQ;
 	mgmt->u.action.u.bss_tm_req.dialog_token = 1;
@@ -939,6 +965,7 @@ int wnm_send_bss_tm_req(struct hostapd_data *hapd, struct sta_info *sta,
 	u8 *buf, *pos;
 	struct ieee80211_mgmt *mgmt;
 	size_t url_len;
+	const u8 *own_addr = wnm_ap_get_own_addr(hapd, sta);
 
 	wpa_printf(MSG_DEBUG, "WNM: Send BSS Transition Management Request to "
 		   MACSTR
@@ -952,8 +979,8 @@ int wnm_send_bss_tm_req(struct hostapd_data *hapd, struct sta_info *sta,
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	os_memcpy(mgmt->da, sta->addr, ETH_ALEN);
-	os_memcpy(mgmt->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(mgmt->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(mgmt->sa, own_addr, ETH_ALEN);
+	os_memcpy(mgmt->bssid, own_addr, ETH_ALEN);
 	mgmt->u.action.category = WLAN_ACTION_WNM;
 	mgmt->u.action.u.bss_tm_req.action = WNM_BSS_TRANS_MGMT_REQ;
 	mgmt->u.action.u.bss_tm_req.dialog_token = dialog_token;
@@ -1002,6 +1029,26 @@ int wnm_send_bss_tm_req(struct hostapd_data *hapd, struct sta_info *sta,
 	os_free(buf);
 
 	if (disassoc_timer) {
+#ifdef CONFIG_IEEE80211BE
+		if (ap_sta_is_mld(hapd, sta)) {
+			int i;
+			unsigned int links = 0;
+
+			for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
+				if (sta->mld_info.links[i].valid)
+					links++;
+			}
+
+			if (links > 1) {
+				wpa_printf(MSG_DEBUG,
+					   "WNM: Only terminating one link - other links remains associated for "
+					   MACSTR,
+					   MAC2STR(sta->mld_info.common_info.mld_addr));
+				return 0;
+			}
+		}
+#endif /* CONFIG_IEEE80211BE */
+
 		/* send disassociation frame after time-out */
 		set_disassoc_timer(hapd, sta, disassoc_timer);
 	}
@@ -1016,6 +1063,7 @@ int wnm_send_coloc_intf_req(struct hostapd_data *hapd, struct sta_info *sta,
 	u8 buf[100], *pos;
 	struct ieee80211_mgmt *mgmt;
 	u8 dialog_token = 1;
+	const u8 *own_addr = wnm_ap_get_own_addr(hapd, sta);
 
 	if (auto_report > 3 || timeout > 63)
 		return -1;
@@ -1024,8 +1072,8 @@ int wnm_send_coloc_intf_req(struct hostapd_data *hapd, struct sta_info *sta,
 	mgmt->frame_control = IEEE80211_FC(WLAN_FC_TYPE_MGMT,
 					   WLAN_FC_STYPE_ACTION);
 	os_memcpy(mgmt->da, sta->addr, ETH_ALEN);
-	os_memcpy(mgmt->sa, hapd->own_addr, ETH_ALEN);
-	os_memcpy(mgmt->bssid, hapd->own_addr, ETH_ALEN);
+	os_memcpy(mgmt->sa, own_addr, ETH_ALEN);
+	os_memcpy(mgmt->bssid, own_addr, ETH_ALEN);
 	mgmt->u.action.category = WLAN_ACTION_WNM;
 	mgmt->u.action.u.coloc_intf_req.action =
 		WNM_COLLOCATED_INTERFERENCE_REQ;

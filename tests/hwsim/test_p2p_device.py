@@ -351,13 +351,22 @@ def test_p2p_device_grpform_timeout_go(dev, apdev):
                 del wpas
                 raise HwsimSkip("Did not manage to cancel group formation")
         dev[0].dump_monitor()
-        ev = wpas.wait_global_event(["WPS-SUCCESS"], timeout=10)
+        # There is a race condition on WPS-SUCCESS being reported on the GO
+        # since the P2P_CANCEL command above might actually stop the WPS
+        # exchange before the WSC_Done is sent to the GO and processed there.
+        # It would be possible for the GO to receive a disconnection event
+        # first.
+        ev = wpas.wait_global_event(["WPS-SUCCESS",
+                                     "P2P-GROUP-FORMATION-FAILURE"],
+                                    timeout=30)
         if ev is None:
             raise Exception("WPS did not succeed (GO)")
         dev[0].dump_monitor()
-        ev = wpas.wait_global_event(["P2P-GROUP-FORMATION-FAILURE"], timeout=20)
-        if ev is None:
-            raise Exception("Group formation timeout not seen on GO")
+        if "P2P-GROUP-FORMATION-FAILURE" not in ev:
+            ev = wpas.wait_global_event(["P2P-GROUP-FORMATION-FAILURE"],
+                                        timeout=20)
+            if ev is None:
+                raise Exception("Group formation timeout not seen on GO")
         ev = wpas.wait_global_event(["P2P-GROUP-REMOVED"], timeout=5)
         if ev is None:
             raise Exception("Group removal not seen on GO")
@@ -536,7 +545,7 @@ def test_p2p_device_autogo_chan_switch(dev):
         wpas.global_request("SET p2p_no_group_iface 1")
         autogo(wpas, freq=2417)
         connect_cli(wpas, dev[1])
-        res = wpas.group_request("CHAN_SWITCH 5 2422")
+        res = wpas.group_request("CHAN_SWITCH 5 2422 ht")
         if "FAIL" in res:
             # for now, skip test since mac80211_hwsim support is not yet widely
             # deployed
@@ -545,7 +554,12 @@ def test_p2p_device_autogo_chan_switch(dev):
         if ev is None:
             raise Exception("CSA finished event timed out")
         if "freq=2422" not in ev:
-            raise Exception("Unexpected cahnnel in CSA finished event")
+            raise Exception("Unexpected channel in CSA finished event")
+        ev = dev[1].wait_event(["CTRL-EVENT-CHANNEL-SWITCH"], timeout=2)
+        if ev is None:
+            raise Exception("Channel switch not reported on P2P Client")
+        if "freq=2422" not in ev:
+            raise Exception("Unexpected channel in CS event")
         wpas.dump_monitor()
         dev[1].dump_monitor()
         time.sleep(0.1)

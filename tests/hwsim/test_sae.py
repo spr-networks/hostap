@@ -13,6 +13,7 @@ logger = logging.getLogger()
 import socket
 import struct
 import subprocess
+import tempfile
 
 import hwsim_utils
 import hostapd
@@ -501,8 +502,8 @@ def test_sae_and_psk_transition_disable(dev, apdev):
 
     dev[0].request("SET sae_groups ")
     id = dev[0].connect("test-sae", psk="12345678", key_mgmt="SAE WPA-PSK",
-                        ieee80211w="1", scan_freq="2412")
-    ev = dev[0].wait_event(["TRANSITION-DISABLE"], timeout=1)
+                        ieee80211w="1", scan_freq="2412", wait_connect=False)
+    ev = dev[0].wait_event(["TRANSITION-DISABLE"], timeout=15)
     if ev is None:
         raise Exception("Transition disable not indicated")
     if ev.split(' ')[1] != "01":
@@ -1226,8 +1227,13 @@ def check_commit_status(hapd, use_status, expect_status):
     element_x = "559cb8928db4ce4e3cbd6555e837591995e5ebe503ef36b503d9ca519d63728d"
     element_y = "d3c7c676b8e8081831b6bc3a64bdf136061a7de175e17d1965bfa41983ed02f8"
     status = binascii.hexlify(struct.pack('<H', use_status)).decode()
+    hapd.dump_monitor()
     hapd.request("MGMT_RX_PROCESS freq=2412 datarate=0 ssi_signal=-30 frame=" + hdr + "03000100" + status + group + scalar + element_x + element_y)
     ev = hapd.wait_event(["MGMT-TX-STATUS"], timeout=5)
+    if ev:
+        msg = ev.split(' ')[3].split('=')[1]
+        if not msg.startswith("b0"):
+            ev = hapd.wait_event(["MGMT-TX-STATUS"], timeout=5)
     if ev is None:
         raise Exception("MGMT-TX-STATUS not seen")
     msg = ev.split(' ')[3].split('=')[1]
@@ -2904,6 +2910,7 @@ def run_sae_ext_key(dev, apdev, group, cipher="CCMP", group_cipher="CCMP"):
     if key_mgmt.split(' ')[0] != "SAE-EXT-KEY":
         raise Exception("Unexpected GET_CONFIG(key_mgmt): " + key_mgmt)
 
+    dev[0].flush_scan_cache()
     dev[0].set("sae_groups", str(group))
     id = dev[0].connect("test-sae", psk="12345678", key_mgmt="SAE-EXT-KEY",
                         pairwise=cipher, group=group_cipher,
@@ -3048,3 +3055,34 @@ def test_sae_pref_ap_wrong_password2(dev, apdev):
     hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].wait_connected(timeout=40)
+
+def test_sae_password_file(dev, apdev):
+    """SAE and sae_password_file in hostapd configuration"""
+    check_sae_capab(dev[0])
+    check_sae_capab(dev[1])
+    check_sae_capab(dev[2])
+    fd, fn = tempfile.mkstemp()
+    try:
+        f = os.fdopen(fd, 'w')
+        f.write("pw1|id=id1\n")
+        f.write("pw2|id=id2\n")
+        f.write("pw3|id=id3\n")
+        f.close()
+
+        params = hostapd.wpa2_params(ssid="test-sae", wpa_key_mgmt="SAE")
+        params['sae_password_file'] = fn
+        hapd = hostapd.add_ap(apdev[0], params)
+
+        dev[0].set("sae_groups", "")
+        dev[0].connect("test-sae", sae_password="pw1", sae_password_id="id1",
+                       key_mgmt="SAE", scan_freq="2412")
+
+        dev[1].set("sae_groups", "")
+        dev[1].connect("test-sae", sae_password="pw2", sae_password_id="id2",
+                       key_mgmt="SAE", scan_freq="2412")
+
+        dev[2].set("sae_groups", "")
+        dev[2].connect("test-sae", sae_password="pw3", sae_password_id="id3",
+                       key_mgmt="SAE", scan_freq="2412")
+    finally:
+        os.unlink(fn)

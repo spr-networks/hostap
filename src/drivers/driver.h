@@ -43,6 +43,7 @@
 
 #define HOSTAPD_CHAN_VHT_80MHZ_SUBCHANNEL 0x00000800
 #define HOSTAPD_CHAN_VHT_160MHZ_SUBCHANNEL 0x00001000
+#define HOSTAPD_CHAN_EHT_320MHZ_SUBCHANNEL 0x00002000
 
 #define HOSTAPD_CHAN_INDOOR_ONLY 0x00010000
 #define HOSTAPD_CHAN_GO_CONCURRENT 0x00020000
@@ -247,6 +248,11 @@ struct hostapd_hw_modes {
 	enum hostapd_hw_mode mode;
 
 	/**
+	 * is_6ghz - Whether the mode information is for the 6 GHz band
+	 */
+	bool is_6ghz;
+
+	/**
 	 * num_channels - Number of entries in the channels array
 	 */
 	int num_channels;
@@ -334,6 +340,8 @@ struct hostapd_hw_modes {
  * @flags: information flags about the BSS/IBSS (WPA_SCAN_*)
  * @bssid: BSSID
  * @freq: frequency of the channel in MHz (e.g., 2412 = channel 1)
+ * @max_cw: the max channel width of the connection (calculated during scan
+ * result processing)
  * @beacon_int: beacon interval in TUs (host byte order)
  * @caps: capability information field in host byte order
  * @qual: signal quality
@@ -370,6 +378,7 @@ struct wpa_scan_res {
 	unsigned int flags;
 	u8 bssid[ETH_ALEN];
 	int freq;
+	enum chan_width max_cw;
 	u16 beacon_int;
 	u16 caps;
 	int qual;
@@ -685,6 +694,21 @@ struct wpa_driver_scan_params {
 	 */
 	unsigned int non_coloc_6ghz:1;
 
+	/**
+	 * min_probe_req_content - Minimize probe request content to only have
+	 * minimal requirement elements, e.g., supported rates etc., and no
+	 * additional elements other then those provided by user space.
+	 */
+	unsigned int min_probe_req_content:1;
+
+	/**
+	 * link_id - Specify the link that is requesting the scan on an MLD
+	 *
+	 * This is set when operating as an AP MLD and doing an OBSS scan.
+	 * -1 indicates that no particular link ID is set.
+	 */
+	s8 link_id;
+
 	/*
 	 * NOTE: Whenever adding new parameters here, please make sure
 	 * wpa_scan_clone_params() and wpa_scan_free_params() get updated with
@@ -939,6 +963,8 @@ struct wpa_driver_mld_params {
 		const u8 *bssid;
 		const u8 *ies;
 		size_t ies_len;
+		int error;
+		bool disabled;
 	} mld_links[MAX_NUM_MLD_LINKS];
 };
 
@@ -1120,6 +1146,23 @@ struct wpa_driver_associate_params {
 	 * should be prepared to handle %NULL value as an error.
 	 */
 	const u8 *psk;
+
+	/**
+	 * sae_password - Password for SAE authentication
+	 *
+	 * This value is made available only for WPA3-Personal (SAE) and only
+	 * for drivers that set WPA_DRIVER_FLAGS2_SAE_OFFLOAD.
+	 */
+	const char *sae_password;
+
+	/**
+	 * sae_password_id - Password Identifier for SAE authentication
+	 *
+	 * This value is made available only for WPA3-Personal (SAE) and only
+	 * for drivers that set WPA_DRIVER_FLAGS2_SAE_OFFLOAD. If %NULL, SAE
+	 * password identifier is not used.
+	 */
+	const char *sae_password_id;
 
 	/**
 	 * drop_unencrypted - Enable/disable unencrypted frame filtering
@@ -1341,6 +1384,23 @@ struct wowlan_triggers {
 	u8 eap_identity_req;
 	u8 four_way_handshake;
 	u8 rfkill_release;
+};
+
+struct unsol_bcast_probe_resp {
+	/**
+	 * Unsolicited broadcast Probe Response interval in TUs
+	 */
+	unsigned int unsol_bcast_probe_resp_interval;
+
+	/**
+	 * Unsolicited broadcast Probe Response template data
+	 */
+	u8 *unsol_bcast_probe_resp_tmpl;
+
+	/**
+	 * Unsolicited broadcast Probe Response template length
+	 */
+	size_t unsol_bcast_probe_resp_tmpl_len;
 };
 
 struct wpa_driver_ap_params {
@@ -1686,21 +1746,6 @@ struct wpa_driver_ap_params {
 	size_t fd_frame_tmpl_len;
 
 	/**
-	 * Unsolicited broadcast Probe Response interval in TUs
-	 */
-	unsigned int unsol_bcast_probe_resp_interval;
-
-	/**
-	 * Unsolicited broadcast Probe Response template data
-	 */
-	u8 *unsol_bcast_probe_resp_tmpl;
-
-	/**
-	 * Unsolicited broadcast Probe Response template length
-	 */
-	size_t unsol_bcast_probe_resp_tmpl_len;
-
-	/**
 	 * mbssid_tx_iface - Transmitting interface of the MBSSID set
 	 */
 	const char *mbssid_tx_iface;
@@ -1766,6 +1811,9 @@ struct wpa_driver_ap_params {
 	 */
 	u8 **rnr_elem_offset;
 
+	/* Unsolicited broadcast Probe Response data */
+	struct unsol_bcast_probe_resp ubpr;
+
 	/**
 	 * allowed_freqs - List of allowed 20 MHz channel center frequencies in
 	 * MHz for AP operation. Drivers which support this parameter will
@@ -1785,6 +1833,21 @@ struct wpa_driver_ap_params {
 	 * mld_link_id - Link id for MLD BSS's
 	 */
 	u8 mld_link_id;
+
+	/**
+	 * psk - PSK passed to the driver for 4-way handshake offload
+	 */
+	u8 psk[PMK_LEN];
+
+	/**
+	 * psk_len - PSK length in bytes (0 = not set)
+	 */
+	size_t psk_len;
+
+	/**
+	 * sae_password - SAE password for SAE offload
+	 */
+	const char *sae_password;
 };
 
 struct wpa_driver_mesh_bss_params {
@@ -2241,7 +2304,7 @@ struct wpa_driver_capa {
 /** Driver handles SA Query procedures in AP mode */
 #define WPA_DRIVER_FLAGS2_SA_QUERY_OFFLOAD_AP	0x0000000000000200ULL
 /** Driver supports background radar/CAC detection */
-#define WPA_DRIVER_RADAR_BACKGROUND		0x0000000000000400ULL
+#define WPA_DRIVER_FLAGS2_RADAR_BACKGROUND	0x0000000000000400ULL
 /** Driver supports secure LTF in STA mode */
 #define WPA_DRIVER_FLAGS2_SEC_LTF_STA		0x0000000000000800ULL
 /** Driver supports secure RTT measurement exchange in STA mode */
@@ -2253,6 +2316,20 @@ struct wpa_driver_capa {
 #define WPA_DRIVER_FLAGS2_PROT_RANGE_NEG_STA	0x0000000000002000ULL
 /** Driver supports MLO in station/AP mode */
 #define WPA_DRIVER_FLAGS2_MLO			0x0000000000004000ULL
+/** Driver supports minimal scan request probe content  */
+#define WPA_DRIVER_FLAGS2_SCAN_MIN_PREQ         0x0000000000008000ULL
+/** Driver supports SAE authentication offload in STA mode */
+#define WPA_DRIVER_FLAGS2_SAE_OFFLOAD_STA	0x0000000000010000ULL
+/** Driver support AP_PSK authentication offload */
+#define WPA_DRIVER_FLAGS2_4WAY_HANDSHAKE_AP_PSK	0x0000000000020000ULL
+/** Driver supports OWE STA offload */
+#define WPA_DRIVER_FLAGS2_OWE_OFFLOAD_STA	0x0000000000040000ULL
+/** Driver supports OWE AP offload */
+#define WPA_DRIVER_FLAGS2_OWE_OFFLOAD_AP	0x0000000000080000ULL
+/** Driver support AP SAE authentication offload */
+#define WPA_DRIVER_FLAGS2_SAE_OFFLOAD_AP	0x0000000000100000ULL
+/** Driver supports TWT responder in HT and VHT modes */
+#define WPA_DRIVER_FLAGS2_HT_VHT_TWT_RESPONDER	0x0000000000200000ULL
 	u64 flags2;
 
 #define FULL_AP_CLIENT_STATE_SUPP(drv_flags) \
@@ -2654,6 +2731,8 @@ struct beacon_data {
  * @counter_offset_beacon: Offset to the count field in beacon's tail
  * @counter_offset_presp: Offset to the count field in probe resp.
  * @punct_bitmap - Preamble puncturing bitmap
+ * @link_id: Link ID to determine the link for MLD; -1 for non-MLD
+ * @ubpr: Unsolicited broadcast Probe Response frame data
  */
 struct csa_settings {
 	u8 cs_count;
@@ -2667,6 +2746,9 @@ struct csa_settings {
 	u16 counter_offset_presp[2];
 
 	u16 punct_bitmap;
+	int link_id;
+
+	struct unsol_bcast_probe_resp ubpr;
 };
 
 /**
@@ -2678,6 +2760,7 @@ struct csa_settings {
  * @beacon_after: Next Beacon/Probe Response/(Re)Association Response frame info
  * @counter_offset_beacon: Offset to the count field in Beacon frame tail
  * @counter_offset_presp: Offset to the count field in Probe Response frame
+ * @ubpr: Unsolicited broadcast Probe Response frame data
  */
 struct cca_settings {
 	u8 cca_count;
@@ -2688,6 +2771,8 @@ struct cca_settings {
 
 	u16 counter_offset_beacon;
 	u16 counter_offset_presp;
+
+	struct unsol_bcast_probe_resp ubpr;
 };
 
 /* TDLS peer capabilities for send_tdls_mgmt() */
@@ -2758,6 +2843,9 @@ struct drv_acs_params {
 
 	/* Indicates whether EHT is enabled */
 	bool eht_enabled;
+
+	/* Indicates the link if MLO case; -1 otherwise */
+	int link_id;
 };
 
 struct wpa_bss_trans_info {
@@ -3300,6 +3388,17 @@ struct wpa_driver_ops {
 			     size_t ies_len);
 
 	/**
+	 * get_scan_results - Fetch the latest scan results
+	 * @priv: Private driver interface data
+	 * @bssid: Return results only for the specified BSSID, %NULL for all
+	 *
+	 * Returns: Allocated buffer of scan results (caller is responsible for
+	 * freeing the data structure) on success, NULL on failure
+	 */
+	struct wpa_scan_results * (*get_scan_results)(void *priv,
+						      const u8 *bssid);
+
+	/**
 	 * get_scan_results2 - Fetch the latest scan results
 	 * @priv: private driver interface data
 	 *
@@ -3500,13 +3599,15 @@ struct wpa_driver_ops {
 	/**
 	 * flush - Flush all association stations (AP only)
 	 * @priv: Private driver interface data
+	 * @link_id: In case of MLO, valid link ID on which all associated
+	 *	stations will be flushed, -1 otherwise.
 	 * Returns: 0 on success, -1 on failure
 	 *
 	 * This function requests the driver to disassociate all associated
 	 * stations. This function does not need to be implemented if the
 	 * driver does not process association frames internally.
 	 */
-	int (*flush)(void *priv);
+	int (*flush)(void *priv, int link_id);
 
 	/**
 	 * set_generic_elem - Add IEs into Beacon/Probe Response frames (AP)
@@ -4103,6 +4204,8 @@ struct wpa_driver_ops {
 	 * @initiator: Is the current end the TDLS link initiator
 	 * @buf: TDLS IEs to add to the message
 	 * @len: Length of buf in octets
+	 * @link_id: If >= 0 indicates the link of the AP MLD to specify the
+	 * operating channel on which to send a TDLS Discovery Response frame.
 	 * Returns: 0 on success, negative (<0) on failure
 	 *
 	 * This optional function can be used to send packet to driver which is
@@ -4110,7 +4213,8 @@ struct wpa_driver_ops {
 	 */
 	int (*send_tdls_mgmt)(void *priv, const u8 *dst, u8 action_code,
 			      u8 dialog_token, u16 status_code, u32 peer_capab,
-			      int initiator, const u8 *buf, size_t len);
+			      int initiator, const u8 *buf, size_t len,
+			      int link_id);
 
 	/**
 	 * tdls_oper - Ask the driver to perform high-level TDLS operations
@@ -4480,13 +4584,14 @@ struct wpa_driver_ops {
 	/**
 	 * stop_ap - Removes beacon from AP
 	 * @priv: Private driver interface data
+	 * @link_id: Link ID of the specified link; -1 for non-MLD
 	 * Returns: 0 on success, -1 on failure (or if not supported)
 	 *
 	 * This optional function can be used to disable AP mode related
 	 * configuration. Unlike deinit_ap, it does not change to station
 	 * mode.
 	 */
-	int (*stop_ap)(void *priv);
+	int (*stop_ap)(void *priv, int link_id);
 
 	/**
 	 * get_survey - Retrieve survey data
@@ -5066,9 +5171,44 @@ struct wpa_driver_ops {
 	 * @priv: Private driver interface data
 	 * @link_id: The link ID
 	 * @addr: The MAC address to use for the link
+	 * @bss_ctx: BSS context for %WPA_IF_AP_BSS interfaces
 	 * Returns: 0 on success, negative value on failure
 	 */
-	int (*link_add)(void *priv, u8 link_id, const u8 *addr);
+	int (*link_add)(void *priv, u8 link_id, const u8 *addr, void *bss_ctx);
+
+	/**
+	 * link_remove - Remove a link from the AP MLD interface
+	 * @priv: Private driver interface data
+	 * @type: Interface type
+	 * @ifname: Interface name of the virtual interface from where the link
+	 *	is to be removed.
+	 * @link_id: Valid link ID to remove
+	 * Returns: 0 on success, -1 on failure
+	 */
+	int (*link_remove)(void *priv, enum wpa_driver_if_type type,
+			   const char *ifname, u8 link_id);
+
+	/**
+	 * is_drv_shared - Check whether the driver interface is shared
+	 * @priv: Private driver interface data from init()
+	 * @bss_ctx: BSS context for %WPA_IF_AP_BSS interfaces
+	 *
+	 * Checks whether the driver interface is being used by other partner
+	 * BSS(s) or not. This is used to decide whether the driver interface
+	 * needs to be deinitilized when one interface is getting deinitialized.
+	 *
+	 * Returns: true if it is being used or else false.
+	 */
+	bool (*is_drv_shared)(void *priv, void *bss_ctx);
+
+	/**
+	 * link_sta_remove - Remove a link STA from an MLD STA
+	 * @priv: Private driver interface data
+	 * @link_id: The link ID which the link STA is using
+	 * @addr: The MLD MAC address of the MLD STA
+	 * Returns: 0 on success, negative value on failure
+	 */
+	int (*link_sta_remove)(void *priv, u8 link_id, const u8 *addr);
 
 #ifdef CONFIG_TESTING_OPTIONS
 	int (*register_frame)(void *priv, u16 type,
@@ -5953,6 +6093,17 @@ union wpa_event_data {
 		 * fils_pmkid - PMKID used or generated in FILS authentication
 		 */
 		const u8 *fils_pmkid;
+
+		/**
+		 * link_addr - Link address of the STA
+		 */
+		const u8 *link_addr;
+
+		/**
+		 * assoc_link_id - Association link id of the MLO association or
+		 *	-1 if MLO is not used
+		 */
+		int assoc_link_id;
 	} assoc_info;
 
 	/**
@@ -6218,6 +6369,14 @@ union wpa_event_data {
 		void *drv_priv;
 
 		/**
+		 * ctx - Pointer to store ctx of private BSS information
+		 *
+		 * If not set to NULL, this is used for forwarding the packet
+		 * to right link BSS of ML BSS.
+		 */
+		void *ctx;
+
+		/**
 		 * freq - Frequency (in MHz) on which the frame was received
 		 */
 		int freq;
@@ -6267,6 +6426,8 @@ union wpa_event_data {
 	 *	(if available).
 	 * @scan_start_tsf_bssid: The BSSID according to which %scan_start_tsf
 	 *	is set.
+	 * @scan_cookie: Unique identification representing the corresponding
+	 *      scan request. 0 if no unique identification is available.
 	 */
 	struct scan_info {
 		int aborted;
@@ -6278,6 +6439,7 @@ union wpa_event_data {
 		int nl_scan_event;
 		u64 scan_start_tsf;
 		u8 scan_start_tsf_bssid[ETH_ALEN];
+		u64 scan_cookie;
 	} scan_info;
 
 	/**
@@ -6457,6 +6619,7 @@ union wpa_event_data {
 	/**
 	 * struct dfs_event - Data for radar detected events
 	 * @freq: Frequency of the channel in MHz
+	 * @link_id: If >= 0, Link ID of the MLO link
 	 */
 	struct dfs_event {
 		int freq;
@@ -6465,6 +6628,7 @@ union wpa_event_data {
 		enum chan_width chan_width;
 		int cf1;
 		int cf2;
+		int link_id;
 	} dfs_event;
 
 	/**
@@ -6483,11 +6647,22 @@ union wpa_event_data {
 	 * @initiator: Initiator of the regulatory change
 	 * @type: Regulatory change type
 	 * @alpha2: Country code (or "" if not available)
+	 * @beacon_hint_before: Data for frequency attributes before beacon hint
+	 *	event if initiator == REGDOM_BEACON_HINT
+	 * @beacon_hint_after: Data for frequency attributes after beacon hint
+	 *	event if initiator == REGDOM_BEACON_HINT
 	 */
 	struct channel_list_changed {
 		enum reg_change_initiator initiator;
 		enum reg_type type;
 		char alpha2[3];
+		struct frequency_attrs {
+			unsigned int freq;
+			unsigned int max_tx_power;
+			bool disabled;
+			bool no_ir;
+			bool radar;
+		} beacon_hint_before, beacon_hint_after;
 	} channel_list_changed;
 
 	/**
@@ -6530,7 +6705,9 @@ union wpa_event_data {
 	 * @ch_width: Selected Channel width by driver. Driver may choose to
 	 *	change hostapd configured ACS channel width due driver internal
 	 *	channel restrictions.
-	 * hw_mode: Selected band (used with hw_mode=any)
+	 * @hw_mode: Selected band (used with hw_mode=any)
+	 * @puncture_bitmap: Indicate the puncturing channels
+	 * @link_id: Indicate the link id if operating as AP MLD; -1 otherwise
 	 */
 	struct acs_selected_channels {
 		unsigned int pri_freq;
@@ -6540,6 +6717,8 @@ union wpa_event_data {
 		u8 vht_seg1_center_ch;
 		u16 ch_width;
 		enum hostapd_hw_mode hw_mode;
+		u16 puncture_bitmap;
+		int link_id;
 	} acs_selected_channels;
 
 	/**
@@ -6601,6 +6780,8 @@ union wpa_event_data {
 		const u8 *peer;
 		const u8 *ie;
 		size_t ie_len;
+		int assoc_link_id;
+		const u8 *link_addr;
 	} update_dh;
 
 	/**
@@ -6624,10 +6805,19 @@ union wpa_event_data {
 
 	/**
 	 * struct port_authorized - Data for EVENT_PORT_AUTHORIZED
+	 * @td_bitmap: For STA mode, transition disable bitmap, if received in
+	 *	EAPOL-Key msg 3/4
+	 * @td_bitmap_len: For STA mode, length of td_bitmap
+	 * @sta_addr: For AP mode, the MAC address of the associated STA
+	 *
+	 * This event is used to indicate that the port is authorized and
+	 * open for normal data in STA and AP modes when 4-way handshake is
+	 * offloaded to the driver.
 	 */
 	struct port_authorized {
 		const u8 *td_bitmap;
 		size_t td_bitmap_len;
+		const u8 *sta_addr;
 	} port_authorized;
 
 	/**
@@ -6671,15 +6861,21 @@ void wpa_supplicant_event_global(void *ctx, enum wpa_event_type event,
  * event indication for some of the common events.
  */
 
-static inline void drv_event_assoc(void *ctx, const u8 *addr, const u8 *ie,
-				   size_t ielen, int reassoc)
+static inline void drv_event_assoc(void *ctx, const u8 *addr, const u8 *req_ies,
+				   size_t req_ielen, const u8 *resp_ies,
+				   size_t resp_ielen, const u8 *link_addr,
+				   int assoc_link_id, int reassoc)
 {
 	union wpa_event_data event;
 	os_memset(&event, 0, sizeof(event));
 	event.assoc_info.reassoc = reassoc;
-	event.assoc_info.req_ies = ie;
-	event.assoc_info.req_ies_len = ielen;
+	event.assoc_info.req_ies = req_ies;
+	event.assoc_info.req_ies_len = req_ielen;
+	event.assoc_info.resp_ies = resp_ies;
+	event.assoc_info.resp_ies_len = resp_ielen;
 	event.assoc_info.addr = addr;
+	event.assoc_info.link_addr = link_addr;
+	event.assoc_info.assoc_link_id = assoc_link_id;
 	wpa_supplicant_event(ctx, EVENT_ASSOC, &event);
 }
 

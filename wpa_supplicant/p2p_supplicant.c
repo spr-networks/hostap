@@ -1085,6 +1085,7 @@ static int wpas_p2p_group_delete(struct wpa_supplicant *wpa_s,
 		 * Likewise, we don't send out network removed signals for such
 		 * network objects.
 		 */
+		wpas_notify_network_removed(wpa_s, ssid);
 		wpa_config_remove_network(wpa_s->conf, id);
 		wpa_supplicant_clear_status(wpa_s);
 		wpa_supplicant_cancel_sched_scan(wpa_s);
@@ -1098,6 +1099,8 @@ static int wpas_p2p_group_delete(struct wpa_supplicant *wpa_s,
 		wpa_drv_deinit_p2p_cli(wpa_s);
 
 	os_memset(wpa_s->go_dev_addr, 0, ETH_ALEN);
+
+	wpa_s->p2p_go_no_pri_sec_switch = 0;
 
 	return 0;
 }
@@ -1183,7 +1186,7 @@ static int wpas_p2p_store_persistent_group(struct wpa_supplicant *wpa_s,
 		   "group (GO Dev Addr " MACSTR ")", MAC2STR(go_dev_addr));
 	for (s = wpa_s->conf->ssid; s; s = s->next) {
 		if (s->disabled == 2 &&
-		    os_memcmp(go_dev_addr, s->bssid, ETH_ALEN) == 0 &&
+		    ether_addr_equal(go_dev_addr, s->bssid) &&
 		    s->ssid_len == ssid->ssid_len &&
 		    os_memcmp(ssid->ssid, s->ssid, ssid->ssid_len) == 0)
 			break;
@@ -1289,8 +1292,8 @@ static void wpas_p2p_add_persistent_group_client(struct wpa_supplicant *wpa_s,
 		return;
 
 	for (i = 0; s->p2p_client_list && i < s->num_p2p_clients; i++) {
-		if (os_memcmp(s->p2p_client_list + i * 2 * ETH_ALEN, addr,
-			      ETH_ALEN) != 0)
+		if (!ether_addr_equal(s->p2p_client_list + i * 2 * ETH_ALEN,
+				      addr))
 			continue;
 
 		if (i == s->num_p2p_clients - 1)
@@ -1589,8 +1592,8 @@ static void wpas_p2p_send_action_tx_status(struct wpa_supplicant *wpa_s,
 
 	if (result != OFFCHANNEL_SEND_ACTION_SUCCESS &&
 	    wpa_s->pending_pd_before_join &&
-	    (os_memcmp(dst, wpa_s->pending_join_dev_addr, ETH_ALEN) == 0 ||
-	     os_memcmp(dst, wpa_s->pending_join_iface_addr, ETH_ALEN) == 0) &&
+	    (ether_addr_equal(dst, wpa_s->pending_join_dev_addr) ||
+	     ether_addr_equal(dst, wpa_s->pending_join_iface_addr)) &&
 	    wpa_s->p2p_fallback_to_go_neg) {
 		wpa_s->pending_pd_before_join = 0;
 		wpa_dbg(wpa_s, MSG_DEBUG, "P2P: No ACK for PD Req "
@@ -2795,6 +2798,12 @@ static void wpas_stop_listen(void *ctx)
 		wpa_drv_probe_req_report(wpa_s, 0);
 
 	wpas_p2p_listen_work_done(wpa_s);
+
+	if (radio_work_pending(wpa_s, "p2p-listen")) {
+		wpa_printf(MSG_DEBUG,
+			   "P2P: p2p-listen is still pending - remove it");
+		radio_remove_works(wpa_s, "p2p-listen", 0);
+	}
 }
 
 
@@ -2897,8 +2906,8 @@ static void wpas_prov_disc_resp(void *ctx, const u8 *peer, u16 config_methods)
 	char params[20];
 
 	if (wpa_s->pending_pd_before_join &&
-	    (os_memcmp(peer, wpa_s->pending_join_dev_addr, ETH_ALEN) == 0 ||
-	     os_memcmp(peer, wpa_s->pending_join_iface_addr, ETH_ALEN) == 0)) {
+	    (ether_addr_equal(peer, wpa_s->pending_join_dev_addr) ||
+	     ether_addr_equal(peer, wpa_s->pending_join_iface_addr))) {
 		wpa_s->pending_pd_before_join = 0;
 		wpa_printf(MSG_DEBUG, "P2P: Starting pending "
 			   "join-existing-group operation");
@@ -3191,9 +3200,8 @@ static u8 wpas_invitation_process(void *ctx, const u8 *sa, const u8 *bssid,
 			   " to join an active group (SSID: %s)",
 			   MAC2STR(sa), wpa_ssid_txt(ssid, ssid_len));
 		if (!is_zero_ether_addr(wpa_s->p2p_auth_invite) &&
-		    (os_memcmp(go_dev_addr, wpa_s->p2p_auth_invite, ETH_ALEN)
-		     == 0 ||
-		     os_memcmp(sa, wpa_s->p2p_auth_invite, ETH_ALEN) == 0)) {
+		    (ether_addr_equal(go_dev_addr, wpa_s->p2p_auth_invite) ||
+		     ether_addr_equal(sa, wpa_s->p2p_auth_invite))) {
 			wpa_printf(MSG_DEBUG, "P2P: Accept previously "
 				   "authorized invitation");
 			goto accept_inv;
@@ -3230,7 +3238,7 @@ static u8 wpas_invitation_process(void *ctx, const u8 *sa, const u8 *bssid,
 	}
 
 	if (!is_zero_ether_addr(wpa_s->p2p_auth_invite) &&
-	    os_memcmp(sa, wpa_s->p2p_auth_invite, ETH_ALEN) == 0) {
+	    ether_addr_equal(sa, wpa_s->p2p_auth_invite)) {
 		wpa_printf(MSG_DEBUG, "P2P: Accept previously initiated "
 			   "invitation to re-invoke a persistent group");
 		os_memset(wpa_s->p2p_auth_invite, 0, ETH_ALEN);
@@ -3239,7 +3247,7 @@ static u8 wpas_invitation_process(void *ctx, const u8 *sa, const u8 *bssid,
 
 	for (s = wpa_s->conf->ssid; s; s = s->next) {
 		if (s->disabled == 2 &&
-		    os_memcmp(s->bssid, go_dev_addr, ETH_ALEN) == 0 &&
+		    ether_addr_equal(s->bssid, go_dev_addr) &&
 		    s->ssid_len == ssid_len &&
 		    os_memcmp(ssid, s->ssid, ssid_len) == 0)
 			break;
@@ -3441,13 +3449,13 @@ static void wpas_remove_persistent_peer(struct wpa_supplicant *wpa_s,
 		return;
 
 	for (i = 0; ssid->p2p_client_list && i < ssid->num_p2p_clients; i++) {
-		if (os_memcmp(ssid->p2p_client_list + i * 2 * ETH_ALEN, peer,
-			      ETH_ALEN) == 0)
+		if (ether_addr_equal(ssid->p2p_client_list + i * 2 * ETH_ALEN,
+				     peer))
 			break;
 	}
 	if (i >= ssid->num_p2p_clients || !ssid->p2p_client_list) {
 		if (ssid->mode != WPAS_MODE_P2P_GO &&
-		    os_memcmp(ssid->bssid, peer, ETH_ALEN) == 0) {
+		    ether_addr_equal(ssid->bssid, peer)) {
 			wpa_printf(MSG_DEBUG, "P2P: Remove persistent group %d "
 				   "due to invitation result", ssid->id);
 			wpas_notify_network_removed(wpa_s, ssid);
@@ -4142,7 +4150,7 @@ static int wpas_get_noa(void *ctx, const u8 *interface_addr, u8 *buf,
 	struct wpa_supplicant *wpa_s = ctx;
 
 	for (wpa_s = wpa_s->global->ifaces; wpa_s; wpa_s = wpa_s->next) {
-		if (os_memcmp(wpa_s->own_addr, interface_addr, ETH_ALEN) == 0)
+		if (ether_addr_equal(wpa_s->own_addr, interface_addr))
 			break;
 	}
 	if (wpa_s == NULL)
@@ -4181,7 +4189,7 @@ struct wpa_supplicant * wpas_get_p2p_client_iface(struct wpa_supplicant *wpa_s,
 		struct wpa_ssid *ssid = wpa_s->current_ssid;
 		if (ssid && (ssid->mode != WPAS_MODE_INFRA || !ssid->p2p_group))
 			continue;
-		if (os_memcmp(wpa_s->go_dev_addr, peer_dev_addr, ETH_ALEN) == 0)
+		if (ether_addr_equal(wpa_s->go_dev_addr, peer_dev_addr))
 			return wpa_s;
 	}
 
@@ -4392,7 +4400,7 @@ static int wpas_remove_stale_groups(void *ctx, const u8 *peer, const u8 *go,
 	while ((s = wpas_p2p_get_persistent(wpa_s, peer, NULL, 0))) {
 		if (go && ssid && ssid_len &&
 		    s->ssid_len == ssid_len &&
-		    os_memcmp(go, s->bssid, ETH_ALEN) == 0 &&
+		    ether_addr_equal(go, s->bssid) &&
 		    os_memcmp(ssid, s->ssid, ssid_len) == 0)
 			break;
 
@@ -4408,8 +4416,8 @@ static int wpas_remove_stale_groups(void *ctx, const u8 *peer, const u8 *go,
 		}
 
 		for (i = 0; i < s->num_p2p_clients; i++) {
-			if (os_memcmp(s->p2p_client_list + i * 2 * ETH_ALEN,
-				      peer, ETH_ALEN) != 0)
+			if (!ether_addr_equal(s->p2p_client_list +
+					      i * 2 * ETH_ALEN, peer))
 				continue;
 
 			os_memmove(s->p2p_client_list + i * 2 * ETH_ALEN,
@@ -4563,7 +4571,7 @@ static void wpas_p2ps_prov_complete(void *ctx, u8 status, const u8 *dev,
 			break;
 
 		if (s && s->ssid_len == stale->ssid_len &&
-		    os_memcmp(stale->bssid, s->bssid, ETH_ALEN) == 0 &&
+		    ether_addr_equal(stale->bssid, s->bssid) &&
 		    os_memcmp(stale->ssid, s->ssid, s->ssid_len) == 0)
 			break;
 
@@ -4579,9 +4587,8 @@ static void wpas_p2ps_prov_complete(void *ctx, u8 status, const u8 *dev,
 			size_t i;
 
 			for (i = 0; i < stale->num_p2p_clients; i++) {
-				if (os_memcmp(stale->p2p_client_list +
-					      i * ETH_ALEN,
-					      dev, ETH_ALEN) == 0) {
+				if (ether_addr_equal(stale->p2p_client_list +
+						     i * ETH_ALEN, dev)) {
 					os_memmove(stale->p2p_client_list +
 						   i * ETH_ALEN,
 						   stale->p2p_client_list +
@@ -5427,8 +5434,8 @@ static void wpas_p2p_scan_res_join(struct wpa_supplicant *wpa_s,
 	    p2p_get_interface_addr(wpa_s->global->p2p,
 				   wpa_s->pending_join_dev_addr,
 				   iface_addr) == 0 &&
-	    os_memcmp(iface_addr, wpa_s->pending_join_dev_addr, ETH_ALEN) != 0
-	    && !wpa_bss_get_bssid(wpa_s, wpa_s->pending_join_iface_addr)) {
+	    !ether_addr_equal(iface_addr, wpa_s->pending_join_dev_addr) &&
+	    !wpa_bss_get_bssid(wpa_s, wpa_s->pending_join_iface_addr)) {
 		wpa_printf(MSG_DEBUG, "P2P: Overwrite pending interface "
 			   "address for join from " MACSTR " to " MACSTR
 			   " based on newly discovered P2P peer entry",
@@ -5468,10 +5475,9 @@ static void wpas_p2p_scan_res_join(struct wpa_supplicant *wpa_s,
 			   wpa_ssid_txt(bss->ssid, bss->ssid_len));
 		if (p2p_parse_dev_addr(wpa_bss_ie_ptr(bss), bss->ie_len,
 				       dev_addr) == 0 &&
-		    os_memcmp(wpa_s->pending_join_dev_addr,
-			      wpa_s->pending_join_iface_addr, ETH_ALEN) == 0 &&
-		    os_memcmp(dev_addr, wpa_s->pending_join_dev_addr,
-			      ETH_ALEN) != 0) {
+		    ether_addr_equal(wpa_s->pending_join_dev_addr,
+				     wpa_s->pending_join_iface_addr) &&
+		    !ether_addr_equal(dev_addr, wpa_s->pending_join_dev_addr)) {
 			wpa_printf(MSG_DEBUG,
 				   "P2P: Update target GO device address based on BSS entry: " MACSTR " (was " MACSTR ")",
 				   MAC2STR(dev_addr),
@@ -6262,7 +6268,7 @@ static int wpas_p2p_select_go_freq(struct wpa_supplicant *wpa_s, int freq)
 
 		res = wpa_drv_get_pref_freq_list(wpa_s, WPA_IF_P2P_GO,
 						 &size, pref_freq_list);
-		if (!is_p2p_allow_6ghz(wpa_s->global->p2p))
+		if (!res && size > 0 && !is_p2p_allow_6ghz(wpa_s->global->p2p))
 			size = p2p_remove_6ghz_channels(pref_freq_list, size);
 
 		if (!res && size > 0) {
@@ -6891,6 +6897,7 @@ int wpas_p2p_group_add(struct wpa_supplicant *wpa_s, int persistent_group,
 		       bool allow_6ghz)
 {
 	struct p2p_go_neg_results params;
+	int selected_freq = 0;
 
 	if (wpa_s->global->p2p_disabled || wpa_s->global->p2p == NULL)
 		return -1;
@@ -6905,12 +6912,13 @@ int wpas_p2p_group_add(struct wpa_supplicant *wpa_s, int persistent_group,
 	wpas_p2p_stop_find_oper(wpa_s);
 
 	if (!wpa_s->p2p_go_do_acs) {
-		freq = wpas_p2p_select_go_freq(wpa_s, freq);
-		if (freq < 0)
+		selected_freq = wpas_p2p_select_go_freq(wpa_s, freq);
+		if (selected_freq < 0)
 			return -1;
 	}
 
-	if (wpas_p2p_init_go_params(wpa_s, &params, freq, vht_center_freq2,
+	if (wpas_p2p_init_go_params(wpa_s, &params, selected_freq,
+				    vht_center_freq2,
 				    ht40, vht, max_oper_chwidth, he, edmg,
 				    NULL))
 		return -1;
@@ -6921,6 +6929,8 @@ int wpas_p2p_group_add(struct wpa_supplicant *wpa_s, int persistent_group,
 	wpa_s = wpas_p2p_get_group_iface(wpa_s, 0, 1);
 	if (wpa_s == NULL)
 		return -1;
+	if (freq > 0)
+		wpa_s->p2p_go_no_pri_sec_switch = 1;
 	wpas_start_wps_go(wpa_s, &params, 0);
 
 	return 0;
@@ -7002,7 +7012,7 @@ static int wpas_start_p2p_client(struct wpa_supplicant *wpa_s,
 	 * fetch time on the same radio so it reflects the actual time the last
 	 * scan result event occurred.
 	 */
-	wpa_supplicant_update_scan_results(wpa_s);
+	wpa_supplicant_update_scan_results(wpa_s, go_bssid);
 	dl_list_for_each(ifs, &wpa_s->radio->ifaces, struct wpa_supplicant,
 			 radio_list) {
 		if (ifs == wpa_s)
@@ -7080,6 +7090,7 @@ int wpas_p2p_group_add_persistent(struct wpa_supplicant *wpa_s,
 			freq = wpas_p2p_select_go_freq(wpa_s, force_freq);
 			if (freq < 0)
 				return -1;
+			wpa_s->p2p_go_no_pri_sec_switch = 1;
 		} else {
 			freq = wpas_p2p_select_go_freq(wpa_s, neg_freq);
 			if (freq < 0 ||
@@ -7405,9 +7416,10 @@ int wpas_p2p_scan_result_text(const u8 *ies, size_t ies_len, char *buf,
 }
 
 
-static void wpas_p2p_clear_pending_action_tx(struct wpa_supplicant *wpa_s)
+static void wpas_p2p_clear_pending_action_tx(struct wpa_supplicant *wpa_s,
+					     bool force)
 {
-	if (!offchannel_pending_action_tx(wpa_s))
+	if (!offchannel_pending_action_tx(wpa_s) && !force)
 		return;
 
 	if (wpa_s->p2p_send_action_work) {
@@ -7417,6 +7429,8 @@ static void wpas_p2p_clear_pending_action_tx(struct wpa_supplicant *wpa_s)
 		offchannel_send_action_done(wpa_s);
 	}
 
+	if (!offchannel_pending_action_tx(wpa_s))
+		return;
 	wpa_printf(MSG_DEBUG, "P2P: Drop pending Action TX due to new "
 		   "operation request");
 	offchannel_clear_pending_action_tx(wpa_s);
@@ -7430,7 +7444,7 @@ int wpas_p2p_find(struct wpa_supplicant *wpa_s, unsigned int timeout,
 		  u8 seek_cnt, const char **seek_string, int freq,
 		  bool include_6ghz)
 {
-	wpas_p2p_clear_pending_action_tx(wpa_s);
+	wpas_p2p_clear_pending_action_tx(wpa_s, false);
 	wpa_s->global->p2p_long_listen = 0;
 
 	if (wpa_s->global->p2p_disabled || wpa_s->global->p2p == NULL ||
@@ -7476,7 +7490,7 @@ static void wpas_p2p_scan_res_ignore_search(struct wpa_supplicant *wpa_s,
 
 static void wpas_p2p_stop_find_oper(struct wpa_supplicant *wpa_s)
 {
-	wpas_p2p_clear_pending_action_tx(wpa_s);
+	wpas_p2p_clear_pending_action_tx(wpa_s, true);
 	wpa_s->global->p2p_long_listen = 0;
 	eloop_cancel_timeout(wpas_p2p_long_listen_timeout, wpa_s, NULL);
 	eloop_cancel_timeout(wpas_p2p_join_scan, wpa_s, NULL);
@@ -7521,7 +7535,7 @@ int wpas_p2p_listen(struct wpa_supplicant *wpa_s, unsigned int timeout)
 	}
 
 	wpa_supplicant_cancel_sched_scan(wpa_s);
-	wpas_p2p_clear_pending_action_tx(wpa_s);
+	wpas_p2p_clear_pending_action_tx(wpa_s, false);
 
 	if (timeout == 0) {
 		/*
@@ -8641,13 +8655,13 @@ struct wpa_ssid * wpas_p2p_get_persistent(struct wpa_supplicant *wpa_s,
 				return s;
 			continue;
 		}
-		if (os_memcmp(s->bssid, addr, ETH_ALEN) == 0)
+		if (ether_addr_equal(s->bssid, addr))
 			return s; /* peer is GO in the persistent group */
 		if (s->mode != WPAS_MODE_P2P_GO || s->p2p_client_list == NULL)
 			continue;
 		for (i = 0; i < s->num_p2p_clients; i++) {
-			if (os_memcmp(s->p2p_client_list + i * 2 * ETH_ALEN,
-				      addr, ETH_ALEN) == 0)
+			if (ether_addr_equal(s->p2p_client_list +
+					     i * 2 * ETH_ALEN, addr))
 				return s; /* peer is P2P client in persistent
 					   * group */
 		}
@@ -8789,9 +8803,9 @@ static int wpas_p2p_remove_psk_entry(struct wpa_supplicant *wpa_s,
 	dl_list_for_each_safe(psk, tmp, &s->psk_list, struct psk_list_entry,
 			      list) {
 		if ((iface_addr && !psk->p2p &&
-		     os_memcmp(addr, psk->addr, ETH_ALEN) == 0) ||
+		     ether_addr_equal(addr, psk->addr)) ||
 		    (!iface_addr && psk->p2p &&
-		     os_memcmp(addr, psk->addr, ETH_ALEN) == 0)) {
+		     ether_addr_equal(addr, psk->addr))) {
 			wpa_dbg(wpa_s, MSG_DEBUG,
 				"P2P: Remove persistent group PSK list entry for "
 				MACSTR " p2p=%u",
@@ -8930,9 +8944,9 @@ static void wpas_p2p_remove_client_go(struct wpa_supplicant *wpa_s,
 	prev = NULL;
 	psk = hapd->conf->ssid.wpa_psk;
 	while (psk) {
-		if ((iface_addr && os_memcmp(peer, psk->addr, ETH_ALEN) == 0) ||
+		if ((iface_addr && ether_addr_equal(peer, psk->addr)) ||
 		    (!iface_addr &&
-		     os_memcmp(peer, psk->p2p_dev_addr, ETH_ALEN) == 0)) {
+		     ether_addr_equal(peer, psk->p2p_dev_addr))) {
 			wpa_dbg(wpa_s, MSG_DEBUG, "P2P: Remove operating group PSK entry for "
 				MACSTR " iface_addr=%d",
 				MAC2STR(peer), iface_addr);
@@ -9786,6 +9800,7 @@ static int wpas_p2p_move_go_csa(struct wpa_supplicant *wpa_s)
 	os_memset(&csa_settings, 0, sizeof(csa_settings));
 	csa_settings.cs_count = P2P_GO_CSA_COUNT;
 	csa_settings.block_tx = P2P_GO_CSA_BLOCK_TX;
+	csa_settings.link_id = -1;
 	csa_settings.freq_params.freq = params.freq;
 	csa_settings.freq_params.sec_channel_offset = conf->secondary_channel;
 	csa_settings.freq_params.ht_enabled = conf->ieee80211n;

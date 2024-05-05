@@ -551,6 +551,13 @@ static int wpa_cli_cmd_driver_flags(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+static int wpa_cli_cmd_driver_flags2(struct wpa_ctrl *ctrl, int argc,
+				     char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "DRIVER_FLAGS2");
+}
+
+
 static int wpa_cli_cmd_get(struct wpa_ctrl *ctrl, int argc, char *argv[])
 {
 	return wpa_cli_cmd(ctrl, "GET", 1, argc, argv);
@@ -2091,10 +2098,19 @@ static int wpa_cli_cmd_resume(struct wpa_ctrl *ctrl, int argc, char *argv[])
 
 
 #ifdef CONFIG_TESTING_OPTIONS
+
 static int wpa_cli_cmd_drop_sa(struct wpa_ctrl *ctrl, int argc, char *argv[])
 {
 	return wpa_ctrl_command(ctrl, "DROP_SA");
 }
+
+
+static int wpa_cli_cmd_ml_probe_req(struct wpa_ctrl *ctrl,
+				    int argc, char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "ML_PROBE_REQ", 2, argc, argv);
+}
+
 #endif /* CONFIG_TESTING_OPTIONS */
 
 
@@ -2831,6 +2847,8 @@ static int wpa_cli_cmd_tdls_link_status(struct wpa_ctrl *ctrl, int argc,
 }
 
 
+#ifndef CONFIG_NO_WMM_AC
+
 static int wpa_cli_cmd_wmm_ac_addts(struct wpa_ctrl *ctrl, int argc,
 				    char *argv[])
 {
@@ -2850,6 +2868,8 @@ static int wpa_cli_cmd_wmm_ac_status(struct wpa_ctrl *ctrl, int argc,
 {
 	return wpa_ctrl_command(ctrl, "WMM_AC_STATUS");
 }
+
+#endif /* CONFIG_NO_WMM_AC */
 
 
 static int wpa_cli_cmd_tdls_chan_switch(struct wpa_ctrl *ctrl, int argc,
@@ -3375,6 +3395,9 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "driver_flags", wpa_cli_cmd_driver_flags, NULL,
 	  cli_cmd_flag_none,
 	  "= list driver flags" },
+	{ "driver_flags2", wpa_cli_cmd_driver_flags2, NULL,
+	  cli_cmd_flag_none,
+	  "= list driver flags2" },
 	{ "logon", wpa_cli_cmd_logon, NULL,
 	  cli_cmd_flag_none,
 	  "= IEEE 802.1X EAPOL state machine logon" },
@@ -3673,6 +3696,8 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 #ifdef CONFIG_TESTING_OPTIONS
 	{ "drop_sa", wpa_cli_cmd_drop_sa, NULL, cli_cmd_flag_none,
 	  "= drop SA without deauth/disassoc (test command)" },
+	{ "ml_probe_req", wpa_cli_cmd_ml_probe_req, NULL, cli_cmd_flag_none,
+	  "= send Multi-Link Probe request <bssid=addr> <mld_id=id> [link_id=id] (test command)" },
 #endif /* CONFIG_TESTING_OPTIONS */
 	{ "roam", wpa_cli_cmd_roam, wpa_cli_complete_bss,
 	  cli_cmd_flag_none,
@@ -3868,6 +3893,7 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "tdls_link_status", wpa_cli_cmd_tdls_link_status, NULL,
 	  cli_cmd_flag_none,
 	  "<addr> = TDLS link status with <addr>" },
+#ifndef CONFIG_NO_WMM_AC
 	{ "wmm_ac_addts", wpa_cli_cmd_wmm_ac_addts, NULL,
 	  cli_cmd_flag_none,
 	  "<uplink/downlink/bidi> <tsid=0..7> <up=0..7> [nominal_msdu_size=#] "
@@ -3879,6 +3905,7 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "wmm_ac_status", wpa_cli_cmd_wmm_ac_status, NULL,
 	  cli_cmd_flag_none,
 	  "= show status for Wireless Multi-Media Admission-Control" },
+#endif /* CONFIG_NO_WMM_AC */
 	{ "tdls_chan_switch", wpa_cli_cmd_tdls_chan_switch, NULL,
 	  cli_cmd_flag_none,
 	  "<addr> <oper class> <freq> [sec_channel_offset=] [center_freq1=] "
@@ -4352,6 +4379,8 @@ static void wpa_cli_action_process(const char *msg)
 			wpa_cli_exec(action_file, ifname, "DISCONNECTED");
 		}
 	} else if (str_starts(pos, WPA_EVENT_CHANNEL_SWITCH_STARTED)) {
+		wpa_cli_exec(action_file, ctrl_ifname, pos);
+	} else if (str_starts(pos, WPA_EVENT_CHANNEL_SWITCH)) {
 		wpa_cli_exec(action_file, ctrl_ifname, pos);
 	} else if (str_starts(pos, AP_EVENT_ENABLED)) {
 		wpa_cli_exec(action_file, ctrl_ifname, pos);
@@ -5102,7 +5131,7 @@ int main(int argc, char *argv[])
 
 	eloop_register_signal_terminate(wpa_cli_terminate, NULL);
 
-	if (ctrl_ifname == NULL)
+	if (!ctrl_ifname && !global)
 		ctrl_ifname = wpa_cli_get_default_ifname();
 
 	if (reconnect && action_file && ctrl_ifname) {

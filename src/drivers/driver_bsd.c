@@ -553,7 +553,7 @@ bsd_new_sta(void *priv, void *ctx, u8 addr[IEEE80211_ADDR_LEN])
 		ielen += 2;
 
 no_ie:
-	drv_event_assoc(ctx, addr, iebuf, ielen, 0);
+	drv_event_assoc(ctx, addr, iebuf, ielen, NULL, 0, NULL, -1, 0);
 }
 
 static int
@@ -946,7 +946,7 @@ bsd_get_seqnum(const char *ifname, void *priv, const u8 *addr, int idx,
 
 
 static int
-bsd_flush(void *priv)
+bsd_flush(void *priv, int link_id)
 {
 	u8 allsta[IEEE80211_ADDR_LEN];
 

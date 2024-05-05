@@ -12,6 +12,7 @@
 
 #include "utils/common.h"
 #include "common/ieee802_11_defs.h"
+#include "common/hw_features_common.h"
 #include "hostapd.h"
 #include "ap_config.h"
 #include "sta_info.h"
@@ -79,6 +80,9 @@ u8 * hostapd_eid_vht_operation(struct hostapd_data *hapd, u8 *eid)
 		hostapd_get_oper_chwidth(hapd->iconf);
 	u8 seg0 = hapd->iconf->vht_oper_centr_freq_seg0_idx;
 	u8 seg1 = hapd->iconf->vht_oper_centr_freq_seg1_idx;
+#ifdef CONFIG_IEEE80211BE
+	u16 punct_bitmap = hostapd_get_punct_bitmap(hapd);
+#endif /* CONFIG_IEEE80211BE */
 
 	if (is_6ghz_op_class(hapd->iconf->op_class))
 		return eid;
@@ -90,8 +94,8 @@ u8 * hostapd_eid_vht_operation(struct hostapd_data *hapd, u8 *eid)
 	os_memset(oper, 0, sizeof(*oper));
 
 #ifdef CONFIG_IEEE80211BE
-	if (hapd->iconf->punct_bitmap) {
-		punct_update_legacy_bw(hapd->iconf->punct_bitmap,
+	if (punct_bitmap) {
+		punct_update_legacy_bw(punct_bitmap,
 				       hapd->iconf->channel,
 				       &oper_chwidth, &seg0, &seg1);
 	}

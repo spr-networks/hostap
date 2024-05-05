@@ -114,12 +114,15 @@ static void ieee802_1x_set_authorized(struct hostapd_data *hapd,
 				      bool authorized, bool mld)
 {
 	int res;
+	bool update;
 
 	if (sta->flags & WLAN_STA_PREAUTH)
 		return;
 
-	ap_sta_set_authorized(hapd, sta, authorized);
+	update = ap_sta_set_authorized_flag(hapd, sta, authorized);
 	res = hostapd_set_authorized(hapd, sta, authorized);
+	if (update)
+		ap_sta_set_authorized_event(hapd, sta, authorized);
 	hostapd_logger(hapd, sta->addr, HOSTAPD_MODULE_IEEE8021X,
 		       HOSTAPD_LEVEL_DEBUG, "%sauthorizing port",
 		       authorized ? "" : "un");
@@ -169,8 +172,7 @@ static void ieee802_1x_ml_set_sta_authorized(struct hostapd_data *hapd,
 			struct hostapd_data *tmp_hapd =
 				hapd->iface->interfaces->iface[i]->bss[0];
 
-			if (tmp_hapd->conf->mld_ap ||
-			    hapd->conf->mld_id != tmp_hapd->conf->mld_id)
+			if (!hostapd_is_ml_partner(hapd, tmp_hapd))
 				continue;
 
 			for (tmp_sta = tmp_hapd->sta_list; tmp_sta;
@@ -2537,13 +2539,20 @@ int ieee802_1x_init(struct hostapd_data *hapd)
 	struct eapol_auth_config conf;
 	struct eapol_auth_cb cb;
 
-	if (hapd->mld_first_bss) {
+#ifdef CONFIG_IEEE80211BE
+	if (!hostapd_mld_is_first_bss(hapd)) {
+		struct hostapd_data *first;
+
 		wpa_printf(MSG_DEBUG,
 			   "MLD: Using IEEE 802.1X state machine of the first BSS");
 
-		hapd->eapol_auth = hapd->mld_first_bss->eapol_auth;
+		first = hostapd_mld_get_first_bss(hapd);
+		if (!first)
+			return -1;
+		hapd->eapol_auth = first->eapol_auth;
 		return 0;
 	}
+#endif /* CONFIG_IEEE80211BE */
 
 	dl_list_init(&hapd->erp_keys);
 
@@ -2629,13 +2638,15 @@ void ieee802_1x_erp_flush(struct hostapd_data *hapd)
 
 void ieee802_1x_deinit(struct hostapd_data *hapd)
 {
-	if (hapd->mld_first_bss) {
+#ifdef CONFIG_IEEE80211BE
+	if (!hostapd_mld_is_first_bss(hapd)) {
 		wpa_printf(MSG_DEBUG,
 			   "MLD: Deinit IEEE 802.1X state machine of a non-first BSS");
 
 		hapd->eapol_auth = NULL;
 		return;
 	}
+#endif /* CONFIG_IEEE80211BE */
 
 #ifdef CONFIG_WEP
 	eloop_cancel_timeout(ieee802_1x_rekey, hapd, NULL);

@@ -377,28 +377,13 @@ skip_replay_det:
 
 
 static u8 * try_ptk_decrypt(struct wlantest *wt, struct wlantest_sta *sta,
-			    const struct ieee80211_hdr *hdr, int keyid,
+			    const struct ieee80211_hdr *hdr,
+			    const u8 *a1, const u8 *a2, const u8 *a3,
+			    int keyid,
 			    const u8 *data, size_t len,
 			    const u8 *tk, size_t tk_len, size_t *dlen)
 {
 	u8 *decrypted = NULL;
-	u16 fc = le_to_host16(hdr->frame_control);
-	const u8 *a1 = NULL, *a2 = NULL, *a3 = NULL;
-
-	if ((fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)) &&
-	    !is_zero_ether_addr(sta->mld_mac_addr) &&
-	    !is_zero_ether_addr(sta->bss->mld_mac_addr)) {
-		if (os_memcmp(hdr->addr1, sta->addr, ETH_ALEN) == 0) {
-			a1 = sta->mld_mac_addr;
-			a2 = sta->bss->mld_mac_addr;
-		} else {
-			a1 = sta->bss->mld_mac_addr;
-			a2 = sta->mld_mac_addr;
-		}
-
-		if (os_memcmp(hdr->addr3, sta->bss->bssid, ETH_ALEN) == 0)
-			a3 = sta->bss->mld_mac_addr;
-	}
 
 	if (sta->pairwise_cipher == WPA_CIPHER_CCMP_256)
 		decrypted = ccmp_256_decrypt(tk, hdr, a1, a2, a3,
@@ -436,6 +421,7 @@ static void rx_data_bss_prot(struct wlantest *wt,
 	int only_zero_tk = 0;
 	u16 seq_ctrl = le_to_host16(hdr->seq_ctrl);
 	const u8 *a1 = NULL, *a2 = NULL, *a3 = NULL;
+	enum { NO, YES, UNKNOWN } a1_is_sta = UNKNOWN;
 
 	if (hdr->addr1[0] & 0x01) {
 		rx_data_bss_prot_group(wt, hdr, hdrlen, qos, dst, src,
@@ -447,16 +433,19 @@ static void rx_data_bss_prot(struct wlantest *wt,
 	    (WLAN_FC_TODS | WLAN_FC_FROMDS)) {
 		bss = bss_find(wt, hdr->addr1);
 		if (bss) {
-			sta = sta_find(bss, hdr->addr2);
+			sta = sta_find_mlo(wt, bss, hdr->addr2);
 			if (sta) {
+				a1_is_sta = NO;
 				sta->counters[
 					WLANTEST_STA_COUNTER_PROT_DATA_TX]++;
 			}
 			if (!sta || !sta->ptk_set) {
 				bss2 = bss_find(wt, hdr->addr2);
 				if (bss2) {
-					sta2 = sta_find(bss2, hdr->addr1);
+					sta2 = sta_find_mlo(wt, bss2,
+							    hdr->addr1);
 					if (sta2 && (!sta || sta2->ptk_set)) {
+						a1_is_sta = YES;
 						bss = bss2;
 						sta = sta2;
 					}
@@ -466,7 +455,9 @@ static void rx_data_bss_prot(struct wlantest *wt,
 			bss = bss_find(wt, hdr->addr2);
 			if (!bss)
 				return;
-			sta = sta_find(bss, hdr->addr1);
+			sta = sta_find_mlo(wt, bss, hdr->addr1);
+			if (sta)
+				a1_is_sta = YES;
 		}
 	} else if (fc & WLAN_FC_TODS) {
 		bss = bss_get(wt, hdr->addr1);
@@ -477,6 +468,7 @@ static void rx_data_bss_prot(struct wlantest *wt,
 			sta = sta_get(bss, hdr->addr2);
 		if (sta)
 			sta->counters[WLANTEST_STA_COUNTER_PROT_DATA_TX]++;
+		a1_is_sta = NO;
 	} else if (fc & WLAN_FC_FROMDS) {
 		bss = bss_get(wt, hdr->addr2);
 		if (bss == NULL)
@@ -484,6 +476,8 @@ static void rx_data_bss_prot(struct wlantest *wt,
 		sta = sta_find_mlo(wt, bss, hdr->addr1);
 		if (!sta)
 			sta = sta_get(bss, hdr->addr1);
+		if (sta)
+			a1_is_sta = YES;
 	} else {
 		bss = bss_get(wt, hdr->addr3);
 		if (bss == NULL)
@@ -582,29 +576,29 @@ static void rx_data_bss_prot(struct wlantest *wt,
 
 	if (qos) {
 		tid = qos[0] & 0x0f;
-		if (fc & WLAN_FC_TODS)
+		if (a1_is_sta == NO)
 			sta->tx_tid[tid]++;
 		else
 			sta->rx_tid[tid]++;
 	} else {
 		tid = 0;
-		if (fc & WLAN_FC_TODS)
+		if (a1_is_sta == NO)
 			sta->tx_tid[16]++;
 		else
 			sta->rx_tid[16]++;
 	}
 	if (tk) {
-		if (os_memcmp(hdr->addr2, tdls->init->addr, ETH_ALEN) == 0)
+		if (ether_addr_equal(hdr->addr2, tdls->init->addr))
 			rsc = tdls->rsc_init[tid];
 		else
 			rsc = tdls->rsc_resp[tid];
 	} else if ((fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)) ==
 		   (WLAN_FC_TODS | WLAN_FC_FROMDS)) {
-		if (os_memcmp(sta->addr, hdr->addr2, ETH_ALEN) == 0)
+		if (a1_is_sta == NO)
 			rsc = sta->rsc_tods[tid];
 		else
 			rsc = sta->rsc_fromds[tid];
-	} else if (fc & WLAN_FC_TODS)
+	} else if (a1_is_sta == NO)
 		rsc = sta->rsc_tods[tid];
 	else
 		rsc = sta->rsc_fromds[tid];
@@ -637,8 +631,9 @@ static void rx_data_bss_prot(struct wlantest *wt,
 skip_replay_det:
 	if ((fc & (WLAN_FC_TODS | WLAN_FC_FROMDS)) &&
 	    !is_zero_ether_addr(sta->mld_mac_addr) &&
-	    !is_zero_ether_addr(bss->mld_mac_addr)) {
-		if (os_memcmp(hdr->addr1, sta->addr, ETH_ALEN) == 0) {
+	    !is_zero_ether_addr(bss->mld_mac_addr) &&
+	    a1_is_sta != UNKNOWN) {
+		if (a1_is_sta == YES) {
 			a1 = sta->mld_mac_addr;
 			a2 = bss->mld_mac_addr;
 		} else {
@@ -646,7 +641,7 @@ skip_replay_det:
 			a2 = sta->mld_mac_addr;
 		}
 
-		if (os_memcmp(hdr->addr3, bss->bssid, ETH_ALEN) == 0)
+		if (ether_addr_equal(hdr->addr3, bss->bssid))
 			a3 = bss->mld_mac_addr;
 	}
 
@@ -679,7 +674,8 @@ skip_replay_det:
 	} else if (sta->pairwise_cipher == WPA_CIPHER_WEP40) {
 		decrypted = wep_decrypt(wt, hdr, data, len, &dlen);
 	} else if (sta->ptk_set) {
-		decrypted = try_ptk_decrypt(wt, sta, hdr, keyid, data, len,
+		decrypted = try_ptk_decrypt(wt, sta, hdr, a1, a2, a3,
+					    keyid, data, len,
 					    sta->ptk.tk, sta->ptk.tk_len,
 					    &dlen);
 	} else {
@@ -734,7 +730,8 @@ check_zero_tk:
 		/* Check whether TPTK has a matching TK that could be used to
 		 * decrypt the frame. That could happen if EAPOL-Key msg 4/4
 		 * was missing in the capture and this was PTK rekeying. */
-		decrypted = try_ptk_decrypt(wt, sta, hdr, keyid, data, len,
+		decrypted = try_ptk_decrypt(wt, sta, hdr, a1, a2, a3,
+					    keyid, data, len,
 					    sta->tptk.tk, sta->tptk.tk_len,
 					    &dlen);
 		if (decrypted) {
@@ -776,18 +773,22 @@ static void rx_data_bss(struct wlantest *wt, const struct ieee80211_hdr *hdr,
 	if (qos) {
 		u8 ack = (qos[0] & 0x60) >> 5;
 		wpa_printf(MSG_MSGDUMP, "BSS DATA: " MACSTR " -> " MACSTR
-			   " len=%u%s tid=%u%s%s",
+			   " len=%u%s tid=%u%s%s%s%s",
 			   MAC2STR(src), MAC2STR(dst), (unsigned int) len,
 			   prot ? " Prot" : "", qos[0] & 0x0f,
+			   (fc & WLAN_FC_TODS) ? " ToDS" : "",
+			   (fc & WLAN_FC_FROMDS) ? " FromDS" : "",
 			   (qos[0] & 0x10) ? " EOSP" : "",
 			   ack == 0 ? "" :
 			   (ack == 1 ? " NoAck" :
 			    (ack == 2 ? " NoExpAck" : " BA")));
 	} else {
 		wpa_printf(MSG_MSGDUMP, "BSS DATA: " MACSTR " -> " MACSTR
-			   " len=%u%s",
+			   " len=%u%s%s%s",
 			   MAC2STR(src), MAC2STR(dst), (unsigned int) len,
-			   prot ? " Prot" : "");
+			   prot ? " Prot" : "",
+			   (fc & WLAN_FC_TODS) ? " ToDS" : "",
+			   (fc & WLAN_FC_FROMDS) ? " FromDS" : "");
 	}
 
 	if (prot)

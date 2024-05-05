@@ -314,7 +314,19 @@ int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
 #ifdef CONFIG_HT_OVERRIDES
 		if (ssid->disable_ht)
 			ssid->ht = 0;
+		if (ssid->disable_ht40)
+			ssid->ht40 = 0;
 #endif /* CONFIG_HT_OVERRIDES */
+
+#ifdef CONFIG_VHT_OVERRIDES
+		if (ssid->disable_vht)
+			ssid->vht = 0;
+#endif /* CONFIG_VHT_OVERRIDES */
+
+#ifdef CONFIG_HE_OVERRIDES
+		if (ssid->disable_he)
+			ssid->he = 0;
+#endif /* CONFIG_HE_OVERRIDES */
 
 		if (!ssid->ht) {
 			wpa_printf(MSG_DEBUG,
@@ -427,6 +439,13 @@ int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
 			}
 		}
 	}
+
+#ifdef CONFIG_P2P
+	if (ssid->p2p_group && wpa_s->p2p_go_no_pri_sec_switch) {
+		conf->no_pri_sec_switch = 1;
+		return 0;
+	}
+#endif /* CONFIG_P2P */
 
 	if (conf->secondary_channel) {
 		struct wpa_supplicant *iface;
@@ -854,9 +873,10 @@ static void ap_wps_event_cb(void *ctx, enum wps_event event,
 
 
 static void ap_sta_authorized_cb(void *ctx, const u8 *mac_addr,
-				 int authorized, const u8 *p2p_dev_addr)
+				 int authorized, const u8 *p2p_dev_addr,
+				 const u8 *ip)
 {
-	wpas_notify_sta_authorized(ctx, mac_addr, authorized, p2p_dev_addr);
+	wpas_notify_sta_authorized(ctx, mac_addr, authorized, p2p_dev_addr, ip);
 }
 
 
@@ -1046,6 +1066,7 @@ int wpa_supplicant_create_ap(struct wpa_supplicant *wpa_s,
 		return -1;
 	hapd_iface->owner = wpa_s;
 	hapd_iface->drv_flags = wpa_s->drv_flags;
+	hapd_iface->drv_flags2 = wpa_s->drv_flags2;
 	hapd_iface->probe_resp_offloads = wpa_s->probe_resp_offloads;
 	hapd_iface->extended_capa = wpa_s->extended_capa;
 	hapd_iface->extended_capa_mask = wpa_s->extended_capa_mask;
@@ -1832,6 +1853,8 @@ int ap_ctrl_iface_chanswitch(struct wpa_supplicant *wpa_s, const char *pos)
 
 	if (ret)
 		return ret;
+
+	settings.link_id = -1;
 
 	return ap_switch_channel(wpa_s, &settings);
 }

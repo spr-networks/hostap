@@ -1,5 +1,5 @@
 # Protected management frames tests
-# Copyright (c) 2013, Jouni Malinen <j@w1.fi>
+# Copyright (c) 2013-2024, Jouni Malinen <j@w1.fi>
 #
 # This software may be distributed under the terms of the BSD license.
 # See README for more details.
@@ -87,7 +87,7 @@ def test_ocv_sa_query(dev, apdev):
     dev[0].connect(ssid, psk="12345678", ieee80211w="1", ocv="1",
                    key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
                    scan_freq="2412")
-
+    hapd.wait_sta() # wait so we can actually request SA_QUERY
     # Test that client can handle SA Query with OCI element
     if "OK" not in hapd.request("SA_QUERY " + dev[0].own_addr()):
         raise Exception("SA_QUERY failed")
@@ -113,7 +113,7 @@ def test_ocv_sa_query_csa(dev, apdev):
                    key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
                    scan_freq="2412")
 
-    hapd.request("CHAN_SWITCH 5 2437")
+    hapd.request("CHAN_SWITCH 5 2437 ht")
     time.sleep(1)
     if wt.get_sta_counter("valid_saqueryreq_tx", apdev[0]['bssid'],
                           dev[0].own_addr()) < 1:
@@ -131,7 +131,7 @@ def test_ocv_sa_query_csa_no_resp(dev, apdev):
                    scan_freq="2412")
 
     hapd.set("ext_mgmt_frame_handling", "1")
-    hapd.request("CHAN_SWITCH 5 2437")
+    hapd.request("CHAN_SWITCH 5 2437 ht")
     ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=5)
     if ev is None:
         raise Exception("Disconnection after CSA not reported")
@@ -144,7 +144,7 @@ def test_ocv_sa_query_csa_missing(dev, apdev):
     dev[0].connect(ssid, psk="12345678", ieee80211w="1", ocv="1",
                    key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
                    scan_freq="2412")
-
+    hapd.wait_sta() # wait so kernel won't drop deauth frame (MFP)
     hapd.set("ext_mgmt_frame_handling", "1")
     dev[0].request("DISCONNECT")
     dev[0].wait_disconnected()
@@ -152,7 +152,7 @@ def test_ocv_sa_query_csa_missing(dev, apdev):
     if ev is None:
         raise Exception("Deauthentication frame RX not reported")
     hapd.set("ext_mgmt_frame_handling", "0")
-    hapd.request("CHAN_SWITCH 5 2437")
+    hapd.request("CHAN_SWITCH 5 2437 ht")
     ev = hapd.wait_event(["AP-STA-DISCONNECTED"], timeout=20)
     if ev is None:
         raise Exception("No disconnection event received from hostapd")
@@ -236,10 +236,19 @@ def test_ap_pmf_negative(dev, apdev):
 @remote_compatible
 def test_ap_pmf_assoc_comeback(dev, apdev):
     """WPA2-PSK AP with PMF association comeback"""
+    run_ap_pmf_assoc_comeback(dev, apdev)
+
+def test_ap_pmf_assoc_comeback_10000tu(dev, apdev):
+    """WPA2-PSK AP with PMF association comeback (10000 TUs)"""
+    run_ap_pmf_assoc_comeback(dev, apdev, comeback=10000)
+
+def run_ap_pmf_assoc_comeback(dev, apdev, comeback=None):
     ssid = "assoc-comeback"
     params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
     params["wpa_key_mgmt"] = "WPA-PSK-SHA256"
     params["ieee80211w"] = "2"
+    if comeback is not None:
+        params["assoc_sa_query_max_timeout"] = str(comeback)
     hapd = hostapd.add_ap(apdev[0], params)
     Wlantest.setup(hapd)
     wt = Wlantest()
@@ -248,15 +257,75 @@ def test_ap_pmf_assoc_comeback(dev, apdev):
     dev[0].connect(ssid, psk="12345678", ieee80211w="1",
                    key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
                    scan_freq="2412")
+    hapd.wait_sta(wait_4way_hs=True)
     hapd.set("ext_mgmt_frame_handling", "1")
     dev[0].request("DISCONNECT")
     dev[0].wait_disconnected(timeout=10)
+    ev = hapd.wait_event(["MGMT-RX"], timeout=1)
+    if ev is None:
+        raise Exception("Deauthentication frame RX not reported")
     hapd.set("ext_mgmt_frame_handling", "0")
     dev[0].request("REASSOCIATE")
-    dev[0].wait_connected(timeout=10, error="Timeout on re-connection")
+    dev[0].wait_connected(timeout=20, error="Timeout on re-connection")
+    hapd.wait_4way_hs()
     if wt.get_sta_counter("assocresp_comeback", apdev[0]['bssid'],
                           dev[0].p2p_interface_addr()) < 1:
         raise Exception("AP did not use association comeback request")
+
+def test_ap_pmf_assoc_comeback_in_wpas(dev, apdev):
+    """WPA2-PSK AP with PMF association comeback in wpa_supplicant"""
+    ssid = "assoc-comeback"
+    params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
+    params["wpa_key_mgmt"] = "WPA-PSK-SHA256"
+    params["ieee80211w"] = "2"
+    params["test_assoc_comeback_type"] = "255"
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    dev[0].set("test_assoc_comeback_type", "255")
+    dev[0].connect(ssid, psk="12345678", ieee80211w="1",
+                   key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
+                   scan_freq="2412")
+    hapd.wait_sta(wait_4way_hs=True)
+    hapd.set("ext_mgmt_frame_handling", "1")
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected(timeout=10)
+    ev = hapd.wait_event(["MGMT-RX"], timeout=1)
+    if ev is None:
+        raise Exception("Deauthentication frame RX not reported")
+    hapd.set("ext_mgmt_frame_handling", "0")
+    dev[0].request("REASSOCIATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+    if ev is None or "status_code=30" not in ev:
+        raise Exception("Association comeback not requested")
+    ev = dev[0].wait_event(["CTRL-EVENT-CONNECTED",
+                            "CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+    if ev is None:
+        raise Exception("Association not reported")
+    if "CTRL-EVENT-ASSOC-REJECT" in ev:
+        raise Exception("Unexpected association rejection: " + ev)
+    hapd.wait_4way_hs()
+
+    hapd.set("ext_mgmt_frame_handling", "1")
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected(timeout=10)
+    ev = hapd.wait_event(["MGMT-RX"], timeout=1)
+    if ev is None:
+        raise Exception("Deauthentication frame RX not reported")
+    hapd.set("ext_mgmt_frame_handling", "0")
+    dev[0].set("test_assoc_comeback_type", "254")
+    dev[0].request("REASSOCIATE")
+    ev = dev[0].wait_event(["CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+    if ev is None or "status_code=30" not in ev:
+        raise Exception("Association comeback not requested")
+    ev = dev[0].wait_event(["SME: Temporary assoc reject: missing association comeback time",
+                            "CTRL-EVENT-CONNECTED",
+                            "CTRL-EVENT-ASSOC-REJECT"], timeout=10)
+    if ev is None:
+        raise Exception("Association not reported")
+    if "SME: Temporary assoc reject: missing association comeback time" not in ev:
+        raise Exception("Unexpected result: " + ev)
+    dev[0].wait_connected(timeout=20, error="Timeout on re-connection with misbehaving AP")
+    hapd.wait_4way_hs()
 
 @remote_compatible
 def test_ap_pmf_assoc_comeback2(dev, apdev):
@@ -324,11 +393,16 @@ def test_ap_pmf_assoc_comeback_wps(dev, apdev):
     dev[0].connect(ssid, psk="12345678", ieee80211w="1",
                    key_mgmt="WPA-PSK WPA-PSK-SHA256", proto="WPA2",
                    scan_freq="2412")
+    hapd.wait_sta(wait_4way_hs=True)
     hapd.set("ext_mgmt_frame_handling", "1")
     dev[0].request("DISCONNECT")
     dev[0].wait_disconnected(timeout=10)
+    ev = hapd.wait_event(["MGMT-RX"], timeout=1)
+    if ev is None:
+        raise Exception("Deauthentication frame RX not reported")
     hapd.set("ext_mgmt_frame_handling", "0")
     dev[0].wps_reg(apdev[0]['bssid'], appin)
+    hapd.wait_4way_hs()
     if wt.get_sta_counter("assocresp_comeback", apdev[0]['bssid'],
                           dev[0].p2p_interface_addr()) < 1:
         raise Exception("AP did not use association comeback request")
@@ -901,10 +975,33 @@ def test_ap_pmf_inject_auth(dev, apdev):
 
 def test_ap_pmf_inject_assoc(dev, apdev):
     """WPA2-PSK with PMF and Association Request frame injection"""
+    run_ap_pmf_inject_assoc(dev, apdev, False)
+
+def test_ap_pmf_inject_assoc_wps(dev, apdev):
+    """WPA2-PSK/WPS with PMF and Association Request frame injection"""
+    run_ap_pmf_inject_assoc(dev, apdev, True)
+
+def inject_assoc_req(hapd, addr, frame):
+    hapd.set("ext_mgmt_frame_handling", "1")
+    res = hapd.request("MGMT_RX_PROCESS freq=2412 datarate=0 ssi_signal=-30 frame=%s" % frame)
+    if "OK" not in res:
+        raise Exception("MGMT_RX_PROCESS failed")
+    hapd.set("ext_mgmt_frame_handling", "0")
+    sta = hapd.get_sta(addr)
+    if "[MFP]" not in sta['flags']:
+        raise Exception("MFP flag removed")
+    if sta["AKMSuiteSelector"] != '00-0f-ac-6':
+        raise Exception("AKMSuiteSelector value changed")
+
+def run_ap_pmf_inject_assoc(dev, apdev, wps):
     ssid = "test-pmf"
     params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
     params["wpa_key_mgmt"] = "WPA-PSK WPA-PSK-SHA256"
     params["ieee80211w"] = "1"
+    if wps:
+        params["eap_server"] = "1"
+        params["wps_state"] = "2"
+
     hapd = hostapd.add_ap(apdev[0], params)
     dev[0].connect(ssid, psk="12345678", ieee80211w="2",
                    key_mgmt="WPA-PSK-SHA256", proto="WPA2",
@@ -920,48 +1017,19 @@ def test_ap_pmf_inject_assoc(dev, apdev):
     addr = dev[0].own_addr().replace(':', '')
 
     # Inject unprotected Association Request frames
-    failed = False
+    assoc1 = "00003a01" + bssid + addr + bssid + '2000' + '31040500' + '0008746573742d706d66' + '010802040b160c121824' + '30140100000fac040100000fac040100000fac020000'
+    assoc2 = "00003a01" + bssid + addr + bssid + '2000' + '31040500' + '0008746573742d706d66' + '010802040b160c121824' + '30140100000fac040100000fac040100000fac060000'
+    assoc3 = "00003a01" + bssid + addr + bssid + '2000' + '31040500' + '0008746573742d706d66' + '010802040b160c121824'
 
-    hapd.set("ext_mgmt_frame_handling", "1")
-    assoc = "00003a01" + bssid + addr + bssid + '2000' + '31040500' + '0008746573742d706d66' + '010802040b160c121824' + '30140100000fac040100000fac040100000fac020000'
-    res = hapd.request("MGMT_RX_PROCESS freq=2412 datarate=0 ssi_signal=-30 frame=%s" % assoc)
-    if "OK" not in res:
-        failed = True
-    hapd.set("ext_mgmt_frame_handling", "0")
-    sta = hapd.get_sta(dev[0].own_addr())
-    if "[MFP]" not in sta['flags']:
-        raise Exception("MFP flag removed")
-    #if sta["AKMSuiteSelector"] != '00-0f-ac-6':
-    #    raise Exception("AKMSuiteSelector value changed")
-
+    inject_assoc_req(hapd, dev[0].own_addr(), assoc1)
     time.sleep(0.1)
-    hapd.set("ext_mgmt_frame_handling", "1")
-    res = hapd.request("MGMT_RX_PROCESS freq=2412 datarate=0 ssi_signal=-30 frame=%s" % assoc)
-    if "OK" not in res:
-        failed = True
-    hapd.set("ext_mgmt_frame_handling", "0")
-    sta = hapd.get_sta(dev[0].own_addr())
-    if "[MFP]" not in sta['flags']:
-        raise Exception("MFP flag removed")
-    if sta["AKMSuiteSelector"] != '00-0f-ac-6':
-        raise Exception("AKMSuiteSelector value changed")
-
+    inject_assoc_req(hapd, dev[0].own_addr(), assoc1)
     time.sleep(0.1)
-    hapd.set("ext_mgmt_frame_handling", "1")
-    assoc = "00003a01" + bssid + addr + bssid + '2000' + '31040500' + '0008746573742d706d66' + '010802040b160c121824' + '30140100000fac040100000fac040100000fac060000'
-    res = hapd.request("MGMT_RX_PROCESS freq=2412 datarate=0 ssi_signal=-30 frame=%s" % assoc)
-    if "OK" not in res:
-        failed = True
-
-    hapd.request("SET ext_mgmt_frame_handling 0")
-    if failed:
-        raise Exception("MGMT_RX_PROCESS failed")
-
-    sta = hapd.get_sta(dev[0].own_addr())
-    if "[MFP]" not in sta['flags']:
-        raise Exception("MFP flag removed")
-    if sta["AKMSuiteSelector"] != '00-0f-ac-6':
-        raise Exception("AKMSuiteSelector value changed")
+    inject_assoc_req(hapd, dev[0].own_addr(), assoc2)
+    time.sleep(0.1)
+    inject_assoc_req(hapd, dev[0].own_addr(), assoc3)
+    time.sleep(0.1)
+    inject_assoc_req(hapd, dev[0].own_addr(), assoc2)
 
     ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=5.1)
     if ev:
@@ -1122,6 +1190,7 @@ def run_ap_pmf_inject_eap(dev, apdev, pmf=True):
                 eap_start = True
             if "CTRL-EVENT-EAP-FAILURE" in ev:
                 eap_failure = True
+        dev[0].dump_monitor(mon=False)
     dev[0].dump_monitor()
     ev = hapd.wait_event(["AP-STA-DISCONNECTED"], timeout=0.1)
     if ev:
@@ -1164,6 +1233,7 @@ def run_ap_pmf_inject_eap(dev, apdev, pmf=True):
                 eap_start = True
             if "CTRL-EVENT-EAP-FAILURE" in ev:
                 eap_failure = True
+        dev[0].dump_monitor(mon=False)
     dev[0].dump_monitor()
     ev = hapd.wait_event(["AP-STA-DISCONNECTED"], timeout=0.1)
     if ev:
@@ -1371,6 +1441,10 @@ def run_ap_pmf_beacon_protection(dev, apdev, cipher):
     if valid_bip < 0 or invalid_bip > 0 or missing_bip > 0:
         raise Exception("Unexpected wlantest BIP counters: valid=%d invalid=%d missing=%d" % (valid_bip, invalid_bip, missing_bip))
 
+    ev = dev[0].wait_event(["CTRL-EVENT-BEACON-LOSS"], timeout=5)
+    if ev is not None:
+        raise Exception("Beacon loss detected")
+
 def test_ap_pmf_beacon_protection_mismatch(dev, apdev):
     """WPA2-PSK Beacon protection MIC mismatch"""
     run_ap_pmf_beacon_protection_mismatch(dev, apdev, False)
@@ -1430,6 +1504,107 @@ def run_ap_pmf_beacon_protection_mismatch(dev, apdev, clear):
     ev = hapd.wait_event(["CTRL-EVENT-UNPROT-BEACON"], timeout=5)
     if ev is None:
         raise Exception("WNM-Notification Request frame not reported")
+
+def test_ap_pmf_beacon_protection_reconnect(dev, apdev):
+    """Beacon protection and reconnection"""
+    ssid = "test-beacon-prot"
+    params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
+    params["wpa_key_mgmt"] = "WPA-PSK-SHA256"
+    params["ieee80211w"] = "2"
+    params["beacon_prot"] = "1"
+    params["group_mgmt_cipher"] = "AES-128-CMAC"
+    try:
+        hapd = hostapd.add_ap(apdev[0], params)
+    except Exception as e:
+        if "Failed to enable hostapd interface" in str(e):
+            raise HwsimSkip("Beacon protection not supported")
+        raise
+
+    dev[0].connect(ssid, psk="12345678", ieee80211w="2", beacon_prot="1",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+    dev[0].request("RECONNECT")
+    dev[0].wait_connected()
+    time.sleep(1)
+    check_mac80211_bigtk(dev[0], hapd)
+    ev = dev[0].wait_event(["CTRL-EVENT-BEACON-LOSS"], timeout=5)
+    if ev is not None:
+        raise Exception("Beacon loss detected")
+
+def test_ap_pmf_beacon_protection_unicast(dev, apdev):
+    """WPA2-PSK Beacon protection (BIP) and unicast Beacon frame"""
+    try:
+        run_ap_pmf_beacon_protection_unicast(dev, apdev)
+    finally:
+        stop_monitor(apdev[1]["ifname"])
+
+def run_ap_pmf_beacon_protection_unicast(dev, apdev):
+    cipher = "AES-128-CMAC"
+    ssid = "test-beacon-prot"
+    params = hostapd.wpa2_params(ssid=ssid, passphrase="12345678")
+    params["wpa_key_mgmt"] = "WPA-PSK-SHA256"
+    params["ieee80211w"] = "2"
+    params["beacon_prot"] = "1"
+    params["group_mgmt_cipher"] = cipher
+    try:
+        hapd = hostapd.add_ap(apdev[0], params)
+    except Exception as e:
+        if "Failed to enable hostapd interface" in str(e):
+            raise HwsimSkip("Beacon protection not supported")
+        raise
+
+    bssid = hapd.own_addr()
+
+    Wlantest.setup(hapd)
+    wt = Wlantest()
+    wt.flush()
+    wt.add_passphrase("12345678")
+
+    # STA with Beacon protection enabled
+    dev[0].connect(ssid, psk="12345678", ieee80211w="2", beacon_prot="1",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
+    hapd.wait_sta()
+
+    sock = start_monitor(apdev[1]["ifname"])
+    radiotap = radiotap_build()
+
+    bssid = hapd.own_addr().replace(':', '')
+    addr = dev[0].own_addr().replace(':', '')
+
+    h = "80000000" + addr + bssid + bssid + "0000"
+    h += "c0a0260d27090600"+ "6400" + "1104"
+    h += "0010746573742d626561636f6e2d70726f74"
+    h += "010882848b960c121824"
+    h += "03010"
+    h += "1050400020000"
+    h += "2a0104"
+    h += "32043048606c"
+    h += "30140100000fac040100000fac040100000fac06cc00"
+    h += "3b025100"
+    h += "2d1a0c001bffff000000000000000000000100000000000000000000"
+    h += "3d1601000000000000000000000000000000000000000000"
+    h += "7f0b0400000200000040000010"
+    h += "dd180050f2020101010003a4000027a4000042435e0062322f00"
+
+    frame = binascii.unhexlify(h)
+    h += "4c1006002100000000002b8fab24bcef3bb1" #MME
+    frame2 = binascii.unhexlify(h)
+
+    sock.send(radiotap + frame)
+    ev = dev[0].wait_event(["CTRL-EVENT-UNPROT-BEACON"], timeout=5)
+    if ev is None:
+        raise Exception("Unprotected beacon was not reported")
+    if hapd.own_addr() not in ev:
+        raise Exception("Unexpected BSSID in unproted beacon indication")
+
+    time.sleep(10.1)
+    sock.send(radiotap + frame2)
+    ev = dev[0].wait_event(["CTRL-EVENT-UNPROT-BEACON"], timeout=5)
+    if ev is None:
+        raise Exception("Unprotected beacon was not reported")
+    if hapd.own_addr() not in ev:
+        raise Exception("Unexpected BSSID in unproted beacon indication")
 
 def test_ap_pmf_sta_global_require(dev, apdev):
     """WPA2-PSK AP with PMF optional and wpa_supplicant pmf=2"""

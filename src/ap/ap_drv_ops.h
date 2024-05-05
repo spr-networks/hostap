@@ -26,6 +26,8 @@ void hostapd_free_ap_extra_ies(struct hostapd_data *hapd, struct wpabuf *beacon,
 			       struct wpabuf *assocresp);
 int hostapd_reset_ap_wps_ie(struct hostapd_data *hapd);
 int hostapd_set_ap_wps_ie(struct hostapd_data *hapd);
+bool hostapd_sta_is_link_sta(struct hostapd_data *hapd,
+			     struct sta_info *sta);
 int hostapd_set_authorized(struct hostapd_data *hapd,
 			   struct sta_info *sta, int authorized);
 int hostapd_set_sta_flags(struct hostapd_data *hapd, struct sta_info *sta);
@@ -59,6 +61,9 @@ int hostapd_if_add(struct hostapd_data *hapd, enum wpa_driver_if_type type,
 		   const char *bridge, int use_existing);
 int hostapd_if_remove(struct hostapd_data *hapd, enum wpa_driver_if_type type,
 		      const char *ifname);
+int hostapd_if_link_remove(struct hostapd_data *hapd,
+			   enum wpa_driver_if_type type,
+			   const char *ifname, u8 link_id);
 int hostapd_set_ieee8021x(struct hostapd_data *hapd,
 			  struct wpa_bss_params *params);
 int hostapd_get_seqnum(const char *ifname, struct hostapd_data *hapd,
@@ -388,9 +393,15 @@ static inline int hostapd_drv_vendor_cmd(struct hostapd_data *hapd,
 
 static inline int hostapd_drv_stop_ap(struct hostapd_data *hapd)
 {
+	int link_id = -1;
+
 	if (!hapd->driver || !hapd->driver->stop_ap || !hapd->drv_priv)
 		return 0;
-	return hapd->driver->stop_ap(hapd->drv_priv);
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap)
+		link_id = hapd->mld_link_id;
+#endif /* CONFIG_IEEE80211BE */
+	return hapd->driver->stop_ap(hapd->drv_priv, link_id);
 }
 
 static inline int hostapd_drv_channel_info(struct hostapd_data *hapd,
@@ -443,15 +454,28 @@ hostapd_drv_register_frame(struct hostapd_data *hapd, u16 type,
 #endif /* CONFIG_TESTING_OPTIONS */
 
 #ifdef CONFIG_IEEE80211BE
+
 static inline int hostapd_drv_link_add(struct hostapd_data *hapd,
 				       u8 link_id, const u8 *addr)
 {
 	if (!hapd->driver || !hapd->drv_priv || !hapd->driver->link_add)
 		return -1;
 
-	return hapd->driver->link_add(hapd->drv_priv, link_id, addr);
+	return hapd->driver->link_add(hapd->drv_priv, link_id, addr, hapd);
 
 }
+
+static inline int hostapd_drv_link_sta_remove(struct hostapd_data *hapd,
+					      const u8 *addr)
+{
+	if (!hapd->conf->mld_ap || !hapd->driver || !hapd->drv_priv ||
+	    !hapd->driver->link_sta_remove)
+		return -1;
+
+	return hapd->driver->link_sta_remove(hapd->drv_priv, hapd->mld_link_id,
+					     addr);
+}
+
 #endif /* CONFIG_IEEE80211BE */
 
 #endif /* AP_DRV_OPS */
