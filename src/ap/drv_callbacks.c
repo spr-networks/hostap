@@ -73,6 +73,8 @@ void hostapd_notify_assoc_fils_finish(struct hostapd_data *hapd,
 	p = hostapd_eid_assoc_fils_session(sta->wpa_sm, p,
 					   elems.fils_session,
 					   sta->fils_hlp_resp);
+	if (!p)
+		return;
 
 	reply_res = hostapd_sta_assoc(hapd, sta->addr,
 				      sta->fils_pending_assoc_is_reassoc,
@@ -513,6 +515,8 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 				   "Failed to initialize WPA state machine");
 			return -1;
 		}
+		wpa_auth_set_rsn_selection(sta->wpa_sm, elems.rsn_selection,
+					   elems.rsn_selection_len);
 #ifdef CONFIG_IEEE80211BE
 		if (ap_sta_is_mld(hapd, sta)) {
 			wpa_printf(MSG_DEBUG,
@@ -773,6 +777,9 @@ skip_wpa_check:
 		p = hostapd_eid_assoc_fils_session(sta->wpa_sm, p,
 						   elems.fils_session,
 						   sta->fils_hlp_resp);
+		if (!p)
+			goto fail;
+
 		wpa_hexdump(MSG_DEBUG, "FILS Assoc Resp BUF (IEs)",
 			    buf, p - buf);
 	}
@@ -2383,6 +2390,32 @@ static void hostapd_eapol_tx_status(struct hostapd_data *hapd, const u8 *dst,
 #endif /* NEED_AP_MLME */
 
 
+#ifdef CONFIG_IEEE80211AX
+static void hostapd_event_color_change(struct hostapd_data *hapd, bool success)
+{
+	struct hostapd_data *bss;
+	size_t i;
+
+	for (i = 0; i < hapd->iface->num_bss; i++) {
+		bss = hapd->iface->bss[i];
+		if (bss->cca_color == 0)
+			continue;
+
+		if (success)
+			hapd->iface->conf->he_op.he_bss_color = bss->cca_color;
+
+		bss->cca_in_progress = 0;
+		if (ieee802_11_set_beacon(bss)) {
+			wpa_printf(MSG_ERROR, "Failed to remove BCCA element");
+			bss->cca_in_progress = 1;
+		} else {
+			hostapd_cleanup_cca_params(bss);
+		}
+	}
+}
+#endif  /* CONFIG_IEEE80211AX */
+
+
 void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 			  union wpa_event_data *data)
 {
@@ -2708,26 +2741,32 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		/* The BSS color is shared amongst all BBSs on a specific phy.
 		 * Therefore we always start the color change on the primary
 		 * BSS. */
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
 		wpa_printf(MSG_DEBUG, "BSS color collision on %s",
 			   hapd->conf->iface);
 		hostapd_switch_color(hapd->iface->bss[0],
 				     data->bss_color_collision.bitmap);
 		break;
 	case EVENT_CCA_STARTED_NOTIFY:
-		wpa_printf(MSG_DEBUG, "CCA started on on %s",
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
+		wpa_printf(MSG_DEBUG, "CCA started on %s",
 			   hapd->conf->iface);
 		break;
 	case EVENT_CCA_ABORTED_NOTIFY:
-		wpa_printf(MSG_DEBUG, "CCA aborted on on %s",
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
+		wpa_printf(MSG_DEBUG, "CCA aborted on %s",
 			   hapd->conf->iface);
-		hostapd_cleanup_cca_params(hapd);
+		hostapd_event_color_change(hapd, false);
 		break;
 	case EVENT_CCA_NOTIFY:
-		wpa_printf(MSG_DEBUG, "CCA finished on on %s",
+		hapd = switch_link_hapd(hapd,
+					data->bss_color_collision.link_id);
+		wpa_printf(MSG_DEBUG, "CCA finished on %s",
 			   hapd->conf->iface);
-		if (hapd->cca_color)
-			hapd->iface->conf->he_op.he_bss_color = hapd->cca_color;
-		hostapd_cleanup_cca_params(hapd);
+		hostapd_event_color_change(hapd, true);
 		break;
 #endif /* CONFIG_IEEE80211AX */
 	default:

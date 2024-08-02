@@ -526,6 +526,10 @@ def run_eht_mld_sae_two_links(dev, apdev, beacon_prot="1",
             # fall back to full SAE from failed PMKSA caching attempt
             # automatically.
             wpas.request("PMKSA_FLUSH")
+
+            # flush the BSS table before reconnect as otherwise the old
+            # AP MLD BSSs would be in the BSS list
+            wpas.request("BSS_FLUSH 0")
             wpas.request("RECONNECT")
             wpas.wait_connected()
             hapd0.wait_sta()
@@ -2127,3 +2131,62 @@ def test_eht_mld_cohosted_connectivity(dev, apdev, params):
         traffic_test(wpas1, hapds[2])
 
         stop_mld_devs(hapds, params['prefix'])
+
+def test_eht_mlo_color_change(dev, apdev):
+    """AP MLD and Color Change Announcement"""
+    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+
+        ssid = "mld_ap"
+        passphrase = 'qwertyuiop'
+
+        params = eht_mld_ap_wpa2_params(ssid, passphrase,
+                                        key_mgmt="SAE", mfp="2", pwe='1')
+        params['he_bss_color'] = '42'
+
+        hapd0 = eht_mld_enable_ap(hapd_iface, params)
+
+        params['channel'] = '6'
+        params['he_bss_color'] = '24'
+
+        hapd1 = eht_mld_enable_ap(hapd_iface, params)
+
+        logger.info("Perform CCA on 1st link")
+        if "OK" not in hapd0.request("COLOR_CHANGE 10"):
+            raise Exception("COLOR_CHANGE failed")
+
+        time.sleep(1.5)
+
+        color = hapd0.get_status_field("he_bss_color")
+        if color != "10":
+            raise Exception("Expected current he_bss_color to be 10; was " + color)
+
+        logger.info("Perform CCA on 1st link again")
+        if "OK" not in hapd0.request("COLOR_CHANGE 60"):
+            raise Exception("COLOR_CHANGE failed")
+        time.sleep(1.5)
+
+        color = hapd0.get_status_field("he_bss_color")
+        if color != "60":
+            raise Exception("Expected current he_bss_color to be 60; was " + color)
+
+        logger.info("Perform CCA on 2nd link")
+        if "OK" not in hapd1.request("COLOR_CHANGE 25"):
+            raise Exception("COLOR_CHANGE failed")
+        time.sleep(1.5)
+
+        color = hapd1.get_status_field("he_bss_color")
+        if color != "25":
+            raise Exception("Expected current he_bss_color to be 25; was " + color)
+
+        logger.info("Perform CCA on 2nd link again")
+        if "OK" not in hapd1.request("COLOR_CHANGE 5"):
+            raise Exception("COLOR_CHANGE failed")
+        time.sleep(1.5)
+
+        color = hapd1.get_status_field("he_bss_color")
+        if color != "5":
+            raise Exception("Expected current he_bss_color to be 5; was " + color)
+
+        hapd0.dump_monitor()
+        hapd1.dump_monitor()

@@ -2754,6 +2754,8 @@ static const struct parse_data ssid_fields[] = {
 	{ INT_RANGE(sae_pk, 0, 2) },
 	{ INT_RANGE(disable_eht, 0, 1)},
 	{ INT_RANGE(enable_4addr_mode, 0, 1)},
+	{ INT_RANGE(max_idle, 0, 65535)},
+	{ INT_RANGE(ssid_protection, 0, 1)},
 };
 
 #undef OFFSET
@@ -5577,6 +5579,7 @@ static const struct global_parse_data global_fields[] = {
 	{ INT_RANGE(extended_key_id, 0, 1), 0 },
 #endif /* CONFIG_WNM */
 	{ INT_RANGE(wowlan_disconnect_on_deinit, 0, 1), 0},
+	{ INT_RANGE(rsn_overriding, 0, 2), 0},
 #ifdef CONFIG_PASN
 #ifdef CONFIG_TESTING_OPTIONS
 	{ INT_RANGE(force_kdk_derivation, 0, 1), 0 },

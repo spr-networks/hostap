@@ -82,6 +82,22 @@ def add_message_authenticator_attr(reply, digest):
         digest = b"0x" + binascii.hexlify(digest)
     reply.AddAttribute("Message-Authenticator", digest)
 
+def build_message_auth(pkt, reply):
+    hmac_obj = hmac.new(reply.secret, digestmod=hashlib.md5)
+    hmac_obj.update(struct.pack("B", reply.code))
+    hmac_obj.update(struct.pack("B", reply.id))
+
+    reply.AddAttribute("Message-Authenticator", 16*b'\x00')
+    attrs = reply._PktEncodeAttributes()
+
+    # Length
+    flen = 4 + 16 + len(attrs)
+    hmac_obj.update(struct.pack(">H", flen))
+    hmac_obj.update(pkt.authenticator)
+    hmac_obj.update(attrs)
+    del reply[80]
+    add_message_authenticator_attr(reply, hmac_obj.digest())
+
 def run_pyrad_server(srv, t_stop, eap_handler):
     srv.RunWithStop(t_stop, eap_handler)
 
@@ -113,21 +129,8 @@ def start_radius_server(eap_handler):
                 logger.info("No EAP request available")
             reply.code = pyrad.packet.AccessChallenge
 
-            hmac_obj = hmac.new(reply.secret, digestmod=hashlib.md5)
-            hmac_obj.update(struct.pack("B", reply.code))
-            hmac_obj.update(struct.pack("B", reply.id))
-
             # reply attributes
-            reply.AddAttribute("Message-Authenticator", 16*b'\x00')
-            attrs = reply._PktEncodeAttributes()
-
-            # Length
-            flen = 4 + 16 + len(attrs)
-            hmac_obj.update(struct.pack(">H", flen))
-            hmac_obj.update(pkt.authenticator)
-            hmac_obj.update(attrs)
-            del reply[80]
-            add_message_authenticator_attr(reply, hmac_obj.digest())
+            build_message_auth(pkt, reply)
 
             self.SendReplyPacket(pkt.fd, reply)
 
@@ -2892,7 +2895,7 @@ def test_eap_proto_eke_errors(dev, apdev):
     tests = [(1, "eap_eke_dh_init", None),
              (1, "eap_eke_prf_hmac_sha1", "dhgroup=3 encr=1 prf=1 mac=1"),
              (1, "eap_eke_prf_hmac_sha256", "dhgroup=5 encr=1 prf=2 mac=2"),
-             (1, "eap_eke_prf", None),
+             (1, "eap_eke_prf_*", None),
              (1, "os_get_random;eap_eke_dhcomp", None),
              (1, "aes_128_cbc_encrypt;eap_eke_dhcomp", None),
              (1, "aes_128_cbc_decrypt;eap_eke_shared_secret", None),

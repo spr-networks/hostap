@@ -92,6 +92,7 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 	bss->eap_sim_id = 3;
 	bss->eap_sim_aka_fast_reauth_limit = 1000;
 	bss->ap_max_inactivity = AP_MAX_INACTIVITY;
+	bss->bss_max_idle = 1;
 	bss->eapol_version = EAPOL_VERSION;
 
 	bss->max_listen_interval = 65535;
@@ -121,9 +122,10 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 #endif /* CONFIG_IEEE80211R_AP */
 
 	bss->radius_das_time_window = 300;
+	bss->radius_require_message_authenticator = 1;
 
 	bss->anti_clogging_threshold = 5;
-	bss->sae_sync = 5;
+	bss->sae_sync = 3;
 
 	bss->gas_frag_limit = 1400;
 
@@ -545,10 +547,14 @@ int hostapd_setup_sae_pt(struct hostapd_bss_config *conf)
 
 	if ((conf->sae_pwe == SAE_PWE_HUNT_AND_PECK &&
 	     !hostapd_sae_pw_id_in_use(conf) &&
-	     !wpa_key_mgmt_sae_ext_key(conf->wpa_key_mgmt) &&
+	     !wpa_key_mgmt_sae_ext_key(conf->wpa_key_mgmt |
+				       conf->rsn_override_key_mgmt |
+				       conf->rsn_override_key_mgmt_2) &&
 	     !hostapd_sae_pk_in_use(conf)) ||
 	    conf->sae_pwe == SAE_PWE_FORCE_HUNT_AND_PECK ||
-	    !wpa_key_mgmt_sae(conf->wpa_key_mgmt))
+	    !wpa_key_mgmt_sae(conf->wpa_key_mgmt |
+			      conf->rsn_override_key_mgmt |
+			      conf->rsn_override_key_mgmt_2))
 		return 0; /* PT not needed */
 
 	sae_deinit_pt(ssid->pt);
@@ -1023,6 +1029,11 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 
 #ifdef CONFIG_TESTING_OPTIONS
 	wpabuf_free(conf->own_ie_override);
+	wpabuf_free(conf->rsne_override);
+	wpabuf_free(conf->rsnoe_override);
+	wpabuf_free(conf->rsno2e_override);
+	wpabuf_free(conf->rsnxe_override);
+	wpabuf_free(conf->rsnxoe_override);
 	wpabuf_free(conf->sae_commit_override);
 	wpabuf_free(conf->rsne_override_eapol);
 	wpabuf_free(conf->rsnxe_override_eapol);

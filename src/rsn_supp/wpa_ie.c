@@ -33,8 +33,15 @@ int wpa_parse_wpa_ie(const u8 *wpa_ie, size_t wpa_ie_len,
 	if (wpa_ie_len >= 6 && wpa_ie[0] == WLAN_EID_VENDOR_SPECIFIC &&
 	    wpa_ie[1] >= 4 && WPA_GET_BE32(&wpa_ie[2]) == OSEN_IE_VENDOR_TYPE)
 		return wpa_parse_wpa_ie_rsn(wpa_ie, wpa_ie_len, data);
-	else
-		return wpa_parse_wpa_ie_wpa(wpa_ie, wpa_ie_len, data);
+	if (wpa_ie_len >= 6 && wpa_ie[0] == WLAN_EID_VENDOR_SPECIFIC &&
+	    wpa_ie[1] >= 4 &&
+	    WPA_GET_BE32(&wpa_ie[2]) == RSNE_OVERRIDE_IE_VENDOR_TYPE)
+		return wpa_parse_wpa_ie_rsn(wpa_ie, wpa_ie_len, data);
+	if (wpa_ie_len >= 6 && wpa_ie[0] == WLAN_EID_VENDOR_SPECIFIC &&
+	    wpa_ie[1] >= 4 &&
+	    WPA_GET_BE32(&wpa_ie[2]) == RSNE_OVERRIDE_2_IE_VENDOR_TYPE)
+		return wpa_parse_wpa_ie_rsn(wpa_ie, wpa_ie_len, data);
+	return wpa_parse_wpa_ie_wpa(wpa_ie, wpa_ie_len, data);
 }
 
 
@@ -366,7 +373,7 @@ int wpa_gen_wpa_ie(struct wpa_sm *sm, u8 *wpa_ie, size_t wpa_ie_len)
 int wpa_gen_rsnxe(struct wpa_sm *sm, u8 *rsnxe, size_t rsnxe_len)
 {
 	u8 *pos = rsnxe;
-	u16 capab = 0;
+	u32 capab = 0, tmp;
 	size_t flen;
 
 	if (wpa_key_mgmt_sae(sm->key_mgmt) &&
@@ -385,20 +392,27 @@ int wpa_gen_rsnxe(struct wpa_sm *sm, u8 *rsnxe, size_t rsnxe_len)
 		capab |= BIT(WLAN_RSNX_CAPAB_SECURE_RTT);
 	if (sm->prot_range_neg)
 		capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR);
+	if (sm->ssid_protection)
+		capab |= BIT(WLAN_RSNX_CAPAB_SSID_PROTECTION);
 
-	flen = (capab & 0xff00) ? 2 : 1;
 	if (!capab)
 		return 0; /* no supported extended RSN capabilities */
+	tmp = capab;
+	flen = 0;
+	while (tmp) {
+		flen++;
+		tmp >>= 8;
+	}
 	if (rsnxe_len < 2 + flen)
 		return -1;
 	capab |= flen - 1; /* bit 0-3 = Field length (n - 1) */
 
 	*pos++ = WLAN_EID_RSNX;
 	*pos++ = flen;
-	*pos++ = capab & 0x00ff;
-	capab >>= 8;
-	if (capab)
-		*pos++ = capab;
+	while (capab) {
+		*pos++ = capab & 0xff;
+		capab >>= 8;
+	}
 
 	return pos - rsnxe;
 }

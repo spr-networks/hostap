@@ -2558,6 +2558,30 @@ static int wpa_supplicant_ctrl_iface_status(struct wpa_supplicant *wpa_s,
 		pos += ret;
 	}
 
+#ifdef CONFIG_SME
+	if (wpa_s->sme.bss_max_idle_period) {
+		ret = os_snprintf(pos, end - pos, "bss_max_idle_period=%d\n",
+				  wpa_s->sme.bss_max_idle_period);
+		if (os_snprintf_error(end - pos, ret))
+			return pos - buf;
+		pos += ret;
+	}
+#endif /* CONFIG_SME */
+
+	if (wpa_s->ssid_verified) {
+		ret = os_snprintf(pos, end - pos, "ssid_verified=1\n");
+		if (os_snprintf_error(end - pos, ret))
+			return pos - buf;
+		pos += ret;
+	}
+
+	if (wpa_s->bigtk_set) {
+		ret = os_snprintf(pos, end - pos, "bigtk_set=1\n");
+		if (os_snprintf_error(end - pos, ret))
+			return pos - buf;
+		pos += ret;
+	}
+
 #ifdef ANDROID
 	/*
 	 * Allow using the STATUS command with default behavior, say for debug,
@@ -3095,12 +3119,12 @@ static int wpa_supplicant_ctrl_iface_scan_result(
 	ie = wpa_bss_get_vendor_ie(bss, WPA_IE_VENDOR_TYPE);
 	if (ie)
 		pos = wpa_supplicant_ie_txt(pos, end, "WPA", ie, 2 + ie[1]);
-	ie2 = wpa_bss_get_ie(bss, WLAN_EID_RSN);
+	ie2 = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
 	if (ie2) {
 		pos = wpa_supplicant_ie_txt(pos, end, mesh ? "RSN" : "WPA2",
 					    ie2, 2 + ie2[1]);
 	}
-	rsnxe = wpa_bss_get_ie(bss, WLAN_EID_RSNX);
+	rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
 	if (ieee802_11_rsnx_capab(rsnxe, WLAN_RSNX_CAPAB_SAE_H2E)) {
 		ret = os_snprintf(pos, end - pos, "[SAE-H2E]");
 		if (os_snprintf_error(end - pos, ret))
@@ -5420,12 +5444,12 @@ static int print_bss_info(struct wpa_supplicant *wpa_s, struct wpa_bss *bss,
 		if (ie)
 			pos = wpa_supplicant_ie_txt(pos, end, "WPA", ie,
 						    2 + ie[1]);
-		ie2 = wpa_bss_get_ie(bss, WLAN_EID_RSN);
+		ie2 = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
 		if (ie2)
 			pos = wpa_supplicant_ie_txt(pos, end,
 						    mesh ? "RSN" : "WPA2", ie2,
 						    2 + ie2[1]);
-		rsnxe = wpa_bss_get_ie(bss, WLAN_EID_RSNX);
+		rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
 		if (ieee802_11_rsnx_capab(rsnxe, WLAN_RSNX_CAPAB_SAE_H2E)) {
 			ret = os_snprintf(pos, end - pos, "[SAE-H2E]");
 			if (os_snprintf_error(end - pos, ret))
@@ -6011,7 +6035,7 @@ static int wpa_supplicant_ctrl_iface_roam(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-	bss = wpa_bss_get(wpa_s, bssid, ssid->ssid, ssid->ssid_len);
+	bss = wpa_bss_get_connection(wpa_s, bssid, ssid->ssid, ssid->ssid_len);
 	if (!bss) {
 		wpa_printf(MSG_DEBUG, "CTRL_IFACE ROAM: Target AP not found "
 			   "from BSS table");
@@ -6716,6 +6740,7 @@ static int p2p_ctrl_service_add_bonjour(struct wpa_supplicant *wpa_s,
 	char *pos;
 	size_t len;
 	struct wpabuf *query, *resp;
+	int ret;
 
 	pos = os_strchr(cmd, ' ');
 	if (pos == NULL)
@@ -6729,34 +6754,28 @@ static int p2p_ctrl_service_add_bonjour(struct wpa_supplicant *wpa_s,
 	query = wpabuf_alloc(len);
 	if (query == NULL)
 		return -1;
-	if (hexstr2bin(cmd, wpabuf_put(query, len), len) < 0) {
-		wpabuf_free(query);
-		return -1;
-	}
-
+	ret = hexstr2bin(cmd, wpabuf_put(query, len), len);
+	if (ret < 0)
+		goto err_query;
+	ret = -1;
 	len = os_strlen(pos);
-	if (len & 1) {
-		wpabuf_free(query);
-		return -1;
-	}
+	if (len & 1)
+		goto err_query;
 	len /= 2;
 	resp = wpabuf_alloc(len);
-	if (resp == NULL) {
-		wpabuf_free(query);
-		return -1;
-	}
-	if (hexstr2bin(pos, wpabuf_put(resp, len), len) < 0) {
-		wpabuf_free(query);
-		wpabuf_free(resp);
-		return -1;
-	}
+	if (!resp)
+		goto err_query;
+	ret = hexstr2bin(pos, wpabuf_put(resp, len), len);
+	if (ret < 0)
+		goto err_resp;
 
-	if (wpas_p2p_service_add_bonjour(wpa_s, query, resp) < 0) {
-		wpabuf_free(query);
-		wpabuf_free(resp);
-		return -1;
-	}
-	return 0;
+	ret = wpas_p2p_service_add_bonjour(wpa_s, query, resp);
+
+err_resp:
+	wpabuf_free(resp);
+err_query:
+	wpabuf_free(query);
+	return ret;
 }
 
 
