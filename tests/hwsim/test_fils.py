@@ -36,7 +36,7 @@ def test_fils_sk_full_auth(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['wpa_group_rekey'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].flush_scan_cache()
     dev[0].scan_for_bss(bssid, freq=2412)
@@ -86,7 +86,7 @@ def test_fils_sk_sha384_full_auth(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['wpa_group_rekey'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].flush_scan_cache()
     dev[0].scan_for_bss(bssid, freq=2412)
@@ -134,7 +134,7 @@ def test_fils_sk_pmksa_caching(dev, apdev, params):
     params['auth_server_port'] = "18128"
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -146,6 +146,9 @@ def test_fils_sk_pmksa_caching(dev, apdev, params):
     pmksa = dev[0].get_pmksa(bssid)
     if pmksa is None:
         raise Exception("No PMKSA cache entry created")
+
+    if dev[0].get_status_field("ssid_verified") == "1":
+        raise Exception("Unexpected ssid_verified=1 in STATUS")
 
     dev[0].request("DISCONNECT")
     dev[0].wait_disconnected()
@@ -160,6 +163,8 @@ def test_fils_sk_pmksa_caching(dev, apdev, params):
     if "CTRL-EVENT-EAP-STARTED" in ev:
         raise Exception("Unexpected EAP exchange")
     hapd.wait_sta()
+    if dev[0].get_status_field("ssid_verified") != "1":
+        raise Exception("ssid_verified=1 not in STATUS")
     hwsim_utils.test_connectivity(dev[0], hapd)
     pmksa2 = dev[0].get_pmksa(bssid)
     if pmksa2 is None:
@@ -197,7 +202,7 @@ def test_fils_sk_pmksa_caching_ocv(dev, apdev, params):
     params['ieee80211w'] = '1'
     params['ocv'] = '1'
     try:
-        hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+        hapd = hostapd.add_ap(apdev[0], params)
     except Exception as e:
         if "Failed to set hostapd parameter ocv" in str(e):
             raise HwsimSkip("OCV not supported")
@@ -274,7 +279,7 @@ def test_fils_sk_pmksa_caching_and_cache_id(dev, apdev):
     params["eap_fast_a_id_info"] = "test server"
     params["eap_server_erp"] = "1"
     params["erp_domain"] = "example.com"
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -300,7 +305,7 @@ def test_fils_sk_pmksa_caching_and_cache_id(dev, apdev):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['fils_cache_id'] = "abcd"
-    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+    hapd2 = hostapd.add_ap(apdev[1], params)
 
     dev[0].scan_for_bss(bssid2, freq=2412)
 
@@ -343,7 +348,7 @@ def test_fils_sk_pmksa_caching_ctrl_ext(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['fils_cache_id'] = "ffee"
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -381,7 +386,7 @@ def test_fils_sk_pmksa_caching_ctrl_ext(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['fils_cache_id'] = "ffee"
-    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+    hapd2 = hostapd.add_ap(apdev[1], params)
 
     dev[0].scan_for_bss(bssid2, freq=2412)
     dev[0].set_network(id, "bssid", bssid2)
@@ -412,7 +417,7 @@ def run_fils_sk_erp(dev, apdev, key_mgmt, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -453,7 +458,7 @@ def test_fils_sk_erp_followed_by_pmksa_caching(dev, apdev, params):
     params['auth_server_port'] = "18128"
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -528,7 +533,7 @@ def test_fils_sk_erp_another_ssid(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -552,7 +557,7 @@ def test_fils_sk_erp_another_ssid(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].dump_monitor()
@@ -595,7 +600,7 @@ def test_fils_sk_multiple_realms(dev, apdev, params):
     params['fils_realm'] = fils_realms
     params['fils_cache_id'] = "1234"
     params['hessid'] = bssid
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].flush_scan_cache()
     dev[0].scan_for_bss(bssid, freq=2412)
@@ -780,7 +785,7 @@ def run_fils_sk_hlp(dev, apdev, rapid_commit_server, params):
     params['fils_hlp_wait_time'] = '10000'
     if not rapid_commit_server:
         params['dhcp_rapid_commit_proxy'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -885,7 +890,7 @@ def test_fils_sk_hlp_timeout(dev, apdev, params):
 
     bssid = apdev[0]['bssid']
     params = fils_hlp_config(fils_hlp_wait_time=30)
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -932,7 +937,7 @@ def test_fils_sk_hlp_oom(dev, apdev, params):
     bssid = apdev[0]['bssid']
     params = fils_hlp_config(fils_hlp_wait_time=500)
     params['dhcp_rapid_commit_proxy'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1032,7 +1037,7 @@ def test_fils_sk_hlp_req_parsing(dev, apdev, params):
 
     bssid = apdev[0]['bssid']
     params = fils_hlp_config(fils_hlp_wait_time=30)
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1207,7 +1212,7 @@ def test_fils_sk_hlp_dhcp_parsing(dev, apdev, params):
     bssid = apdev[0]['bssid']
     params = fils_hlp_config(fils_hlp_wait_time=30)
     params['dhcp_rapid_commit_proxy'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1369,7 +1374,7 @@ def test_fils_sk_erp_and_reauth(dev, apdev, params):
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
     params['broadcast_deauth'] = '0'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1408,7 +1413,7 @@ def test_fils_sk_erp_sim(dev, apdev, params):
     params['auth_server_port'] = "18128"
     params['fils_realm'] = realm
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1494,7 +1499,7 @@ def run_fils_sk_pfs(dev, apdev, group, params):
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
     params['fils_dh_group'] = group
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1537,7 +1542,7 @@ def test_fils_sk_pfs_group_mismatch(dev, apdev, params):
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
     params['fils_dh_group'] = "20"
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1572,7 +1577,7 @@ def test_fils_sk_pfs_pmksa_caching(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['fils_dh_group'] = "19"
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1689,7 +1694,7 @@ def test_fils_sk_auth_mismatch(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1736,7 +1741,7 @@ def setup_fils_rekey(dev, apdev, params, wpa_ptk_rekey=0, wpa_group_rekey=0,
             params['disable_pmksa_caching'] = '1'
     if ext_key_id:
         params['extended_key_id'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1818,7 +1823,7 @@ def test_fils_and_ft(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -1851,7 +1856,7 @@ def test_fils_and_ft(dev, apdev, params):
     params['r0kh'] = ["02:00:00:00:04:00 nas2.w1.fi 300102030405060708090a0b0c0d0e0f"]
     params['r1kh'] = "02:00:00:00:04:00 00:01:02:03:04:06 200102030405060708090a0b0c0d0e0f"
     params['ieee80211w'] = "1"
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].dump_monitor()
@@ -1888,7 +1893,7 @@ def test_fils_and_ft(dev, apdev, params):
     params['r1_key_holder'] = "000102030406"
     params['r0kh'] = ["02:00:00:00:03:00 nas1.w1.fi 200102030405060708090a0b0c0d0e0f"]
     params['r1kh'] = "02:00:00:00:03:00 00:01:02:03:04:05 300102030405060708090a0b0c0d0e0f"
-    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+    hapd2 = hostapd.add_ap(apdev[1], params)
 
     dev[0].scan_for_bss(apdev[1]['bssid'], freq="2412", force_scan=True)
     # FIX: Cannot use FT-over-DS without the FTE MIC issue addressed
@@ -1979,7 +1984,7 @@ def run_fils_and_ft_setup(dev, apdev, params, key_mgmt):
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
     params['ieee80211w'] = "2"
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -2016,7 +2021,7 @@ def run_fils_and_ft_setup(dev, apdev, params, key_mgmt):
                       "02:00:00:00:04:00 nas2.w1.fi 300102030405060708090a0b0c0d0e0f"]
     params['r1kh'] = "02:00:00:00:04:00 00:01:02:03:04:06 200102030405060708090a0b0c0d0e0f"
     params['ieee80211w'] = "2"
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].dump_monitor()
@@ -2047,7 +2052,7 @@ def run_fils_and_ft_setup(dev, apdev, params, key_mgmt):
     params['r0kh'] = ["02:00:00:00:03:00 nas1.w1.fi 200102030405060708090a0b0c0d0e0f",
                       "02:00:00:00:04:00 nas2.w1.fi 000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f"]
     params['r1kh'] = "02:00:00:00:03:00 00:01:02:03:04:05 300102030405060708090a0b0c0d0e0f"
-    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+    hapd2 = hostapd.add_ap(apdev[1], params)
 
     return hapd, hapd2
 
@@ -2065,7 +2070,7 @@ def test_fils_assoc_replay(dev, apdev, params):
     params['auth_server_port'] = "18128"
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -2158,7 +2163,7 @@ def test_fils_sk_erp_server_flush(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -2255,7 +2260,7 @@ def run_fils_sk_erp_radius_ext(dev, apdev, params):
     params['erp_domain'] = 'erp.example.com'
     params['fils_realm'] = 'erp.example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -2308,7 +2313,7 @@ def run_fils_sk_erp_radius_roam(dev, apdev):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -2324,7 +2329,7 @@ def run_fils_sk_erp_radius_roam(dev, apdev):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+    hapd2 = hostapd.add_ap(apdev[1], params)
 
     dev[0].scan_for_bss(bssid2, freq=2412)
 
@@ -2357,7 +2362,7 @@ def test_fils_sk_erp_roam_diff_akm(dev, apdev, params):
     params['auth_server_port'] = "18128"
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -2384,7 +2389,7 @@ def test_fils_sk_erp_roam_diff_akm(dev, apdev, params):
     params['auth_server_port'] = "18128"
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
-    hapd2 = hostapd.add_ap(apdev[1]['ifname'], params)
+    hapd2 = hostapd.add_ap(apdev[1], params)
 
     dev[0].scan_for_bss(bssid2, freq=2412)
 
@@ -2447,7 +2452,7 @@ def test_fils_discovery_frame(dev, apdev, params):
     params['wpa_group_rekey'] = '1'
     params['fils_discovery_min_interval'] = '20'
     params['fils_discovery_max_interval'] = '20'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params, no_enable=True)
+    hapd = hostapd.add_ap(apdev[0], params, no_enable=True)
 
     if "OK" not in hapd.request("ENABLE"):
         raise HwsimSkip("FILS Discovery frame transmission not supported")
@@ -2488,7 +2493,7 @@ def run_fils_offload_to_driver(dev, apdev, params):
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
     params['disable_pmksa_caching'] = '1'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev.request("ERP_FLUSH")
     id = dev.connect("fils", key_mgmt="FILS-SHA256",
@@ -2530,7 +2535,7 @@ def test_fils_sk_okc(dev, apdev, params):
     params['auth_server_port'] = "18128"
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].scan_for_bss(bssid, freq=2412)
     dev[0].request("ERP_FLUSH")
@@ -2579,7 +2584,7 @@ def test_fils_sk_ptk_rekey_request(dev, apdev, params):
     params['erp_send_reauth_start'] = '1'
     params['erp_domain'] = 'example.com'
     params['fils_realm'] = 'example.com'
-    hapd = hostapd.add_ap(apdev[0]['ifname'], params)
+    hapd = hostapd.add_ap(apdev[0], params)
 
     dev[0].flush_scan_cache()
     dev[0].scan_for_bss(bssid, freq=2412)

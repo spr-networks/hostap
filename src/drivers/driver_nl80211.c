@@ -2476,12 +2476,20 @@ static void nl80211_mgmt_handle_register_eloop(struct i802_bss *bss)
 }
 
 
-static int nl80211_register_action_frame(struct i802_bss *bss,
-					 const u8 *match, size_t match_len)
+static int nl80211_register_action_frame2(struct i802_bss *bss,
+					  const u8 *match, size_t match_len,
+					  bool multicast)
 {
 	u16 type = (WLAN_FC_TYPE_MGMT << 2) | (WLAN_FC_STYPE_ACTION << 4);
 	return nl80211_register_frame(bss, bss->nl_mgmt,
-				      type, match, match_len, false);
+				      type, match, match_len, multicast);
+}
+
+
+static int nl80211_register_action_frame(struct i802_bss *bss,
+					 const u8 *match, size_t match_len)
+{
+	return nl80211_register_action_frame2(bss, match, match_len, false);
 }
 
 
@@ -2557,11 +2565,15 @@ static int nl80211_mgmt_subscribe_non_ap(struct i802_bss *bss)
 		ret = -1;
 #endif /* CONFIG_P2P */
 #ifdef CONFIG_NAN_USD
+#define NAN_PUB_ACTION ((u8 *) "\x04\x09\x50\x6f\x9a\x13")
 	/* NAN SDF Public Action */
-	if (nl80211_register_action_frame(bss,
-					  (u8 *) "\x04\x09\x50\x6f\x9a\x13",
-					  6) < 0)
-		ret = -1;
+	if (nl80211_register_action_frame2(bss, NAN_PUB_ACTION, 6, true) < 0) {
+		/* fallback to non-multicast */
+		if (nl80211_register_action_frame2(bss, NAN_PUB_ACTION, 6,
+						   false) < 0)
+			ret = -1;
+	}
+#undef NAN_PUB_ACTION
 #endif /* CONFIG_NAN_USD */
 #ifdef CONFIG_DPP
 	/* DPP Public Action */
@@ -3177,7 +3189,7 @@ static void wpa_driver_nl80211_deinit(struct i802_bss *bss)
 	eloop_cancel_timeout(wpa_driver_nl80211_send_rfkill, drv, drv->ctx);
 	rfkill_deinit(drv->rfkill);
 
-	eloop_cancel_timeout(wpa_driver_nl80211_scan_timeout, drv, drv->ctx);
+	eloop_cancel_timeout(wpa_driver_nl80211_scan_timeout, drv, bss->ctx);
 
 	if (!drv->start_iface_up)
 		(void) i802_set_iface_flags(bss, 0);
@@ -4195,6 +4207,22 @@ struct i802_link * nl80211_get_link(struct i802_bss *bss, s8 link_id)
 }
 
 
+u8 nl80211_get_link_id_from_link(struct i802_bss *bss, struct i802_link *link)
+{
+	u8 link_id;
+
+	if (link == bss->flink)
+		return 0;
+
+	for_each_link(bss->valid_links, link_id) {
+		if (&bss->links[link_id] == link)
+			return link_id;
+	}
+
+	return 0;
+}
+
+
 static void nl80211_link_set_freq(struct i802_bss *bss, s8 link_id, int freq)
 {
 	struct i802_link *link = nl80211_get_link(bss, link_id);
@@ -5168,10 +5196,10 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 		   params->key_mgmt_suites);
 	num_suites = wpa_key_mgmt_to_suites(params->key_mgmt_suites,
 					    suites, ARRAY_SIZE(suites));
-	if (num_suites > NL80211_MAX_NR_AKM_SUITES)
+	if ((unsigned int) num_suites > drv->capa.max_num_akms)
 		wpa_printf(MSG_DEBUG,
-			   "nl80211: Not enough room for all AKM suites (num_suites=%d > NL80211_MAX_NR_AKM_SUITES)",
-			   num_suites);
+			   "nl80211: Not enough room for all AKM suites (num_suites=%d > %d)",
+			   num_suites, drv->capa.max_num_akms);
 	else if (num_suites &&
 		 nla_put(msg, NL80211_ATTR_AKM_SUITES, num_suites * sizeof(u32),
 			 suites))
@@ -9887,6 +9915,9 @@ static int nl80211_set_param(void *priv, const char *param)
 			WPA_DRIVER_FLAGS2_SEC_LTF_AP;
 	}
 
+	if (os_strstr(param, "rsn_override_in_driver=1"))
+		drv->capa.flags2 |= WPA_DRIVER_FLAGS2_RSN_OVERRIDE_STA;
+
 	return 0;
 }
 
@@ -10237,6 +10268,8 @@ static int wpa_driver_nl80211_get_survey(void *priv, unsigned int freq)
 	int err;
 	union wpa_event_data data;
 	struct survey_results *survey_results;
+	void *ctx = (bss->scan_link && bss->scan_link->ctx) ?
+		bss->scan_link->ctx : bss->ctx;
 
 	os_memset(&data, 0, sizeof(data));
 	survey_results = &data.survey_results;
@@ -10259,7 +10292,7 @@ static int wpa_driver_nl80211_get_survey(void *priv, unsigned int freq)
 	if (err)
 		wpa_printf(MSG_ERROR, "nl80211: Failed to process survey data");
 	else
-		wpa_supplicant_event(drv->ctx, EVENT_SURVEY, &data);
+		wpa_supplicant_event(ctx, EVENT_SURVEY, &data);
 
 	clean_survey_results(survey_results);
 	return err;
@@ -10533,11 +10566,16 @@ static int nl80211_send_tdls_mgmt(void *priv, const u8 *dst, u8 action_code,
 	    nl80211_tdls_set_discovery_resp_link(drv, link_id) < 0)
 		return -EOPNOTSUPP;
 
+	if (link_id < 0 && drv->sta_mlo_info.valid_links)
+		link_id = drv->sta_mlo_info.assoc_link_id;
+
 	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_TDLS_MGMT)) ||
 	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, dst) ||
 	    nla_put_u8(msg, NL80211_ATTR_TDLS_ACTION, action_code) ||
 	    nla_put_u8(msg, NL80211_ATTR_TDLS_DIALOG_TOKEN, dialog_token) ||
 	    nla_put_u16(msg, NL80211_ATTR_STATUS_CODE, status_code) ||
+	    (link_id >= 0 &&
+	     nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id)) ||
 	    nl80211_add_peer_capab(msg, peer_capab) ||
 	    (initiator && nla_put_flag(msg, NL80211_ATTR_TDLS_INITIATOR)) ||
 	    nla_put(msg, NL80211_ATTR_IE, len, buf))
@@ -10740,7 +10778,7 @@ static int driver_nl80211_link_remove(void *priv, enum wpa_driver_if_type type,
 
 	bss->ctx = bss->flink->ctx;
 
-	if (drv->first_bss == bss && !bss->valid_links)
+	if (drv->first_bss == bss && bss->valid_links)
 		drv->ctx = bss->ctx;
 
 	if (!bss->valid_links) {
@@ -11402,6 +11440,20 @@ static int nl80211_switch_color(void *priv, struct cca_settings *settings)
 		ret = -ENOBUFS;
 		goto error;
 	}
+
+#ifdef CONFIG_IEEE80211BE
+	if (nl80211_link_valid(bss->valid_links, settings->link_id)) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Color change request on link_id=%d",
+			   settings->link_id);
+
+		if (nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID,
+			       settings->link_id)) {
+			nlmsg_free(msg);
+			return -1;
+		}
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 	ret = send_and_recv_cmd(drv, msg);
 	if (ret) {

@@ -112,6 +112,7 @@ struct wpa_sm {
 	unsigned int secure_ltf:1;
 	unsigned int secure_rtt:1;
 	unsigned int prot_range_neg:1;
+	unsigned int ssid_protection:1;
 
 	u8 *assoc_wpa_ie; /* Own WPA/RSN IE from (Re)AssocReq */
 	size_t assoc_wpa_ie_len;
@@ -119,6 +120,9 @@ struct wpa_sm {
 	size_t assoc_rsnxe_len;
 	u8 *ap_wpa_ie, *ap_rsn_ie, *ap_rsnxe;
 	size_t ap_wpa_ie_len, ap_rsn_ie_len, ap_rsnxe_len;
+	u8 *ap_rsne_override, *ap_rsne_override_2, *ap_rsnxe_override;
+	size_t ap_rsne_override_len, ap_rsne_override_2_len,
+		ap_rsnxe_override_len;
 
 #ifdef CONFIG_TDLS
 	struct wpa_tdls_peer *tdls;
@@ -228,6 +232,8 @@ struct wpa_sm {
 	bool wmm_enabled;
 	bool driver_bss_selection;
 	bool ft_prepend_pmkid;
+
+	enum wpa_rsn_override rsn_override;
 };
 
 
@@ -515,6 +521,12 @@ wpa_sm_notify_pmksa_cache_entry(struct wpa_sm *sm,
 {
 	if (sm->ctx->notify_pmksa_cache_entry)
 		sm->ctx->notify_pmksa_cache_entry(sm->ctx->ctx, entry);
+}
+
+static inline void wpa_sm_ssid_verified(struct wpa_sm *sm)
+{
+	if (sm->ctx->ssid_verified)
+		sm->ctx->ssid_verified(sm->ctx->ctx);
 }
 
 int wpa_eapol_key_send(struct wpa_sm *sm, struct wpa_ptk *ptk,

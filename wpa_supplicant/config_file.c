@@ -893,6 +893,8 @@ static void wpa_config_write_network(FILE *f, struct wpa_ssid *ssid)
 #endif /* CONFIG_HE_OVERRIDES */
 	INT(disable_eht);
 	INT(enable_4addr_mode);
+	INT(max_idle);
+	INT(ssid_protection);
 
 #undef STR
 #undef INT
@@ -1613,6 +1615,8 @@ static void wpa_config_write_global(FILE *f, struct wpa_config *config)
 	if (config->wowlan_disconnect_on_deinit)
 		fprintf(f, "wowlan_disconnect_on_deinit=%d\n",
 			config->wowlan_disconnect_on_deinit);
+	if (config->rsn_overriding)
+		fprintf(f, "rsn_overriding=%d\n", config->rsn_overriding);
 #ifdef CONFIG_TESTING_OPTIONS
 	if (config->mld_force_single_link)
 		fprintf(f, "mld_force_single_link=1\n");

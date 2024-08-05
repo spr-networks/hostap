@@ -19,26 +19,28 @@ from wlantest import Wlantest
 from datetime import datetime
 
 def clear_regdom_state(dev, hapd, hapd2):
-        for i in range(0, 3):
-            ev = dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
-            if ev is None or "init=COUNTRY_IE" in ev:
-                break
-        if hapd:
-            hapd.request("DISABLE")
-        if hapd2:
-            hapd2.request("DISABLE")
-        subprocess.call(['iw', 'reg', 'set', '00'])
-        dev[0].disconnect_and_stop_scan()
-        subprocess.call(['iw', 'reg', 'set', '00'])
-        dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
-        dev[0].flush_scan_cache()
+    for i in range(0, 3):
+        ev = dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
+        if ev is None or "init=COUNTRY_IE" in ev:
+            break
+    if hapd:
+        hapd.request("DISABLE")
+    if hapd2:
+        hapd2.request("DISABLE")
+    subprocess.call(['iw', 'reg', 'set', '00'])
+    dev[0].disconnect_and_stop_scan()
+    subprocess.call(['iw', 'reg', 'set', '00'])
+    dev[0].wait_event(["CTRL-EVENT-REGDOM-CHANGE"], timeout=0.5)
+    dev[0].flush_scan_cache()
 
 def start_wnm_ap(apdev, bss_transition=True, time_adv=False, ssid=None,
                  wnm_sleep_mode=False, wnm_sleep_mode_no_keys=False, rsn=False,
                  ocv=False, ap_max_inactivity=0, coloc_intf_reporting=False,
                  hw_mode=None, channel=None, country_code=None, country3=None,
                  pmf=True, passphrase=None, ht=True, vht=False, mbo=False,
-                 beacon_prot=False, he=False):
+                 beacon_prot=False, he=False, bss_max_idle=None,
+                 wpa_group_rekey=None, no_disconnect_on_group_keyerror=False,
+                 max_acceptable_idle_period=None):
     if rsn:
         if not ssid:
             ssid = "test-wnm-rsn"
@@ -87,6 +89,14 @@ def start_wnm_ap(apdev, bss_transition=True, time_adv=False, ssid=None,
         params["he_bss_color"] = "42"
     if mbo:
         params["mbo"] = "1"
+    if bss_max_idle is not None:
+        params["bss_max_idle"] = str(bss_max_idle)
+    if wpa_group_rekey:
+        params["wpa_group_rekey"] = str(wpa_group_rekey)
+    if no_disconnect_on_group_keyerror:
+        params["no_disconnect_on_group_keyerror"] = "1"
+    if max_acceptable_idle_period is not None:
+        params["max_acceptable_idle_period"] = str(max_acceptable_idle_period)
     try:
         hapd = hostapd.add_ap(apdev, params)
     except Exception as e:
@@ -613,7 +623,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # truncated BSS TM Request
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x08)
+                     req_mode=0x0a)
     req['payload'] = struct.pack("<BBBBH",
                                  ACTION_CATEG_WNM, WNM_ACT_BSS_TM_REQ,
                                  1, 0, 0)
@@ -623,21 +633,21 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # no disassociation and no candidate list
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     dialog_token=2)
+                     dialog_token=2, req_mode=0x02)
     hapd.mgmt_tx(req)
     resp = rx_bss_tm_resp(hapd, expect_dialog=2, expect_status=1)
     dev[0].dump_monitor()
 
     # truncated BSS Termination Duration
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x08)
+                     req_mode=0x0a)
     hapd.mgmt_tx(req)
     expect_ack(hapd)
     dev[0].dump_monitor()
 
     # BSS Termination Duration with TSF=0 and Duration=10
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x08, dialog_token=3)
+                     req_mode=0x0a, dialog_token=3)
     req['payload'] += struct.pack("<BBQH", 4, 10, 0, 10)
     hapd.mgmt_tx(req)
     resp = rx_bss_tm_resp(hapd, expect_dialog=3, expect_status=1)
@@ -645,11 +655,11 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # truncated Session Information URL
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x10)
+                     req_mode=0x12)
     hapd.mgmt_tx(req)
     expect_ack(hapd)
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x10)
+                     req_mode=0x12)
     req['payload'] += struct.pack("<BBB", 3, 65, 66)
     hapd.mgmt_tx(req)
     expect_ack(hapd)
@@ -657,7 +667,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Session Information URL
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x10, dialog_token=4)
+                     req_mode=0x12, dialog_token=4)
     req['payload'] += struct.pack("<BBB", 2, 65, 66)
     hapd.mgmt_tx(req)
     resp = rx_bss_tm_resp(hapd, expect_dialog=4, expect_status=0)
@@ -665,14 +675,14 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Preferred Candidate List without any entries
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=5)
+                     req_mode=0x03, dialog_token=5)
     hapd.mgmt_tx(req)
     resp = rx_bss_tm_resp(hapd, expect_dialog=5, expect_status=7)
     dev[0].dump_monitor()
 
     # Preferred Candidate List with a truncated entry
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01)
+                     req_mode=0x03)
     req['payload'] += struct.pack("<BB", 52, 1)
     hapd.mgmt_tx(req)
     expect_ack(hapd)
@@ -680,7 +690,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Preferred Candidate List with a too short entry
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=6)
+                     req_mode=0x03, dialog_token=6)
     req['payload'] += struct.pack("<BB", 52, 0)
     hapd.mgmt_tx(req)
     resp = rx_bss_tm_resp(hapd, expect_dialog=6, expect_status=7)
@@ -688,7 +698,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Preferred Candidate List with a non-matching entry
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=6)
+                     req_mode=0x03, dialog_token=6)
     req['payload'] += struct.pack("<BB6BLBBB", 52, 13,
                                   1, 2, 3, 4, 5, 6,
                                   0, 81, 1, 7)
@@ -698,7 +708,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Preferred Candidate List with a truncated subelement
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=7)
+                     req_mode=0x03, dialog_token=7)
     req['payload'] += struct.pack("<BB6BLBBBBB", 52, 13 + 2,
                                   1, 2, 3, 4, 5, 6,
                                   0, 81, 1, 7,
@@ -709,7 +719,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Preferred Candidate List with lots of invalid optional subelements
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=8)
+                     req_mode=0x03, dialog_token=8)
     subelems = struct.pack("<BBHB", 1, 3, 0, 100)
     subelems += struct.pack("<BBB", 2, 1, 65)
     subelems += struct.pack("<BB", 3, 0)
@@ -727,7 +737,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Preferred Candidate List with lots of valid optional subelements (twice)
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=8)
+                     req_mode=0x03, dialog_token=8)
     # TSF Information
     subelems = struct.pack("<BBHH", 1, 4, 0, 100)
     # Condensed Country String
@@ -754,7 +764,7 @@ def test_wnm_bss_tm_req(dev, apdev):
     # Preferred Candidate List with truncated BSS Termination Duration
     # WNM: Too short BSS termination duration
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=8)
+                     req_mode=0x03, dialog_token=8)
     # BSS Termination Duration (truncated)
     subelems = struct.pack("<BBQB", 4, 9, 0, 10)
     req['payload'] += struct.pack("<BB6BLBBB", 52, 13 + len(subelems),
@@ -766,7 +776,7 @@ def test_wnm_bss_tm_req(dev, apdev):
 
     # Preferred Candidate List followed by vendor element
     req = bss_tm_req(addr, apdev[0]['bssid'],
-                     req_mode=0x01, dialog_token=8)
+                     req_mode=0x03, dialog_token=8)
     subelems = b''
     req['payload'] += struct.pack("<BB6BLBBB", 52, 13 + len(subelems),
                                   1, 2, 3, 4, 5, 6,
@@ -780,9 +790,18 @@ def test_wnm_bss_tm_req(dev, apdev):
 @disable_ipv6
 def test_wnm_bss_keep_alive(dev, apdev):
     """WNM keep-alive"""
-    hapd = start_wnm_ap(apdev[0], bss_transition=False, ap_max_inactivity=1)
+    run_wnm_bss_keep_alive(dev, apdev, False)
+
+def test_wnm_bss_protected_keep_alive(dev, apdev):
+    """WNM protected keep-alive"""
+    run_wnm_bss_keep_alive(dev, apdev, True)
+
+def run_wnm_bss_keep_alive(dev, apdev, protected):
+    hapd = start_wnm_ap(apdev[0], bss_transition=False, ap_max_inactivity=1,
+                        bss_max_idle=2 if protected else 1, rsn=True)
     addr = dev[0].p2p_interface_addr()
-    dev[0].connect("test-wnm", key_mgmt="NONE", scan_freq="2412")
+    dev[0].connect("test-wnm-rsn", psk="12345678", ieee80211w="2",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
     start = hapd.get_sta(addr)
     ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED"], timeout=2)
     if ev is not None:
@@ -807,6 +826,79 @@ def test_wnm_bss_keep_alive(dev, apdev):
     if int(sta['tx_packets']) <= int(end['tx_packets']):
         raise Exception("No client poll packet seen")
 
+def test_wnm_bss_max_idle_period_management(dev, apdev):
+    """WNM BSS max idle period management"""
+    hapd = start_wnm_ap(apdev[0], bss_transition=False, ap_max_inactivity=10,
+                        max_acceptable_idle_period=1000, rsn=True)
+    addr = dev[0].own_addr()
+    dev[0].connect("test-wnm-rsn", psk="12345678", ieee80211w="2",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412",
+                   max_idle="1500")
+    addr1 = dev[1].own_addr()
+    dev[1].connect("test-wnm-rsn", psk="12345678", ieee80211w="2",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
+
+    ap_val = hapd.get_sta(addr)['max_idle_period']
+    if ap_val != '1000':
+        raise Exception("AP reported unexpected value: " + ap_val)
+
+    sta_val = dev[0].get_status_field("bss_max_idle_period")
+    if sta_val != '1000':
+        raise Exception("STA reported unexpected value: " + sta_val)
+
+    sta = hapd.get_sta(addr1)
+    if 'max_idle_period' in sta:
+        raise Exception("AP reported unexpected value(2): " + sta['max_idle_period'])
+
+    sta_val = dev[1].get_status_field("bss_max_idle_period")
+    if sta_val != '9':
+        raise Exception("STA reported unexpected value(2): " + sta_val)
+
+def test_wnm_bss_group_rekey(dev, apdev):
+    """WNM BSS max idle period and group rekey"""
+    hapd = start_wnm_ap(apdev[0], bss_transition=False, ap_max_inactivity=100,
+                        wpa_group_rekey=2, rsn=True)
+    addr = dev[0].own_addr()
+    dev[0].connect("test-wnm-rsn", psk="12345678", ieee80211w="2",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
+    start = hapd.get_sta(addr)
+    ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED",
+                            "RSN: Group rekeying completed"], timeout=3)
+    if ev is None:
+        raise Exception("No group rekeying")
+    if "CTRL-EVENT-DISCONNECTED" in ev:
+        raise Exception("Unexpected disconnection")
+
+    hapd.set("ext_eapol_frame_io", "1")
+    ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED",
+                            "RSN: Group rekeying completed"], timeout=20)
+    if ev is None or "CTRL-EVENT-DISCONNECTED" not in ev:
+        raise Exception("No disconnection reported on missing group rekeying")
+    dev[0].request("DISCONNECT")
+
+def test_wnm_bss_group_rekey_skip(dev, apdev):
+    """WNM BSS max idle period and group rekey skip allowed"""
+    hapd = start_wnm_ap(apdev[0], bss_transition=False, ap_max_inactivity=100,
+                        wpa_group_rekey=2, rsn=True,
+                        no_disconnect_on_group_keyerror=True)
+    addr = dev[0].own_addr()
+    dev[0].connect("test-wnm-rsn", psk="12345678", ieee80211w="2",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
+    start = hapd.get_sta(addr)
+    ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED",
+                            "RSN: Group rekeying completed"], timeout=3)
+    if ev is None:
+        raise Exception("No group rekeying")
+    if "CTRL-EVENT-DISCONNECTED" in ev:
+        raise Exception("Unexpected disconnection")
+
+    hapd.set("ext_eapol_frame_io", "1")
+    ev = dev[0].wait_event(["CTRL-EVENT-DISCONNECTED",
+                            "RSN: Group rekeying completed"], timeout=20)
+    if ev:
+        raise Exception("Unexpected event reported: " + ev)
+    dev[0].request("DISCONNECT")
+
 def test_wnm_bss_tm(dev, apdev):
     """WNM BSS Transition Management"""
     try:
@@ -824,7 +916,7 @@ def test_wnm_bss_tm(dev, apdev):
         dev[0].dump_monitor()
 
         logger.info("No neighbor list entries")
-        if "OK" not in hapd.request("BSS_TM_REQ " + addr):
+        if "OK" not in hapd.request("BSS_TM_REQ " + addr + " abridged=1"):
             raise Exception("BSS_TM_REQ command failed")
         ev = hapd.wait_event(['BSS-TM-RESP'], timeout=10)
         if ev is None:
@@ -836,7 +928,7 @@ def test_wnm_bss_tm(dev, apdev):
         dev[0].dump_monitor()
 
         logger.info("Neighbor list entry, but not claimed as Preferred Candidate List")
-        if "OK" not in hapd.request("BSS_TM_REQ " + addr + " dialog_token=123 neighbor=11:22:33:44:55:66,0x0000,81,3,7"):
+        if "OK" not in hapd.request("BSS_TM_REQ " + addr + " abridged=1 dialog_token=123 neighbor=11:22:33:44:55:66,0x0000,81,3,7"):
             raise Exception("BSS_TM_REQ command failed")
         ev = hapd.wait_event(['BSS-TM-RESP'], timeout=10)
         if ev is None:
@@ -846,7 +938,7 @@ def test_wnm_bss_tm(dev, apdev):
         dev[0].dump_monitor()
 
         logger.info("Preferred Candidate List (no matching neighbor) without Disassociation Imminent")
-        if "OK" not in hapd.request("BSS_TM_REQ " + addr + " pref=1 neighbor=11:22:33:44:55:66,0x0000,81,3,7,0301ff neighbor=22:33:44:55:66:77,0x0000,1,44,7 neighbor=00:11:22:33:44:55,0x0000,81,4,7,03010a"):
+        if "OK" not in hapd.request("BSS_TM_REQ " + addr + " abridged=1 pref=1 neighbor=11:22:33:44:55:66,0x0000,81,3,7,0301ff neighbor=22:33:44:55:66:77,0x0000,1,44,7 neighbor=00:11:22:33:44:55,0x0000,81,4,7,03010a"):
             raise Exception("BSS_TM_REQ command failed")
         ev = hapd.wait_event(['BSS-TM-RESP'], timeout=10)
         if ev is None:
@@ -909,6 +1001,29 @@ def test_wnm_bss_tm(dev, apdev):
         ev = dev[0].wait_event(["CTRL-EVENT-CONNECTED"], timeout=0.5)
         if ev is not None:
             raise Exception("Unexpected reassociation")
+
+        dev[0].flush_scan_cache()
+        logger.info("Candidate list is used even if not required by spec (pref=0, abridged=0)")
+        if "OK" not in hapd2.request("BSS_TM_REQ " + addr + " pref=0 abridged=0 valid_int=255 neighbor=" + apdev[0]['bssid'] + ",0x0000,81,1,7,0301ff" + ' neighbor=' + apdev[1]['bssid'] + ",0x0000,115,36,7,030100"):
+            raise Exception("BSS_TM_REQ command failed")
+        ev = hapd2.wait_event(['BSS-TM-RESP'], timeout=10)
+        if ev is None:
+            raise Exception("No BSS Transition Management Response")
+        if "status_code=0" not in ev:
+            raise Exception("BSS transition request was not accepted: " + ev)
+        if "target_bssid=" + apdev[0]['bssid'] not in ev:
+            raise Exception("Unexpected target BSS: " + ev)
+        # This scans only one frequency
+        scan_ev = dev[0].wait_event(["CTRL-EVENT-SCAN-STARTED"], timeout=0)
+        if scan_ev is None:
+            raise Exception("Expected scan started")
+        dev[0].wait_connected(timeout=15, error="No reassociation seen")
+        if apdev[0]['bssid'] not in ev:
+            raise Exception("Unexpected reassociation target: " + ev)
+        ev = dev[0].wait_event(["CTRL-EVENT-SCAN-STARTED"], timeout=0.1)
+        if ev is not None:
+            raise Exception("Unexpected scan started")
+
     finally:
         clear_regdom_state(dev, hapd, hapd2)
 
@@ -1187,15 +1302,15 @@ def test_wnm_bss_tm_country_us(dev, apdev):
         hapd, id = start_wnm_tm(apdev[0], "US", dev[0])
 
         logger.info("Preferred Candidate List (no matching neighbor, known channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,12,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,2,52,7,03010a neighbor=00:11:22:33:44:57,0x0000,4,100,7 neighbor=00:11:22:33:44:59,0x0000,3,149,7 neighbor=00:11:22:33:44:5b,0x0000,34,1,7 neighbor=00:11:22:33:44:5d,0x0000,5,149,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,12,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,2,52,7,03010a neighbor=00:11:22:33:44:57,0x0000,4,100,7 neighbor=00:11:22:33:44:59,0x0000,3,149,7 neighbor=00:11:22:33:44:5b,0x0000,34,1,7 neighbor=00:11:22:33:44:5d,0x0000,5,149,7")
 
         # Make the test take less time by limiting full scans
         dev[0].set_network(id, "scan_freq", "2412")
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,12,0,7,0301ff neighbor=22:33:44:55:66:77,0x0000,12,12,7 neighbor=00:11:22:33:44:55,0x0000,2,35,7,03010a neighbor=00:11:22:33:44:56,0x0000,2,65,7 neighbor=00:11:22:33:44:57,0x0000,4,99,7 neighbor=00:11:22:33:44:58,0x0000,4,145,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,12,0,7,0301ff neighbor=22:33:44:55:66:77,0x0000,12,12,7 neighbor=00:11:22:33:44:55,0x0000,2,35,7,03010a neighbor=00:11:22:33:44:56,0x0000,2,65,7 neighbor=00:11:22:33:44:57,0x0000,4,99,7 neighbor=00:11:22:33:44:58,0x0000,4,145,7")
 
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels 2)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=00:11:22:33:44:59,0x0000,3,148,7 neighbor=00:11:22:33:44:5a,0x0000,3,162,7 neighbor=00:11:22:33:44:5b,0x0000,34,0,7 neighbor=00:11:22:33:44:5c,0x0000,34,4,7 neighbor=00:11:22:33:44:5d,0x0000,5,148,7 neighbor=00:11:22:33:44:5e,0x0000,5,166,7 neighbor=00:11:22:33:44:5f,0x0000,0,0,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=00:11:22:33:44:59,0x0000,3,148,7 neighbor=00:11:22:33:44:5a,0x0000,3,162,7 neighbor=00:11:22:33:44:5b,0x0000,34,0,7 neighbor=00:11:22:33:44:5c,0x0000,34,4,7 neighbor=00:11:22:33:44:5d,0x0000,5,148,7 neighbor=00:11:22:33:44:5e,0x0000,5,166,7 neighbor=00:11:22:33:44:5f,0x0000,0,0,7")
     finally:
         stop_wnm_tm(hapd, dev)
 
@@ -1207,15 +1322,15 @@ def test_wnm_bss_tm_country_fi(dev, apdev):
         hapd, id = start_wnm_tm(apdev[0], "FI", dev[0])
 
         logger.info("Preferred Candidate List (no matching neighbor, known channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,4,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,1,36,7,03010a neighbor=00:11:22:33:44:57,0x0000,3,100,7 neighbor=00:11:22:33:44:59,0x0000,17,149,7 neighbor=00:11:22:33:44:5c,0x0000,18,1,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,4,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,1,36,7,03010a neighbor=00:11:22:33:44:57,0x0000,3,100,7 neighbor=00:11:22:33:44:59,0x0000,17,149,7 neighbor=00:11:22:33:44:5c,0x0000,18,1,7")
 
         # Make the test take less time by limiting full scans
         dev[0].set_network(id, "scan_freq", "2412")
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=00:11:22:33:44:00,0x0000,4,0,7 neighbor=00:11:22:33:44:01,0x0000,4,14,7 neighbor=00:11:22:33:44:02,0x0000,1,35,7 neighbor=00:11:22:33:44:03,0x0000,1,65,7 neighbor=00:11:22:33:44:04,0x0000,3,99,7 neighbor=00:11:22:33:44:05,0x0000,3,141,7 neighbor=00:11:22:33:44:06,0x0000,17,148,7 neighbor=00:11:22:33:44:07,0x0000,17,170,7 neighbor=00:11:22:33:44:08,0x0000,18,0,7 neighbor=00:11:22:33:44:09,0x0000,18,5,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=00:11:22:33:44:00,0x0000,4,0,7 neighbor=00:11:22:33:44:01,0x0000,4,14,7 neighbor=00:11:22:33:44:02,0x0000,1,35,7 neighbor=00:11:22:33:44:03,0x0000,1,65,7 neighbor=00:11:22:33:44:04,0x0000,3,99,7 neighbor=00:11:22:33:44:05,0x0000,3,141,7 neighbor=00:11:22:33:44:06,0x0000,17,148,7 neighbor=00:11:22:33:44:07,0x0000,17,170,7 neighbor=00:11:22:33:44:08,0x0000,18,0,7 neighbor=00:11:22:33:44:09,0x0000,18,5,7")
 
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels 2)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=00:11:22:33:44:00,0x0000,0,0,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=00:11:22:33:44:00,0x0000,0,0,7")
     finally:
         stop_wnm_tm(hapd, dev)
 
@@ -1227,12 +1342,12 @@ def test_wnm_bss_tm_country_jp(dev, apdev):
         hapd, id = start_wnm_tm(apdev[0], "JP", dev[0])
 
         logger.info("Preferred Candidate List (no matching neighbor, known channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,30,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,31,14,7,03010a neighbor=00:11:22:33:44:57,0x0000,1,36,7 neighbor=00:11:22:33:44:59,0x0000,34,100,7 neighbor=00:11:22:33:44:5c,0x0000,59,1,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,30,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,31,14,7,03010a neighbor=00:11:22:33:44:57,0x0000,1,36,7 neighbor=00:11:22:33:44:59,0x0000,34,100,7 neighbor=00:11:22:33:44:5c,0x0000,59,1,7")
 
         # Make the test take less time by limiting full scans
         dev[0].set_network(id, "scan_freq", "2412")
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,30,0,7,0301ff neighbor=22:33:44:55:66:77,0x0000,30,14,7 neighbor=00:11:22:33:44:56,0x0000,31,13,7 neighbor=00:11:22:33:44:57,0x0000,1,33,7 neighbor=00:11:22:33:44:58,0x0000,1,65,7 neighbor=00:11:22:33:44:5a,0x0000,34,99,7 neighbor=00:11:22:33:44:5b,0x0000,34,141,7 neighbor=00:11:22:33:44:5d,0x0000,59,0,7 neighbor=00:11:22:33:44:5e,0x0000,59,4,7 neighbor=00:11:22:33:44:5f,0x0000,0,0,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,30,0,7,0301ff neighbor=22:33:44:55:66:77,0x0000,30,14,7 neighbor=00:11:22:33:44:56,0x0000,31,13,7 neighbor=00:11:22:33:44:57,0x0000,1,33,7 neighbor=00:11:22:33:44:58,0x0000,1,65,7 neighbor=00:11:22:33:44:5a,0x0000,34,99,7 neighbor=00:11:22:33:44:5b,0x0000,34,141,7 neighbor=00:11:22:33:44:5d,0x0000,59,0,7 neighbor=00:11:22:33:44:5e,0x0000,59,4,7 neighbor=00:11:22:33:44:5f,0x0000,0,0,7")
     finally:
         stop_wnm_tm(hapd, dev)
 
@@ -1244,12 +1359,12 @@ def test_wnm_bss_tm_country_cn(dev, apdev):
         hapd, id = start_wnm_tm(apdev[0], "CN", dev[0])
 
         logger.info("Preferred Candidate List (no matching neighbor, known channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,7,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,1,36,7,03010a neighbor=00:11:22:33:44:57,0x0000,3,149,7 neighbor=00:11:22:33:44:59,0x0000,6,149,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,7,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,1,36,7,03010a neighbor=00:11:22:33:44:57,0x0000,3,149,7 neighbor=00:11:22:33:44:59,0x0000,6,149,7")
 
         # Make the test take less time by limiting full scans
         dev[0].set_network(id, "scan_freq", "2412")
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,7,0,7,0301ff neighbor=22:33:44:55:66:77,0x0000,7,14,7 neighbor=00:11:22:33:44:56,0x0000,1,35,7 neighbor=00:11:22:33:44:57,0x0000,1,65,7 neighbor=00:11:22:33:44:58,0x0000,3,148,7 neighbor=00:11:22:33:44:5a,0x0000,3,166,7 neighbor=00:11:22:33:44:5f,0x0000,0,0,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,7,0,7,0301ff neighbor=22:33:44:55:66:77,0x0000,7,14,7 neighbor=00:11:22:33:44:56,0x0000,1,35,7 neighbor=00:11:22:33:44:57,0x0000,1,65,7 neighbor=00:11:22:33:44:58,0x0000,3,148,7 neighbor=00:11:22:33:44:5a,0x0000,3,166,7 neighbor=00:11:22:33:44:5f,0x0000,0,0,7")
     finally:
         stop_wnm_tm(hapd, dev)
 
@@ -1268,15 +1383,15 @@ def run_wnm_bss_tm_global(dev, apdev, country, country3):
         hapd, id = start_wnm_tm(apdev[0], country, dev[0], country3=country3)
 
         logger.info("Preferred Candidate List (no matching neighbor, known channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=11:22:33:44:55:66,0x0000,81,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,82,14,7,03010a neighbor=00:11:22:33:44:57,0x0000,83,1,7 neighbor=00:11:22:33:44:59,0x0000,115,36,7 neighbor=00:11:22:33:44:5a,0x0000,121,100,7 neighbor=00:11:22:33:44:5c,0x0000,124,149,7 neighbor=00:11:22:33:44:5d,0x0000,125,149,7 neighbor=00:11:22:33:44:5e,0x0000,128,42,7 neighbor=00:11:22:33:44:5f,0x0000,129,50,7 neighbor=00:11:22:33:44:60,0x0000,180,1,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=11:22:33:44:55:66,0x0000,81,3,7,0301ff neighbor=00:11:22:33:44:55,0x0000,82,14,7,03010a neighbor=00:11:22:33:44:57,0x0000,83,1,7 neighbor=00:11:22:33:44:59,0x0000,115,36,7 neighbor=00:11:22:33:44:5a,0x0000,121,100,7 neighbor=00:11:22:33:44:5c,0x0000,124,149,7 neighbor=00:11:22:33:44:5d,0x0000,125,149,7 neighbor=00:11:22:33:44:5e,0x0000,128,42,7 neighbor=00:11:22:33:44:5f,0x0000,129,50,7 neighbor=00:11:22:33:44:60,0x0000,180,1,7")
 
         # Make the test take less time by limiting full scans
         dev[0].set_network(id, "scan_freq", "2412")
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=00:11:22:33:44:00,0x0000,81,0,7 neighbor=00:11:22:33:44:01,0x0000,81,14,7 neighbor=00:11:22:33:44:02,0x0000,82,13,7 neighbor=00:11:22:33:44:03,0x0000,83,0,7 neighbor=00:11:22:33:44:04,0x0000,83,14,7 neighbor=00:11:22:33:44:05,0x0000,115,35,7 neighbor=00:11:22:33:44:06,0x0000,115,65,7 neighbor=00:11:22:33:44:07,0x0000,121,99,7 neighbor=00:11:22:33:44:08,0x0000,121,141,7 neighbor=00:11:22:33:44:09,0x0000,124,148,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=00:11:22:33:44:00,0x0000,81,0,7 neighbor=00:11:22:33:44:01,0x0000,81,14,7 neighbor=00:11:22:33:44:02,0x0000,82,13,7 neighbor=00:11:22:33:44:03,0x0000,83,0,7 neighbor=00:11:22:33:44:04,0x0000,83,14,7 neighbor=00:11:22:33:44:05,0x0000,115,35,7 neighbor=00:11:22:33:44:06,0x0000,115,65,7 neighbor=00:11:22:33:44:07,0x0000,121,99,7 neighbor=00:11:22:33:44:08,0x0000,121,141,7 neighbor=00:11:22:33:44:09,0x0000,124,148,7")
 
         logger.info("Preferred Candidate List (no matching neighbor, unknown channels 2)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=00:11:22:33:44:00,0x0000,124,162,7 neighbor=00:11:22:33:44:01,0x0000,125,148,7 neighbor=00:11:22:33:44:02,0x0000,125,170,7 neighbor=00:11:22:33:44:03,0x0000,128,35,7 neighbor=00:11:22:33:44:04,0x0000,128,162,7 neighbor=00:11:22:33:44:05,0x0000,129,49,7 neighbor=00:11:22:33:44:06,0x0000,129,115,7 neighbor=00:11:22:33:44:07,0x0000,180,0,7 neighbor=00:11:22:33:44:08,0x0000,180,5,7 neighbor=00:11:22:33:44:09,0x0000,0,0,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=00:11:22:33:44:00,0x0000,124,162,7 neighbor=00:11:22:33:44:01,0x0000,125,148,7 neighbor=00:11:22:33:44:02,0x0000,125,170,7 neighbor=00:11:22:33:44:03,0x0000,128,35,7 neighbor=00:11:22:33:44:04,0x0000,128,162,7 neighbor=00:11:22:33:44:05,0x0000,129,49,7 neighbor=00:11:22:33:44:06,0x0000,129,115,7 neighbor=00:11:22:33:44:07,0x0000,180,0,7 neighbor=00:11:22:33:44:08,0x0000,180,5,7 neighbor=00:11:22:33:44:09,0x0000,0,0,7")
     finally:
         stop_wnm_tm(hapd, dev)
 
@@ -1287,7 +1402,7 @@ def test_wnm_bss_tm_op_class_0(dev, apdev):
         hapd, id = start_wnm_tm(apdev[0], "US", dev[0])
 
         logger.info("Preferred Candidate List (no matching neighbor, invalid op class specified for channels)")
-        wnm_bss_tm_check(hapd, dev[0], "pref=1 neighbor=00:11:22:33:44:59,0x0000,0,149,7 neighbor=00:11:22:33:44:5b,0x0000,0,1,7")
+        wnm_bss_tm_check(hapd, dev[0], "pref=1 abridged=1 neighbor=00:11:22:33:44:59,0x0000,0,149,7 neighbor=00:11:22:33:44:5b,0x0000,0,1,7")
     finally:
         stop_wnm_tm(hapd, dev)
 

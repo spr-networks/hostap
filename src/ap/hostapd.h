@@ -682,6 +682,7 @@ struct hostapd_iface {
 
 #ifdef CONFIG_ACS
 	unsigned int acs_num_completed_scans;
+	unsigned int acs_num_retries;
 #endif /* CONFIG_ACS */
 
 	void (*scan_cb)(struct hostapd_iface *iface);
@@ -822,6 +823,10 @@ u8 hostapd_get_mld_id(struct hostapd_data *hapd);
 int hostapd_mld_add_link(struct hostapd_data *hapd);
 int hostapd_mld_remove_link(struct hostapd_data *hapd);
 struct hostapd_data * hostapd_mld_get_first_bss(struct hostapd_data *hapd);
+
+void free_beacon_data(struct beacon_data *beacon);
+int hostapd_fill_cca_settings(struct hostapd_data *hapd,
+			      struct cca_settings *settings);
 
 #ifdef CONFIG_IEEE80211BE
 

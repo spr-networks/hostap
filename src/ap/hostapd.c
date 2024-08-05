@@ -440,6 +440,8 @@ int hostapd_link_remove(struct hostapd_data *hapd, u32 count)
 
 	hapd->eht_mld_link_removal_count = count;
 	hapd->eht_mld_bss_param_change++;
+	if (hapd->eht_mld_bss_param_change == 255)
+		hapd->eht_mld_bss_param_change = 0;
 
 	eloop_register_timeout(0, TU_TO_USEC(hapd->iconf->beacon_int),
 			       hostapd_link_remove_timeout_handler,
@@ -1307,6 +1309,59 @@ static int hostapd_start_beacon(struct hostapd_data *hapd,
 }
 
 
+#ifndef CONFIG_NO_RADIUS
+static int hostapd_bss_radius_init(struct hostapd_data *hapd)
+{
+	struct hostapd_bss_config *conf;
+
+	if (!hapd)
+		return -1;
+
+	conf = hapd->conf;
+
+	if (hapd->radius) {
+		wpa_printf(MSG_DEBUG,
+			   "Skipping RADIUS client init (already done)");
+		return 0;
+	}
+
+	hapd->radius = radius_client_init(hapd, conf->radius);
+	if (!hapd->radius) {
+		wpa_printf(MSG_ERROR,
+			   "RADIUS client initialization failed.");
+		return -1;
+	}
+
+	if (conf->radius_das_port) {
+		struct radius_das_conf das_conf;
+
+		os_memset(&das_conf, 0, sizeof(das_conf));
+		das_conf.port = conf->radius_das_port;
+		das_conf.shared_secret = conf->radius_das_shared_secret;
+		das_conf.shared_secret_len =
+			conf->radius_das_shared_secret_len;
+		das_conf.client_addr = &conf->radius_das_client_addr;
+		das_conf.time_window = conf->radius_das_time_window;
+		das_conf.require_event_timestamp =
+			conf->radius_das_require_event_timestamp;
+		das_conf.require_message_authenticator =
+			conf->radius_das_require_message_authenticator;
+		das_conf.ctx = hapd;
+		das_conf.disconnect = hostapd_das_disconnect;
+		das_conf.coa = hostapd_das_coa;
+		hapd->radius_das = radius_das_init(&das_conf);
+		if (!hapd->radius_das) {
+			wpa_printf(MSG_ERROR,
+				   "RADIUS DAS initialization failed.");
+			return -1;
+		}
+	}
+
+	return 0;
+}
+#endif /* CONFIG_NO_RADIUS */
+
+
 /**
  * hostapd_setup_bss - Per-BSS setup (initialization)
  * @hapd: Pointer to BSS data
@@ -1387,7 +1442,6 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
 			if (h_hapd) {
 				hapd->drv_priv = h_hapd->drv_priv;
 				hapd->interface_added = h_hapd->interface_added;
-				hostapd_mld_add_link(hapd);
 				wpa_printf(MSG_DEBUG,
 					   "Setup of non first link (%d) BSS of MLD %s",
 					   hapd->mld_link_id, hapd->conf->iface);
@@ -1418,7 +1472,6 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
 				   hapd->mld_link_id, hapd->conf->iface);
 			os_memcpy(hapd->mld->mld_addr, hapd->own_addr,
 				  ETH_ALEN);
-			hostapd_mld_add_link(hapd);
 		}
 #endif /* CONFIG_IEEE80211BE */
 	}
@@ -1433,8 +1486,13 @@ setup_mld:
 			   MAC2STR(hapd->own_addr));
 
 		if (hostapd_drv_link_add(hapd, hapd->mld_link_id,
-					 hapd->own_addr))
+					 hapd->own_addr)) {
+			wpa_printf(MSG_ERROR,
+				   "MLD: Failed to add link %d in MLD %s",
+				   hapd->mld_link_id, hapd->conf->iface);
 			return -1;
+		}
+		hostapd_mld_add_link(hapd);
 	}
 #endif /* CONFIG_IEEE80211BE */
 
@@ -1540,46 +1598,26 @@ setup_mld:
 #endif /* CONFIG_SQLITE */
 
 	if (hostapd_mld_is_first_bss(hapd)) {
-		hapd->radius = radius_client_init(hapd, conf->radius);
-		if (!hapd->radius) {
-			wpa_printf(MSG_ERROR,
-				   "RADIUS client initialization failed.");
+		if (hostapd_bss_radius_init(hapd))
 			return -1;
-		}
-
-		if (conf->radius_das_port) {
-			struct radius_das_conf das_conf;
-
-			os_memset(&das_conf, 0, sizeof(das_conf));
-			das_conf.port = conf->radius_das_port;
-			das_conf.shared_secret = conf->radius_das_shared_secret;
-			das_conf.shared_secret_len =
-				conf->radius_das_shared_secret_len;
-			das_conf.client_addr = &conf->radius_das_client_addr;
-			das_conf.time_window = conf->radius_das_time_window;
-			das_conf.require_event_timestamp =
-				conf->radius_das_require_event_timestamp;
-			das_conf.require_message_authenticator =
-				conf->radius_das_require_message_authenticator;
-			das_conf.ctx = hapd;
-			das_conf.disconnect = hostapd_das_disconnect;
-			das_conf.coa = hostapd_das_coa;
-			hapd->radius_das = radius_das_init(&das_conf);
-			if (!hapd->radius_das) {
-				wpa_printf(MSG_ERROR,
-					   "RADIUS DAS initialization failed.");
-				return -1;
-			}
-		}
 	} else {
 #ifdef CONFIG_IEEE80211BE
 		struct hostapd_data *f_bss;
 
-		wpa_printf(MSG_DEBUG,
-			   "MLD: Using RADIUS client of the first BSS");
 		f_bss = hostapd_mld_get_first_bss(hapd);
 		if (!f_bss)
 			return -1;
+
+		if (!f_bss->radius) {
+			wpa_printf(MSG_DEBUG,
+				   "MLD: First BSS RADIUS client does not exist. Init on its behalf");
+
+			if (hostapd_bss_radius_init(f_bss))
+				return -1;
+		}
+
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Using RADIUS client of the first BSS");
 		hapd->radius = f_bss->radius;
 		hapd->radius_das = f_bss->radius_das;
 #endif /* CONFIG_IEEE80211BE */
@@ -3342,10 +3380,10 @@ hostapd_interface_init_bss(struct hapd_interfaces *interfaces, const char *phy,
 static void hostapd_cleanup_driver(const struct wpa_driver_ops *driver,
 				   void *drv_priv, struct hostapd_iface *iface)
 {
-#ifdef CONFIG_IEEE80211BE
 	if (!driver || !driver->hapd_deinit || !drv_priv)
 		return;
 
+#ifdef CONFIG_IEEE80211BE
 	/* In case of non-ML operation, de-init. But if ML operation exist,
 	 * even if that's the last BSS in the interface, the driver (drv) could
 	 * be in use for a different AP MLD. Hence, need to check if drv is
@@ -4088,7 +4126,7 @@ int hostapd_csa_in_progress(struct hostapd_iface *iface)
 
 #ifdef NEED_AP_MLME
 
-static void free_beacon_data(struct beacon_data *beacon)
+void free_beacon_data(struct beacon_data *beacon)
 {
 	os_free(beacon->head);
 	beacon->head = NULL;
@@ -4474,6 +4512,7 @@ hostapd_switch_channel_fallback(struct hostapd_iface *iface,
 {
 	u8 seg0_idx = 0, seg1_idx = 0;
 	enum oper_chan_width bw = CONF_OPER_CHWIDTH_USE_HT;
+	u8 op_class, chan = 0;
 
 	wpa_printf(MSG_DEBUG, "Restarting all CSA-related BSSes");
 
@@ -4513,6 +4552,15 @@ hostapd_switch_channel_fallback(struct hostapd_iface *iface,
 	iface->freq = freq_params->freq;
 	iface->conf->channel = freq_params->channel;
 	iface->conf->secondary_channel = freq_params->sec_channel_offset;
+	if (ieee80211_freq_to_channel_ext(freq_params->freq,
+					  freq_params->sec_channel_offset, bw,
+					  &op_class, &chan) ==
+	    NUM_HOSTAPD_MODES ||
+	    chan != freq_params->channel)
+		wpa_printf(MSG_INFO, "CSA: Channel mismatch: %d -> %d",
+			   freq_params->channel, chan);
+
+	iface->conf->op_class = op_class;
 	hostapd_set_oper_centr_freq_seg0_idx(iface->conf, seg0_idx);
 	hostapd_set_oper_centr_freq_seg1_idx(iface->conf, seg1_idx);
 	hostapd_set_oper_chwidth(iface->conf, bw);
@@ -4543,8 +4591,8 @@ void hostapd_cleanup_cca_params(struct hostapd_data *hapd)
 }
 
 
-static int hostapd_fill_cca_settings(struct hostapd_data *hapd,
-				     struct cca_settings *settings)
+int hostapd_fill_cca_settings(struct hostapd_data *hapd,
+			      struct cca_settings *settings)
 {
 	struct hostapd_iface *iface = hapd->iface;
 	u8 old_color;
@@ -4552,6 +4600,12 @@ static int hostapd_fill_cca_settings(struct hostapd_data *hapd,
 
 	if (!iface || iface->conf->he_op.he_bss_color_disabled)
 		return -1;
+
+	settings->link_id = -1;
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap)
+		settings->link_id = hapd->mld_link_id;
+#endif /* CONFIG_IEEE80211BE */
 
 	old_color = iface->conf->he_op.he_bss_color;
 	iface->conf->he_op.he_bss_color = hapd->cca_color;

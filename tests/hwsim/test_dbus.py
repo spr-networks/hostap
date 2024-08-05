@@ -3406,11 +3406,21 @@ def test_dbus_p2p_service_discovery(dev, apdev):
     bonjour_query = dbus.ByteArray(binascii.unhexlify('0b5f6166706f766572746370c00c000c01'))
     bonjour_response = dbus.ByteArray(binascii.unhexlify('074578616d706c65c027'))
 
+    tests = [{'service_type': 'bonjour',
+              'query': bonjour_query,
+              'response': bonjour_response},
+             {'service_type': 'upnp',
+              'version': 0x10,
+              'service': 'uuid:6859dede-8574-59ab-9332-123456789012::upnp:rootdevice',
+              'query': bonjour_query,
+              'response': bonjour_response}]
+    for args in tests:
+        p2p.AddService(args)
+        p2p.FlushService()
+
     args = {'service_type': 'bonjour',
             'query': bonjour_query,
             'response': bonjour_response}
-    p2p.AddService(args)
-    p2p.FlushService()
     p2p.AddService(args)
 
     try:
@@ -3501,11 +3511,16 @@ def test_dbus_p2p_service_discovery(dev, apdev):
         if "InvalidArgs" not in str(e):
             raise Exception("Unexpected error message for invalid AddService(): " + str(e))
 
-    args = {'service_type': 'upnp',
-            'version': 0x10,
-            'service': 'ssdp:foo'}
-    ref = p2p.ServiceDiscoveryRequest(args)
-    p2p.ServiceDiscoveryCancelRequest(ref)
+    tests= [{'service_type': 'upnp',
+             'version': 0x10,
+             'service': 'ssdp:foo'},
+            {'service_type': 'upnp',
+             'version': 0x10,
+             'service': 'ssdp:bar',
+             'tlv': dbus.ByteArray(b"\x02\x00\x00\x01")}]
+    for args in tests:
+        ref = p2p.ServiceDiscoveryRequest(args)
+        p2p.ServiceDiscoveryCancelRequest(ref)
 
     tests = [{'service_type': 'foo'},
              {'foo': 'bar'},
@@ -3536,13 +3551,16 @@ def test_dbus_p2p_service_discovery(dev, apdev):
             if "InvalidArgs" not in str(e):
                 raise Exception("Unexpected error message for invalid ServiceDiscoveryRequest(): " + str(e))
 
-    args = {'foo': 'bar'}
-    try:
-        p2p.ServiceDiscoveryResponse(dbus.Dictionary(args, signature='sv'))
-        raise Exception("Invalid ServiceDiscoveryResponse accepted")
-    except dbus.exceptions.DBusException as e:
-        if "InvalidArgs" not in str(e):
-            raise Exception("Unexpected error message for invalid ServiceDiscoveryResponse(): " + str(e))
+    tests = [{'foo': 'bar'},
+             {'tlvs': dbus.ByteArray(b"\x02\x00\x00\x01"),
+              'bar': 'foo'}]
+    for args in tests:
+        try:
+            p2p.ServiceDiscoveryResponse(dbus.Dictionary(args, signature='sv'))
+            raise Exception("Invalid ServiceDiscoveryResponse accepted")
+        except dbus.exceptions.DBusException as e:
+            if "InvalidArgs" not in str(e):
+                raise Exception("Unexpected error message for invalid ServiceDiscoveryResponse(): " + str(e))
 
 def test_dbus_p2p_service_discovery_query(dev, apdev):
     """D-Bus P2P service discovery query"""
