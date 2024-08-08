@@ -250,6 +250,52 @@ out:
 #endif /* CONFIG_IEEE80211BE */
 
 
+#if defined(HOSTAPD) || defined(CONFIG_IEEE80211BE)
+static struct hostapd_data * hostapd_find_by_sta(struct hostapd_iface *iface,
+						 const u8 *src, bool rsn,
+						 struct sta_info **sta_ret)
+{
+	struct hostapd_data *hapd;
+	struct sta_info *sta;
+	unsigned int j;
+
+	if (sta_ret)
+		*sta_ret = NULL;
+
+	for (j = 0; j < iface->num_bss; j++) {
+		hapd = iface->bss[j];
+		sta = ap_get_sta(hapd, src);
+		if (sta && (sta->flags & WLAN_STA_ASSOC) &&
+		    (!rsn || sta->wpa_sm)) {
+			if (sta_ret)
+				*sta_ret = sta;
+			return hapd;
+		}
+#ifdef CONFIG_IEEE80211BE
+		if (hapd->conf->mld_ap) {
+			struct hostapd_data *p_hapd;
+
+			for_each_mld_link(p_hapd, hapd) {
+				if (p_hapd == hapd)
+					continue;
+
+				sta = ap_get_sta(p_hapd, src);
+				if (sta && (sta->flags & WLAN_STA_ASSOC) &&
+				    (!rsn || sta->wpa_sm)) {
+					if (sta_ret)
+						*sta_ret = sta;
+					return p_hapd;
+				}
+			}
+		}
+#endif /* CONFIG_IEEE80211BE */
+	}
+
+	return NULL;
+}
+#endif /* HOSTAPD || CONFIG_IEEE80211BE */
+
+
 int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 			const u8 *req_ies, size_t req_ies_len,
 			const u8 *resp_ies, size_t resp_ies_len,
@@ -1044,6 +1090,20 @@ legacy:
 void hostapd_event_sta_low_ack(struct hostapd_data *hapd, const u8 *addr)
 {
 	struct sta_info *sta = ap_get_sta(hapd, addr);
+#ifdef CONFIG_IEEE80211BE
+	struct hostapd_data *orig_hapd = hapd;
+
+	if (!sta && hapd->conf->mld_ap) {
+		hapd = hostapd_find_by_sta(hapd->iface, addr, true, &sta);
+		if (!hapd) {
+			wpa_printf(MSG_DEBUG,
+				   "No partner link BSS found for STA " MACSTR
+				   " - fallback to received context",
+				   MAC2STR(addr));
+			hapd = orig_hapd;
+		}
+	}
+#endif /* CONFIG_IEEE80211BE */
 
 	if (!sta || !hapd->conf->disassoc_low_ack || sta->agreed_to_steer)
 		return;
@@ -1983,50 +2043,6 @@ static int hostapd_event_new_sta(struct hostapd_data *hapd, const u8 *addr)
 	}
 
 	return 0;
-}
-
-
-static struct hostapd_data * hostapd_find_by_sta(struct hostapd_iface *iface,
-						 const u8 *src, bool rsn,
-						 struct sta_info **sta_ret)
-{
-	struct hostapd_data *hapd;
-	struct sta_info *sta;
-	unsigned int j;
-
-	if (sta_ret)
-		*sta_ret = NULL;
-
-	for (j = 0; j < iface->num_bss; j++) {
-		hapd = iface->bss[j];
-		sta = ap_get_sta(hapd, src);
-		if (sta && (sta->flags & WLAN_STA_ASSOC) &&
-		    (!rsn || sta->wpa_sm)) {
-			if (sta_ret)
-				*sta_ret = sta;
-			return hapd;
-		}
-#ifdef CONFIG_IEEE80211BE
-		if (hapd->conf->mld_ap) {
-			struct hostapd_data *p_hapd;
-
-			for_each_mld_link(p_hapd, hapd) {
-				if (p_hapd == hapd)
-					continue;
-
-				sta = ap_get_sta(p_hapd, src);
-				if (sta && (sta->flags & WLAN_STA_ASSOC) &&
-				    (!rsn || sta->wpa_sm)) {
-					if (sta_ret)
-						*sta_ret = sta;
-					return p_hapd;
-				}
-			}
-		}
-#endif /* CONFIG_IEEE80211BE */
-	}
-
-	return NULL;
 }
 
 

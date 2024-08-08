@@ -167,6 +167,21 @@ struct hostapd_sae_commit_queue {
 	u8 msg[];
 };
 
+struct mld_link_info {
+	u8 valid:1;
+	u8 nstr_bitmap_len:2;
+	u8 local_addr[ETH_ALEN];
+	u8 peer_addr[ETH_ALEN];
+
+	u8 nstr_bitmap[2];
+
+	u16 capability;
+
+	u16 status;
+	u16 resp_sta_profile_len;
+	u8 *resp_sta_profile;
+};
+
 /**
  * struct hostapd_data - hostapd per-BSS data structure
  */
@@ -476,6 +491,10 @@ struct hostapd_data {
 	struct hostapd_mld *mld;
 	struct dl_list link;
 	u8 mld_link_id;
+
+	/* Cached partner info for ML probe response */
+	struct mld_link_info partner_links[MAX_NUM_MLD_LINKS];
+
 #ifdef CONFIG_TESTING_OPTIONS
 	u8 eht_mld_link_removal_count;
 #endif /* CONFIG_TESTING_OPTIONS */
@@ -753,6 +772,8 @@ void hostapd_chan_switch_config(struct hostapd_data *hapd,
 				struct hostapd_freq_params *freq_params);
 int hostapd_switch_channel(struct hostapd_data *hapd,
 			   struct csa_settings *settings);
+int hostapd_force_channel_switch(struct hostapd_iface *iface,
+				 struct csa_settings settings);
 void
 hostapd_switch_channel_fallback(struct hostapd_iface *iface,
 				const struct hostapd_freq_params *freq_params);

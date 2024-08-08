@@ -400,8 +400,6 @@ static int hostapd_broadcast_wep_set(struct hostapd_data *hapd)
 #ifdef CONFIG_IEEE80211BE
 #ifdef CONFIG_TESTING_OPTIONS
 
-#define TU_TO_USEC(_val) ((_val) * 1024)
-
 static void hostapd_link_remove_timeout_handler(void *eloop_data,
 						void *user_ctx)
 {
@@ -622,9 +620,19 @@ void hostapd_free_hapd_data(struct hostapd_data *hapd)
 static void hostapd_bss_link_deinit(struct hostapd_data *hapd)
 {
 #ifdef CONFIG_IEEE80211BE
+	int i;
+
 	if (!hapd->conf || !hapd->conf->mld_ap)
 		return;
 
+	/* Free per STA profiles */
+	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
+		os_free(hapd->partner_links[i].resp_sta_profile);
+		os_memset(&hapd->partner_links[i], 0,
+			  sizeof(hapd->partner_links[i]));
+	}
+
+	/* Put all freeing logic above this */
 	if (!hapd->mld->num_links)
 		return;
 
@@ -4503,6 +4511,42 @@ int hostapd_switch_channel(struct hostapd_data *hapd,
 
 	hapd->csa_in_progress = 1;
 	return 0;
+}
+
+
+int hostapd_force_channel_switch(struct hostapd_iface *iface,
+				 struct csa_settings settings)
+{
+	int ret = 0;
+
+	if (!settings.freq_params.channel) {
+		/* Check if the new channel is supported */
+		settings.freq_params.channel = hostapd_hw_get_channel(
+			iface->bss[0], settings.freq_params.freq);
+		if (!settings.freq_params.channel)
+			return -1;
+	}
+
+	ret = hostapd_disable_iface(iface);
+	if (ret) {
+		wpa_printf(MSG_DEBUG, "Failed to disable the interface");
+		return ret;
+	}
+
+	hostapd_chan_switch_config(iface->bss[0], &settings.freq_params);
+	ret = hostapd_change_config_freq(iface->bss[0], iface->conf,
+					 &settings.freq_params, NULL);
+	if (ret) {
+		wpa_printf(MSG_DEBUG,
+			   "Failed to set the new channel in config");
+		return ret;
+	}
+
+	ret = hostapd_enable_iface(iface);
+	if (ret)
+		wpa_printf(MSG_DEBUG, "Failed to enable the interface");
+
+	return ret;
 }
 
 
