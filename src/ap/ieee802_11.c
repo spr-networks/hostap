@@ -1609,7 +1609,7 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 
 				goto reply;
 			} else {
-				wpa_msg(hapd->msg_ctx, MSG_INFO, SPR_AP_STA_POSSIBLE_PSK_PROGRESS MACSTR " sae confirmed",
+				wpa_msg(hapd->msg_ctx, MSG_INFO, SPR_AP_STA_PSK_PROGRESS MACSTR " sae confirmed",
 					MAC2STR(sta->addr));
 			}
 			sta->sae->rc = peer_send_confirm;
