@@ -3778,7 +3778,7 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 	}
 
 	wpa_msg(hapd->msg_ctx, MSG_INFO, SPR_AP_STA_PSK_PROGRESS MACSTR " wpa confirmed",
-		MAC2STR(sta->addr));
+		MAC2STR(sm->addr));
 
 	/*
 	 * Note: last_rx_eapol_key length fields have already been validated in
