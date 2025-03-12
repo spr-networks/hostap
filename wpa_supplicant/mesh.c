@@ -464,6 +464,9 @@ static int wpa_supplicant_mesh_init(struct wpa_supplicant *wpa_s,
 		case 160:
 			conf->op_class = 134;
 			break;
+		case 320:
+			conf->op_class = 137;
+			break;
 		default:
 			conf->op_class = 131;
 			break;
@@ -602,7 +605,8 @@ void wpa_supplicant_mesh_add_scan_ie(struct wpa_supplicant *wpa_s,
 	/* EID + 0-length (wildcard) mesh-id */
 	size_t ielen = 2;
 
-	if (wpabuf_resize(extra_ie, ielen) == 0) {
+	if (ielen <= wpa_s->drv_max_probe_req_ie_len &&
+	    wpabuf_resize(extra_ie, ielen) == 0) {
 		wpabuf_put_u8(*extra_ie, WLAN_EID_MESH_ID);
 		wpabuf_put_u8(*extra_ie, 0);
 	}

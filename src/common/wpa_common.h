@@ -94,7 +94,6 @@ WPA_CIPHER_BIP_CMAC_256)
 #define RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY RSN_SELECTOR(0x00, 0x0f, 0xac, 25)
 
 #define RSN_AUTH_KEY_MGMT_CCKM RSN_SELECTOR(0x00, 0x40, 0x96, 0x00)
-#define RSN_AUTH_KEY_MGMT_OSEN RSN_SELECTOR(0x50, 0x6f, 0x9a, 0x01)
 #define RSN_AUTH_KEY_MGMT_DPP RSN_SELECTOR(0x50, 0x6f, 0x9a, 0x02)
 
 #define RSN_CIPHER_SUITE_NONE RSN_SELECTOR(0x00, 0x0f, 0xac, 0)
@@ -268,8 +267,11 @@ struct wpa_ptk {
 	size_t kck2_len;
 	size_t kek2_len;
 	size_t kdk_len;
+	size_t ptk_len;
 	size_t ltf_keyseed_len;
 	int installed; /* 1 if key has already been installed to driver */
+	bool installed_rx; /* whether TK has been installed as the next TK
+			    * for temporary RX-only use in the driver */
 };
 
 struct wpa_gtk {
@@ -770,7 +772,7 @@ int pasn_pmk_to_ptk(const u8 *pmk, size_t pmk_len,
 		    const u8 *spa, const u8 *bssid,
 		    const u8 *dhss, size_t dhss_len,
 		    struct wpa_ptk *ptk, int akmp, int cipher,
-		    size_t kdk_len);
+		    size_t kdk_len, size_t kek_len);
 
 u8 pasn_mic_len(int akmp, int cipher);
 

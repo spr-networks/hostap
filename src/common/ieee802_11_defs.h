@@ -526,6 +526,8 @@
 #define WLAN_EID_EXT_QOS_CHARACTERISTICS 113
 #define WLAN_EID_EXT_AKM_SUITE_SELECTOR 114
 #define WLAN_EID_EXT_BANDWIDTH_INDICATION 135
+#define WLAN_EID_EXT_KNOWN_STA_IDENTIFICATION 136
+#define WLAN_EID_EXT_PASN_ENCRYPTED_DATA 140
 
 /* Extended Capabilities field */
 #define WLAN_EXT_CAPAB_20_40_COEX 0
@@ -608,6 +610,7 @@
 #define WLAN_EXT_CAPAB_BEACON_PROTECTION 84
 #define WLAN_EXT_CAPAB_MSCS 85
 #define WLAN_EXT_CAPAB_SAE_PK_EXCLUSIVELY 88
+#define WLAN_EXT_CAPAB_KNOWN_STA_IDENTIFICATION 102
 
 /* Extended RSN Capabilities */
 /* bits 0-3: Field length (n-1) */
@@ -617,7 +620,9 @@
 #define WLAN_RSNX_CAPAB_SECURE_LTF 8
 #define WLAN_RSNX_CAPAB_SECURE_RTT 9
 #define WLAN_RSNX_CAPAB_URNM_MFPR_X20 10
+#define WLAN_RSNX_CAPAB_SPP_A_MSDU 14
 #define WLAN_RSNX_CAPAB_URNM_MFPR 15
+#define WLAN_RSNX_CAPAB_KEK_IN_PASN 18
 #define WLAN_RSNX_CAPAB_SSID_PROTECTION 21
 
 /* Multiple BSSID element subelements */
@@ -775,6 +780,21 @@
 #define WLAN_PROT_FTM_REQUEST 1
 #define WLAN_PROT_FTM 2
 #define WLAN_PROT_FTM_REPORT 3
+
+/* Protected EHT Action field values */
+#define WLAN_PROT_EHT_T2L_MAPPING_REQUEST 0
+#define WLAN_PROT_EHT_T2L_MAPPING_RESPONSE 1
+#define WLAN_PROT_EHT_T2L_MAPPING_TEARDOWN 2
+#define WLAN_PROT_EHT_EPCS_ENABLE_REQUEST 3
+#define WLAN_PROT_EHT_EPCS_ENABLE_RESPONSE 4
+#define WLAN_PROT_EHT_EPCS_ENABLE_TEARDOWN 5
+#define WLAN_PROT_EHT_EML_OPMODE_NOTIF 6
+#define WLAN_PROT_EHT_LINK_RECOMMENDATION 7
+#define WLAN_PROT_EHT_MLO_UPDATE_REQUEST 8
+#define WLAN_PROT_EHT_MLO_UPDATE_RESPONSE 9
+#define WLAN_PROT_EHT_LINK_RECONFIG_NOTIFY 10
+#define WLAN_PROT_EHT_LINK_RECONFIG_REQUEST 11
+#define WLAN_PROT_EHT_LINK_RECONFIG_RESPONSE 12
 
 /* Radio Measurement capabilities (from RM Enabled Capabilities element)
  * IEEE Std 802.11-2020, 9.4.2.44, Table 9-179 */
@@ -1427,10 +1447,10 @@ struct ieee80211_ampe_ie {
 #define WPS_IE_VENDOR_TYPE 0x0050f204
 #define OUI_WFA 0x506f9a
 #define P2P_IE_VENDOR_TYPE 0x506f9a09
+#define P2P2_IE_VENDOR_TYPE 0x506f9a28
 #define WFD_IE_VENDOR_TYPE 0x506f9a0a
 #define WFD_OUI_TYPE 10
 #define HS20_IE_VENDOR_TYPE 0x506f9a10
-#define OSEN_IE_VENDOR_TYPE 0x506f9a12
 #define NAN_IE_VENDOR_TYPE 0x506f9a13
 #define NAN_SDF_VENDOR_TYPE 0x506f9a13
 #define NAN_OUI_TYPE 0x13
@@ -1589,7 +1609,6 @@ enum wmm_ac {
 
 #define HS20_INDICATION_OUI_TYPE 16
 #define HS20_ANQP_OUI_TYPE 17
-#define HS20_OSEN_OUI_TYPE 18
 #define HS20_ROAMING_CONS_SEL_OUI_TYPE 29
 #define HS20_STYPE_QUERY_LIST 1
 #define HS20_STYPE_CAPABILITY_LIST 2
@@ -1598,11 +1617,6 @@ enum wmm_ac {
 #define HS20_STYPE_CONNECTION_CAPABILITY 5
 #define HS20_STYPE_NAI_HOME_REALM_QUERY 6
 #define HS20_STYPE_OPERATING_CLASS 7
-#define HS20_STYPE_OSU_PROVIDERS_LIST 8
-#define HS20_STYPE_ICON_REQUEST 10
-#define HS20_STYPE_ICON_BINARY_FILE 11
-#define HS20_STYPE_OPERATOR_ICON_METADATA 12
-#define HS20_STYPE_OSU_PROVIDERS_NAI_LIST 13
 
 #define HS20_DGAF_DISABLED 0x01
 #define HS20_PPS_MO_ID_PRESENT 0x02
@@ -1612,7 +1626,6 @@ enum wmm_ac {
 #endif /* HS20_VERSION */
 
 /* WNM-Notification WFA vendors specific subtypes */
-#define HS20_WNM_SUB_REM_NEEDED 0
 #define HS20_WNM_DEAUTH_IMMINENT_NOTICE 1
 #define WFA_WNM_NOTIF_SUBELEM_NON_PREF_CHAN_REPORT 2
 #define WFA_WNM_NOTIF_SUBELEM_CELL_DATA_CAPA 3
@@ -1720,6 +1733,7 @@ enum mbo_transition_reject_reason {
 /* Wi-Fi Direct (P2P) */
 
 #define P2P_OUI_TYPE 9
+#define P2P2_OUI_TYPE 0x28
 
 enum p2p_attr_id {
 	P2P_ATTR_STATUS = 0,
@@ -1750,6 +1764,13 @@ enum p2p_attr_id {
 	P2P_ATTR_SESSION_ID = 26,
 	P2P_ATTR_FEATURE_CAPABILITY = 27,
 	P2P_ATTR_PERSISTENT_GROUP = 28,
+	P2P_ATTR_CAPABILITY_EXTENSION = 29,
+	P2P_ATTR_WLAN_AP_INFORMATION = 30,
+	P2P_ATTR_DEVICE_IDENTITY_KEY = 31,
+	P2P_ATTR_DEVICE_IDENTITY_RESOLUTION = 32,
+	P2P_ATTR_PAIRING_AND_BOOTSTRAPPING = 33,
+	P2P_ATTR_PASSWORD = 34,
+	P2P_ATTR_ACTION_FRAME_WRAPPER = 35,
 	P2P_ATTR_VENDOR_SPECIFIC = 221
 };
 
@@ -1773,6 +1794,31 @@ enum p2p_attr_id {
 #define P2P_GROUP_CAPAB_PERSISTENT_RECONN BIT(5)
 #define P2P_GROUP_CAPAB_GROUP_FORMATION BIT(6)
 #define P2P_GROUP_CAPAB_IP_ADDR_ALLOCATION BIT(7)
+
+/* P2P Capability Extension attribute - Capability info */
+#define P2P_PCEA_LEN_MASK (BIT(0) | BIT(1) | BIT(2) | BIT(3))
+#define P2P_PCEA_6GHZ BIT(4)
+#define P2P_PCEA_REG_INFO BIT(5)
+#define P2P_PCEA_DFS_OWNER BIT(6)
+#define P2P_PCEA_CLI_REQ_CS BIT(7)
+#define P2P_PCEA_PAIRING_CAPABLE BIT(8)
+#define P2P_PCEA_PAIRING_SETUP_ENABLED BIT(9)
+#define P2P_PCEA_PMK_CACHING BIT(10)
+#define P2P_PCEA_PASN_TYPE BIT(11)
+#define P2P_PCEA_TWT_POWER_MGMT BIT(12)
+
+/* P2P Pairing Bootstrapping Method attribute - Bootstrapping Method */
+#define P2P_PBMA_OPPORTUNISTIC       BIT(0)
+#define P2P_PBMA_PIN_CODE_DISPLAY    BIT(1)
+#define P2P_PBMA_PASSPHRASE_DISPLAY  BIT(2)
+#define P2P_PBMA_QR_DISPLAY          BIT(3)
+#define P2P_PBMA_NFC_TAG             BIT(4)
+#define P2P_PBMA_PIN_CODE_KEYPAD     BIT(5)
+#define P2P_PBMA_PASSPHRASE_KEYPAD   BIT(6)
+#define P2P_PBMA_QR_SCAN             BIT(7)
+#define P2P_PBMA_NFC_READER          BIT(8)
+#define P2P_PBMA_SERVICE_MANAGED     BIT(14)
+#define P2P_PBMA_HANDSHAKE_SKIP      BIT(15)
 
 /* P2PS Coordination Protocol Transport Bitmap */
 #define P2PS_FEATURE_CAPAB_UDP_TRANSPORT BIT(0)
@@ -1805,6 +1851,7 @@ enum p2p_status_code {
 	P2P_SC_FAIL_INCOMPATIBLE_PROV_METHOD = 10,
 	P2P_SC_FAIL_REJECTED_BY_USER = 11,
 	P2P_SC_SUCCESS_DEFERRED = 12,
+	P2P_SC_COMEBACK = 13,
 };
 
 enum p2p_role_indication {
@@ -2729,15 +2776,16 @@ struct ieee80211_eht_capabilities {
 #define MULTI_LINK_SUB_ELEM_ID_VENDOR			221
 #define MULTI_LINK_SUB_ELEM_ID_FRAGMENT			254
 
-/* IEEE P802.11be/D2.2, 9.4.2.312.2 - Basic Multi-Link element */
+/* IEEE P802.11be/D7.0, 9.4.2.322.2 - Basic Multi-Link element */
 
-/* Figure 9-1002g: Presence Bitmap subfield of the Basic Multi-Link element */
+/* Figure 9-1074o: Presence Bitmap subfield of the Basic Multi-Link element */
 #define BASIC_MULTI_LINK_CTRL_PRES_LINK_ID		0x0010
 #define BASIC_MULTI_LINK_CTRL_PRES_BSS_PARAM_CH_COUNT	0x0020
 #define BASIC_MULTI_LINK_CTRL_PRES_MSD_INFO		0x0040
 #define BASIC_MULTI_LINK_CTRL_PRES_EML_CAPA		0x0080
 #define BASIC_MULTI_LINK_CTRL_PRES_MLD_CAPA		0x0100
 #define BASIC_MULTI_LINK_CTRL_PRES_AP_MLD_ID		0x0200
+#define BASIC_MULTI_LINK_CTRL_PRES_EXT_MLD_CAP		0x0400
 
 /*
  * STA Control field definitions of Per-STA Profile subelement in Basic
@@ -2794,6 +2842,7 @@ struct eht_ml_basic_common_info {
 #define EHT_ML_MLD_CAPA_TID_TO_LINK_MAP_ALL_TO_ALL    0x0020
 #define EHT_ML_MLD_CAPA_TID_TO_LINK_MAP_ALL_TO_ONE    0x0040
 #define EHT_ML_MLD_CAPA_TID_TO_LINK_MAP_NEG_SUPP_MSK  0x0060
+#define EHT_ML_MLD_CAPA_AP_MLD_TYPE_IND_MASK          0x0080
 #define EHT_ML_MLD_CAPA_FREQ_SEP_FOR_STR_MASK         0x0f80
 #define EHT_ML_MLD_CAPA_AAR_SUPP                      0x1000
 
@@ -2847,6 +2896,9 @@ struct eht_ml_probe_req_common_info {
 /* IEEE P802.11be/D4.0, 9.4.2.312.4 - Reconfiguration Multi-Link element */
 
 #define RECONF_MULTI_LINK_CTRL_PRES_MLD_MAC_ADDR   0x0001
+#define RECONF_MULTI_LINK_CTRL_PRES_EML_CAPA       0x0002
+#define RECONF_MULTI_LINK_CTRL_PRES_MLD_CAPA       0x0004
+#define RECONF_MULTI_LINK_CTRL_PRES_EXT_MLD_CAP    0x0008
 
 #define EHT_PER_STA_RECONF_CTRL_LINK_ID_MSK        0x000f
 #define EHT_PER_STA_RECONF_CTRL_COMPLETE_PROFILE   0x0010
@@ -2855,6 +2907,25 @@ struct eht_ml_probe_req_common_info {
 #define EHT_PER_STA_RECONF_CTRL_OP_UPDATE_TYPE_MSK 0x0780
 #define EHT_PER_STA_RECONF_CTRL_OP_PARAMS          0x0800
 #define EHT_PER_STA_RECONF_CTRL_NSTR_BITMAP_SIZE   0x1000
+#define EHT_PER_STA_RECONF_CTRL_NSTR_INDICATION    0x2000
+
+/* IEEE P802.11be/D7.0, Figure 9-1074ad - Common Info field format of the
+ * Reconfiguration Multi-Link element */
+struct eht_ml_reconf_common_info {
+	u8 len;
+
+	/*
+	 * Followed by optional fields based on the multi link reconf presence
+	 * bitmap
+	 *
+	 * MLD MAC Address: 6 octets
+	 * EML Capabilities: 2 octets
+	 * MLD Capabilities and Operations: 2 octets
+	 * Extended MLD Capabilities and Operations: 2 octets
+	 */
+	u8 variable[];
+} STRUCT_PACKED;
+
 
 /* IEEE P802.11be/D2.0, 9.4.2.312.1 - Multi-Link element / General */
 
@@ -3076,6 +3147,15 @@ enum dscp_policy_request_type {
 #define WFA_CAPA_QM_DSCP_POLICY BIT(0)
 #define WFA_CAPA_QM_UNSOLIC_DSCP BIT(1)
 #define WFA_CAPA_QM_NON_EHT_SCS_TRAFFIC_DESC BIT(2)
+
+/* Wi-Fi Alliance Capabilities attributes */
+enum wfa_capa_attr_id {
+	WFA_CAPA_ATTR_GENERATIONAL_CAPAB = 1,
+	WFA_CAPA_ATTR_VENDOR_SPECIFIC = 221,
+};
+
+/* Wi-Fi Alliance Capabilities frame */
+#define WFA_CAPAB_VENDOR_TYPE 0x506f9a1b
 
 struct ieee80211_neighbor_ap_info {
 	u8 tbtt_info_hdr;

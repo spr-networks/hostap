@@ -476,6 +476,17 @@ static void hostapd_ext_capab_byte(struct hostapd_data *hapd, u8 *pos, int idx,
 			*pos |= 0x01; /* Bit 88 - SAE PK Exclusively */
 #endif /* CONFIG_SAE_PK */
 		break;
+	case 12: /* Bits 96-103 */
+		if (hapd->iconf->peer_to_peer_twt)
+			*pos |= 0x10; /* Bit 100 - Peer to Peer TWT */
+		if (hapd->conf->known_sta_identification)
+			*pos |= 0x40; /* Bit 102 - Known STA Identification
+				       * Enabled */
+		break;
+	case 13: /* Bits 104-111 */
+		if (hapd->iconf->channel_usage)
+			*pos |= 0x01; /* Bit 104 - Channel Usage support */
+		break;
 	}
 }
 
@@ -1034,7 +1045,8 @@ int get_tx_parameters(struct sta_info *sta, int ap_max_chanwidth,
 	int requested_bw;
 
 	if (sta->ht_capabilities)
-		ht_40mhz = !!(sta->ht_capabilities->ht_capabilities_info &
+		ht_40mhz = !!(le_to_host16(sta->ht_capabilities->
+					   ht_capabilities_info) &
 			      HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET);
 
 	if (sta->vht_operation) {
@@ -1070,9 +1082,9 @@ int get_tx_parameters(struct sta_info *sta, int ap_max_chanwidth,
 		 * normal clients), use it to determine the supported channel
 		 * bandwidth.
 		 */
-		vht_chanwidth = capab->vht_capabilities_info &
+		vht_chanwidth = le_to_host32(capab->vht_capabilities_info) &
 			VHT_CAP_SUPP_CHAN_WIDTH_MASK;
-		vht_80p80 = capab->vht_capabilities_info &
+		vht_80p80 = le_to_host32(capab->vht_capabilities_info) &
 			VHT_CAP_SUPP_CHAN_WIDTH_160_80PLUS80MHZ;
 
 		/* TODO: Also take into account Extended NSS BW Support field */
@@ -1128,6 +1140,9 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 		capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR);
 	if (hapd->conf->ssid_protection)
 		capab |= BIT(WLAN_RSNX_CAPAB_SSID_PROTECTION);
+	if ((hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SPP_AMSDU) &&
+	    hapd->conf->spp_amsdu)
+		capab |= BIT(WLAN_RSNX_CAPAB_SPP_A_MSDU);
 
 	if (!capab)
 		return eid; /* no supported extended RSN capabilities */
@@ -1225,4 +1240,48 @@ bool hostapd_get_ht_vht_twt_responder(struct hostapd_data *hapd)
 		 (hapd->iconf->ieee80211ac && !hapd->conf->disable_11ac)) &&
 		(hapd->iface->drv_flags2 &
 		 WPA_DRIVER_FLAGS2_HT_VHT_TWT_RESPONDER);
+}
+
+
+static void hostapd_wfa_gen_capab(struct hostapd_data *hapd,
+				  struct sta_info *sta,
+				  const u8 *capab, size_t len)
+{
+	char *hex;
+	size_t buflen;
+
+	wpa_printf(MSG_DEBUG,
+		   "WFA: Received indication of generational capabilities from "
+		   MACSTR, MAC2STR(sta->addr));
+	wpa_hexdump(MSG_DEBUG, "WFA: Generational Capabilities", capab, len);
+
+	buflen = 2 * len + 1;
+	hex = os_zalloc(buflen);
+	if (!hex)
+		return;
+	wpa_snprintf_hex(hex, buflen, capab, len);
+	wpa_msg(hapd->msg_ctx, MSG_INFO, WFA_GEN_CAPAB_RX MACSTR " %s",
+		MAC2STR(sta->addr), hex);
+	os_free(hex);
+}
+
+
+void hostapd_wfa_capab(struct hostapd_data *hapd, struct sta_info *sta,
+		       const u8 *pos, const u8 *end)
+{
+	u8 capab_len;
+	const u8 *gen_capa;
+
+	if (end - pos < 1)
+		return;
+	capab_len = *pos++;
+	if (capab_len > end - pos)
+		return;
+	pos += capab_len; /* skip the Capabilities field */
+
+	/* Wi-Fi Alliance Capabilities attributes use a header that is similar
+	 * to the one used in Information Elements. */
+	gen_capa = get_ie(pos, end - pos, WFA_CAPA_ATTR_GENERATIONAL_CAPAB);
+	if (gen_capa)
+		hostapd_wfa_gen_capab(hapd, sta, gen_capa + 2, gen_capa[1]);
 }

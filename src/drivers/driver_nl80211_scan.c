@@ -238,6 +238,11 @@ nl80211_scan_common(struct i802_bss *bss, u8 cmd,
 	if (params->extra_ies) {
 		wpa_hexdump(MSG_MSGDUMP, "nl80211: Scan extra IEs",
 			    params->extra_ies, params->extra_ies_len);
+		if (params->extra_ies_len > drv->capa.max_probe_req_ie_len)
+			wpa_printf(MSG_INFO,
+				   "nl80211: Extra IEs for scan do not fit driver limit (%zu > %zu) - this is likely to fail",
+				   params->extra_ies_len,
+				   drv->capa.max_probe_req_ie_len);
 		if (nla_put(msg, NL80211_ATTR_IE, params->extra_ies_len,
 			    params->extra_ies))
 			goto fail;
@@ -739,7 +744,7 @@ int wpa_driver_nl80211_stop_sched_scan(void *priv)
 		return android_pno_stop(bss);
 #endif /* ANDROID */
 
-	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_STOP_SCHED_SCAN);
+	msg = nl80211_bss_msg(bss, 0, NL80211_CMD_STOP_SCHED_SCAN);
 	ret = send_and_recv_cmd(drv, msg);
 	if (ret) {
 		wpa_printf(MSG_DEBUG,
@@ -1205,7 +1210,7 @@ int wpa_driver_nl80211_vendor_scan(struct i802_bss *bss,
 	wpa_dbg(drv->ctx, MSG_DEBUG, "nl80211: vendor scan request");
 	drv->scan_for_auth = 0;
 
-	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_VENDOR)) ||
+	if (!(msg = nl80211_bss_msg(bss, 0, NL80211_CMD_VENDOR)) ||
 	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
 	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
 			QCA_NL80211_VENDOR_SUBCMD_TRIGGER_SCAN) )
@@ -1380,7 +1385,7 @@ int nl80211_set_default_scan_ies(void *priv, const u8 *ies, size_t ies_len)
 	if (!drv->set_wifi_conf_vendor_cmd_avail)
 		return -1;
 
-	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_VENDOR)) ||
+	if (!(msg = nl80211_bss_msg(bss, 0, NL80211_CMD_VENDOR)) ||
 	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
 	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
 			QCA_NL80211_VENDOR_SUBCMD_SET_WIFI_CONFIGURATION))

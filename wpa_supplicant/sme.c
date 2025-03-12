@@ -105,6 +105,7 @@ static struct wpabuf * sme_auth_build_sae_commit(struct wpa_supplicant *wpa_s,
 	int key_mgmt = external ? wpa_s->sme.ext_auth_key_mgmt :
 		wpa_s->key_mgmt;
 	const u8 *addr = mld_addr ? mld_addr : bssid;
+	enum sae_pwe sae_pwe;
 
 	if (ret_use_pt)
 		*ret_use_pt = 0;
@@ -198,14 +199,16 @@ static struct wpabuf * sme_auth_build_sae_commit(struct wpa_supplicant *wpa_s,
 			rsnxe_capa = rsnxe[2];
 	}
 
+	sae_pwe = wpas_get_ssid_sae_pwe(wpa_s, ssid);
+
 	if (ssid->sae_password_id &&
-	    wpa_s->conf->sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK)
+	    sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK)
 		use_pt = 1;
 	if (wpa_key_mgmt_sae_ext_key(key_mgmt) &&
-	    wpa_s->conf->sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK)
+	    sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK)
 		use_pt = 1;
 	if (bss && is_6ghz_freq(bss->freq) &&
-	    wpa_s->conf->sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK)
+	    sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK)
 		use_pt = 1;
 #ifdef CONFIG_SAE_PK
 	if ((rsnxe_capa & BIT(WLAN_RSNX_CAPAB_SAE_PK)) &&
@@ -225,14 +228,14 @@ static struct wpabuf * sme_auth_build_sae_commit(struct wpa_supplicant *wpa_s,
 	}
 #endif /* CONFIG_SAE_PK */
 
-	if (use_pt || wpa_s->conf->sae_pwe == SAE_PWE_HASH_TO_ELEMENT ||
-	    wpa_s->conf->sae_pwe == SAE_PWE_BOTH) {
+	if (use_pt || sae_pwe == SAE_PWE_HASH_TO_ELEMENT ||
+	    sae_pwe == SAE_PWE_BOTH) {
 		use_pt = !!(rsnxe_capa & BIT(WLAN_RSNX_CAPAB_SAE_H2E));
 
-		if ((wpa_s->conf->sae_pwe == SAE_PWE_HASH_TO_ELEMENT ||
+		if ((sae_pwe == SAE_PWE_HASH_TO_ELEMENT ||
 		     ssid->sae_password_id ||
 		     wpa_key_mgmt_sae_ext_key(key_mgmt)) &&
-		    wpa_s->conf->sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK &&
+		    sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK &&
 		    !use_pt) {
 			wpa_printf(MSG_DEBUG,
 				   "SAE: Cannot use H2E with the selected AP");
@@ -241,7 +244,7 @@ static struct wpabuf * sme_auth_build_sae_commit(struct wpa_supplicant *wpa_s,
 	}
 
 	if (use_pt && !ssid->pt)
-		wpa_s_setup_sae_pt(wpa_s->conf, ssid, true);
+		wpa_s_setup_sae_pt(wpa_s, ssid, true);
 	if (use_pt &&
 	    sae_prepare_commit_pt(&wpa_s->sme.sae, ssid->pt,
 				  wpa_s->own_addr, addr,
@@ -548,6 +551,28 @@ static void wpas_sme_set_mlo_links(struct wpa_supplicant *wpa_s,
 }
 
 
+static void sme_add_assoc_req_ie(struct wpa_supplicant *wpa_s,
+				 const struct wpabuf *buf)
+{
+	size_t len;
+	u8 *pos, *end;
+
+	if (!buf)
+		return;
+
+	pos = wpa_s->sme.assoc_req_ie + wpa_s->sme.assoc_req_ie_len;
+	end = wpa_s->sme.assoc_req_ie + sizeof(wpa_s->sme.assoc_req_ie);
+	if (pos >= end)
+		return;
+
+	len = wpabuf_len(buf);
+	if (len < (size_t) (end - pos)) {
+		os_memcpy(pos, wpabuf_head(buf), len);
+		wpa_s->sme.assoc_req_ie_len += len;
+	}
+}
+
+
 static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 				    struct wpa_bss *bss, struct wpa_ssid *ssid,
 				    int start)
@@ -716,21 +741,6 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 			wpas_connect_work_done(wpa_s);
 			return;
 		}
-#ifdef CONFIG_HS20
-	} else if (wpa_bss_get_vendor_ie(bss, OSEN_IE_VENDOR_TYPE) &&
-		   (ssid->key_mgmt & WPA_KEY_MGMT_OSEN)) {
-		/* No PMKSA caching, but otherwise similar to RSN/WPA */
-		wpa_s->sme.assoc_req_ie_len = sizeof(wpa_s->sme.assoc_req_ie);
-		if (wpa_supplicant_set_suites(wpa_s, bss, ssid,
-					      wpa_s->sme.assoc_req_ie,
-					      &wpa_s->sme.assoc_req_ie_len,
-					      false)) {
-			wpa_msg(wpa_s, MSG_WARNING, "SME: Failed to set WPA "
-				"key management and encryption suites");
-			wpas_connect_work_done(wpa_s);
-			return;
-		}
-#endif /* CONFIG_HS20 */
 	} else if ((ssid->key_mgmt & WPA_KEY_MGMT_IEEE8021X_NO_WPA) &&
 		   wpa_key_mgmt_wpa_ieee8021x(ssid->key_mgmt)) {
 		/*
@@ -755,14 +765,10 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 #ifdef CONFIG_WPS
 	} else if (ssid->key_mgmt & WPA_KEY_MGMT_WPS) {
 		struct wpabuf *wps_ie;
+
+		wpa_s->sme.assoc_req_ie_len = 0;
 		wps_ie = wps_build_assoc_req_ie(wpas_wps_get_req_type(ssid));
-		if (wps_ie && wpabuf_len(wps_ie) <=
-		    sizeof(wpa_s->sme.assoc_req_ie)) {
-			wpa_s->sme.assoc_req_ie_len = wpabuf_len(wps_ie);
-			os_memcpy(wpa_s->sme.assoc_req_ie, wpabuf_head(wps_ie),
-				  wpa_s->sme.assoc_req_ie_len);
-		} else
-			wpa_s->sme.assoc_req_ie_len = 0;
+		sme_add_assoc_req_ie(wpa_s, wps_ie);
 		wpabuf_free(wps_ie);
 		wpa_supplicant_set_non_wpa_policy(wpa_s, ssid);
 #endif /* CONFIG_WPS */
@@ -810,7 +816,6 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		wpa_dbg(wpa_s, MSG_DEBUG, "SME: FT mobility domain %02x%02x",
 			md[0], md[1]);
 
-		omit_rsnxe = !wpa_bss_get_rsnxe(wpa_s, bss, ssid, false);
 		if (wpa_s->sme.assoc_req_ie_len + 5 <
 		    sizeof(wpa_s->sme.assoc_req_ie)) {
 			struct rsn_mdie *mdie;
@@ -830,6 +835,8 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		    wpa_sm_has_ft_keys(wpa_s->wpa, md)) {
 			wpa_dbg(wpa_s, MSG_DEBUG, "SME: Trying to use FT "
 				"over-the-air");
+			omit_rsnxe = !wpa_bss_get_rsnxe(wpa_s, bss, ssid,
+							false);
 			params.auth_alg = WPA_AUTH_ALG_FT;
 			params.ie = wpa_s->sme.ft_ies;
 			params.ie_len = wpa_s->sme.ft_ies_len;
@@ -850,6 +857,8 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		}
 	}
 
+	wpa_s->sme.spp_amsdu = wpa_sm_uses_spp_amsdu(wpa_s->wpa);
+
 #ifdef CONFIG_P2P
 	if (wpa_s->global->p2p) {
 		u8 *pos;
@@ -866,18 +875,7 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_P2P */
 
 #ifdef CONFIG_FST
-	if (wpa_s->fst_ies) {
-		int fst_ies_len = wpabuf_len(wpa_s->fst_ies);
-
-		if (wpa_s->sme.assoc_req_ie_len + fst_ies_len <=
-		    sizeof(wpa_s->sme.assoc_req_ie)) {
-			os_memcpy(wpa_s->sme.assoc_req_ie +
-				  wpa_s->sme.assoc_req_ie_len,
-				  wpabuf_head(wpa_s->fst_ies),
-				  fst_ies_len);
-			wpa_s->sme.assoc_req_ie_len += fst_ies_len;
-		}
-	}
+	sme_add_assoc_req_ie(wpa_s, wpa_s->fst_ies);
 #endif /* CONFIG_FST */
 
 	sme_auth_handle_rrm(wpa_s, bss);
@@ -920,15 +918,9 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 	}
 
 #ifdef CONFIG_TESTING_OPTIONS
-	if (wpa_s->rsnxe_override_assoc &&
-	    wpabuf_len(wpa_s->rsnxe_override_assoc) <=
-	    sizeof(wpa_s->sme.assoc_req_ie) - wpa_s->sme.assoc_req_ie_len) {
+	if (wpa_s->rsnxe_override_assoc) {
 		wpa_printf(MSG_DEBUG, "TESTING: RSNXE AssocReq override");
-		os_memcpy(wpa_s->sme.assoc_req_ie + wpa_s->sme.assoc_req_ie_len,
-			  wpabuf_head(wpa_s->rsnxe_override_assoc),
-			  wpabuf_len(wpa_s->rsnxe_override_assoc));
-		wpa_s->sme.assoc_req_ie_len +=
-			wpabuf_len(wpa_s->rsnxe_override_assoc);
+		sme_add_assoc_req_ie(wpa_s, wpa_s->rsnxe_override_assoc);
 	} else
 #endif /* CONFIG_TESTING_OPTIONS */
 	if (wpa_s->rsnxe_len > 0 &&
@@ -940,6 +932,22 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		wpa_s->sme.assoc_req_ie_len += wpa_s->rsnxe_len;
 	}
 
+	if (wpa_s->sme.mfp != NO_MGMT_FRAME_PROTECTION &&
+	    wpa_bss_ext_capab(bss, WLAN_EXT_CAPAB_KNOWN_STA_IDENTIFICATION)) {
+		struct wpabuf *e;
+
+		e = wpa_sm_known_sta_identification(
+			wpa_s->wpa,
+			params.mld ? params.ap_mld_addr : bss->bssid,
+			bss->tsf);
+		if (e) {
+			wpa_printf(MSG_DEBUG,
+				   "SME: Add Known STA Identification element");
+			sme_add_assoc_req_ie(wpa_s, e);
+			wpabuf_free(e);
+		}
+	}
+
 #ifdef CONFIG_HS20
 	if (is_hs20_network(wpa_s, ssid, bss)) {
 		struct wpabuf *hs20;
@@ -947,19 +955,11 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		hs20 = wpabuf_alloc(20 + MAX_ROAMING_CONS_OI_LEN);
 		if (hs20) {
 			int pps_mo_id = hs20_get_pps_mo_id(wpa_s, ssid);
-			size_t len;
 
 			wpas_hs20_add_indication(hs20, pps_mo_id,
 						 get_hs20_version(bss));
 			wpas_hs20_add_roam_cons_sel(hs20, ssid);
-			len = sizeof(wpa_s->sme.assoc_req_ie) -
-				wpa_s->sme.assoc_req_ie_len;
-			if (wpabuf_len(hs20) <= len) {
-				os_memcpy(wpa_s->sme.assoc_req_ie +
-					  wpa_s->sme.assoc_req_ie_len,
-					  wpabuf_head(hs20), wpabuf_len(hs20));
-				wpa_s->sme.assoc_req_ie_len += wpabuf_len(hs20);
-			}
+			sme_add_assoc_req_ie(wpa_s, hs20);
 			wpabuf_free(hs20);
 		}
 	}
@@ -985,19 +985,7 @@ static void sme_send_authentication(struct wpa_supplicant *wpa_s,
 		os_free(wpa_ie);
 	}
 
-	if (wpa_s->vendor_elem[VENDOR_ELEM_ASSOC_REQ]) {
-		struct wpabuf *buf = wpa_s->vendor_elem[VENDOR_ELEM_ASSOC_REQ];
-		size_t len;
-
-		len = sizeof(wpa_s->sme.assoc_req_ie) -
-			wpa_s->sme.assoc_req_ie_len;
-		if (wpabuf_len(buf) <= len) {
-			os_memcpy(wpa_s->sme.assoc_req_ie +
-				  wpa_s->sme.assoc_req_ie_len,
-				  wpabuf_head(buf), wpabuf_len(buf));
-			wpa_s->sme.assoc_req_ie_len += wpabuf_len(buf);
-		}
-	}
+	sme_add_assoc_req_ie(wpa_s, wpa_s->vendor_elem[VENDOR_ELEM_ASSOC_REQ]);
 
 #ifdef CONFIG_MBO
 	mbo_ie = wpa_bss_get_vendor_ie(bss, MBO_IE_VENDOR_TYPE);
@@ -1449,7 +1437,7 @@ static int sme_handle_external_auth_start(struct wpa_supplicant *wpa_s,
 		    os_memcmp(ssid_str, ssid->ssid, ssid_str_len) == 0 &&
 		    wpa_key_mgmt_sae(ssid->key_mgmt)) {
 			/* Make sure PT is derived */
-			wpa_s_setup_sae_pt(wpa_s->conf, ssid, false);
+			wpa_s_setup_sae_pt(wpa_s, ssid, false);
 			wpa_s->sme.ext_auth_wpa_ssid = ssid;
 			break;
 		}
@@ -1725,6 +1713,30 @@ static int sme_sae_auth(struct wpa_supplicant *wpa_s, u16 auth_transaction,
 				return -1;
 			}
 			token_len = elen - 1;
+#ifdef CONFIG_IEEE80211BE
+		} else if ((wpa_s->valid_links ||
+			    (external && wpa_s->sme.ext_ml_auth)) &&
+			   token_len > 12 &&
+			   token_pos[token_len - 12] == WLAN_EID_EXTENSION &&
+			   token_pos[token_len - 11] == 10 &&
+			   token_pos[token_len - 10] ==
+			   WLAN_EID_EXT_MULTI_LINK) {
+			/* IEEE P802.11be requires H2E to be used whenever SAE
+			 * is used for ML association. However, some early
+			 * Wi-Fi 7 APs enable MLO without H2E. Recognize this
+			 * special case based on the fixed length Basic
+			 * Multi-Link element being at the end of the data that
+			 * would contain the unknown variable length
+			 * Anti-Clogging Token field. The Basic Multi-Link
+			 * element in Authentication frames include the MLD MAC
+			 * addreess in the Common Info field and all subfields
+			 * of the Presence Bitmap subfield of the Multi-Link
+			 * Control field of the element zero and consequently,
+			 * has a fixed length of 12 octets. */
+			wpa_printf(MSG_DEBUG,
+				   "SME: Detected Basic Multi-Link element at the end of Anti-Clogging Token field");
+			token_len -= 12;
+#endif /* CONFIG_IEEE80211BE */
 		}
 
 		*ie_offset = token_pos + token_len - data;
@@ -2447,6 +2459,12 @@ pfs_fail:
 mscs_fail:
 #endif /* CONFIG_NO_ROBUST_AV */
 
+	wpa_s->sme.assoc_req_ie_len =
+		wpas_populate_wfa_capa(wpa_s, wpa_s->current_bss,
+				       wpa_s->sme.assoc_req_ie,
+				       wpa_s->sme.assoc_req_ie_len,
+				       sizeof(wpa_s->sme.assoc_req_ie));
+
 	if (ssid && ssid->multi_ap_backhaul_sta) {
 		size_t multi_ap_ie_len;
 		struct multi_ap_params multi_ap = { 0 };
@@ -2467,9 +2485,11 @@ mscs_fail:
 		wpa_s->sme.assoc_req_ie_len += multi_ap_ie_len;
 	}
 
+	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_RSN_OVERRIDE_SUPPORT,
+			 wpas_rsn_overriding(wpa_s, ssid));
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_RSN_OVERRIDE,
 			 RSN_OVERRIDE_NOT_USED);
-	if (wpas_rsn_overriding(wpa_s) &&
+	if (wpas_rsn_overriding(wpa_s, ssid) &&
 	    wpas_ap_supports_rsn_overriding(wpa_s, wpa_s->current_bss) &&
 	    wpa_s->sme.assoc_req_ie_len + 2 + 4 <=
 	    sizeof(wpa_s->sme.assoc_req_ie)) {
@@ -2624,6 +2644,7 @@ mscs_fail:
 #endif /* CONFIG_IEEE80211R */
 	params.mode = mode;
 	params.mgmt_frame_protection = wpa_s->sme.mfp;
+	params.spp_amsdu = wpa_s->sme.spp_amsdu;
 	params.rrm_used = wpa_s->rrm.rrm_used;
 	if (wpa_s->sme.prev_bssid_set)
 		params.prev_bssid = wpa_s->sme.prev_bssid;
@@ -2649,10 +2670,6 @@ mscs_fail:
 		params.wpa_proto = WPA_PROTO_WPA;
 		wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, elems.wpa_ie - 2,
 					elems.wpa_ie_len + 2);
-	} else if (elems.osen) {
-		params.wpa_proto = WPA_PROTO_OSEN;
-		wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, elems.osen - 2,
-					elems.osen_len + 2);
 	} else
 		wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, NULL, 0);
 	if (elems.rsnxe)

@@ -114,6 +114,7 @@ void sae_clear_temp_data(struct sae_data *sae)
 	wpabuf_free(tmp->own_rejected_groups);
 	wpabuf_free(tmp->peer_rejected_groups);
 	os_free(tmp->pw_id);
+	os_free(tmp->parsed_pw_id);
 	bin_clear_free(tmp, sizeof(*tmp));
 	sae->tmp = NULL;
 }
@@ -121,12 +122,16 @@ void sae_clear_temp_data(struct sae_data *sae)
 
 void sae_clear_data(struct sae_data *sae)
 {
+	unsigned int no_pw_id;
+
 	if (sae == NULL)
 		return;
 	sae_clear_temp_data(sae);
 	crypto_bignum_deinit(sae->peer_commit_scalar, 0);
 	crypto_bignum_deinit(sae->peer_commit_scalar_accepted, 0);
+	no_pw_id = sae->no_pw_id;
 	os_memset(sae, 0, sizeof(*sae));
+	sae->no_pw_id = no_pw_id;
 }
 
 
@@ -361,8 +366,11 @@ static int sae_derive_pwe_ecc(struct sae_data *sae, const u8 *addr1,
 		const_time_select_bin(found, stub_password, password,
 				      password_len, tmp_password);
 		if (hmac_sha256_vector(addrs, sizeof(addrs), 2,
-				       addr, len, pwd_seed) < 0)
+				       addr, len, pwd_seed) < 0) {
+			wpa_printf(MSG_INFO,
+				   "SAE: hmac_sha256_vector() failed - cannot derive PWE");
 			break;
+		}
 
 		res = sae_test_pwd_seed_ecc(sae, pwd_seed,
 					    prime, qr_bin, qnr_bin, x_cand_bin);
@@ -1093,12 +1101,13 @@ fail:
 }
 
 
-struct sae_pt * sae_derive_pt(int *groups, const u8 *ssid, size_t ssid_len,
+struct sae_pt * sae_derive_pt(const int *groups,
+			      const u8 *ssid, size_t ssid_len,
 			      const u8 *password, size_t password_len,
 			      const char *identifier)
 {
 	struct sae_pt *pt = NULL, *last = NULL, *tmp;
-	int default_groups[] = { 19, 0 };
+	const int default_groups[] = { 19, 0 };
 	int i;
 
 	if (!groups)
@@ -1877,8 +1886,6 @@ static void sae_parse_token_container(struct sae_data *sae,
 				      const u8 *pos, const u8 *end,
 				      const u8 **token, size_t *token_len)
 {
-	wpa_hexdump(MSG_DEBUG, "SAE: Possible elements at the end of the frame",
-		    pos, end - pos);
 	if (!sae_is_token_container_elem(pos, end))
 		return;
 	*token = pos + 3;
@@ -2045,14 +2052,12 @@ static u16 sae_parse_commit_element(struct sae_data *sae, const u8 **pos,
 }
 
 
-static int sae_parse_password_identifier(struct sae_data *sae,
+static int sae_parse_password_identifier(struct sae_data *sae, bool h2e,
 					 const u8 **pos, const u8 *end)
 {
 	const u8 *epos;
 	u8 len;
 
-	wpa_hexdump(MSG_DEBUG, "SAE: Possible elements at the end of the frame",
-		    *pos, end - *pos);
 	if (!sae_is_password_id_elem(*pos, end)) {
 		if (sae->tmp->pw_id) {
 			wpa_printf(MSG_DEBUG,
@@ -2060,8 +2065,8 @@ static int sae_parse_password_identifier(struct sae_data *sae,
 				   sae->tmp->pw_id);
 			return WLAN_STATUS_UNKNOWN_PASSWORD_IDENTIFIER;
 		}
-		os_free(sae->tmp->pw_id);
-		sae->tmp->pw_id = NULL;
+		os_free(sae->tmp->parsed_pw_id);
+		sae->tmp->parsed_pw_id = NULL;
 		return WLAN_STATUS_SUCCESS; /* No Password Identifier */
 	}
 
@@ -2073,6 +2078,18 @@ static int sae_parse_password_identifier(struct sae_data *sae,
 	epos++; /* skip ext ID */
 	len--;
 
+	if (!h2e) {
+		wpa_printf(MSG_DEBUG,
+			   "SAE: Password Identifier included, but H2E is not used");
+		return WLAN_STATUS_UNKNOWN_PASSWORD_IDENTIFIER;
+	}
+
+	if (sae->no_pw_id) {
+		wpa_printf(MSG_DEBUG,
+			   "SAE: Password Identifier included, but none has been enabled");
+		return WLAN_STATUS_UNKNOWN_PASSWORD_IDENTIFIER;
+	}
+
 	if (sae->tmp->pw_id &&
 	    (len != os_strlen(sae->tmp->pw_id) ||
 	     os_memcmp(sae->tmp->pw_id, epos, len) != 0)) {
@@ -2082,14 +2099,14 @@ static int sae_parse_password_identifier(struct sae_data *sae,
 		return WLAN_STATUS_UNKNOWN_PASSWORD_IDENTIFIER;
 	}
 
-	os_free(sae->tmp->pw_id);
-	sae->tmp->pw_id = os_malloc(len + 1);
-	if (!sae->tmp->pw_id)
+	os_free(sae->tmp->parsed_pw_id);
+	sae->tmp->parsed_pw_id = os_malloc(len + 1);
+	if (!sae->tmp->parsed_pw_id)
 		return WLAN_STATUS_UNSPECIFIED_FAILURE;
-	os_memcpy(sae->tmp->pw_id, epos, len);
-	sae->tmp->pw_id[len] = '\0';
+	os_memcpy(sae->tmp->parsed_pw_id, epos, len);
+	sae->tmp->parsed_pw_id[len] = '\0';
 	wpa_hexdump_ascii(MSG_DEBUG, "SAE: Received Password Identifier",
-			  sae->tmp->pw_id, len);
+			  sae->tmp->parsed_pw_id, len);
 	*pos = epos + len;
 	return WLAN_STATUS_SUCCESS;
 }
@@ -2101,8 +2118,6 @@ static int sae_parse_rejected_groups(struct sae_data *sae,
 	const u8 *epos;
 	u8 len;
 
-	wpa_hexdump(MSG_DEBUG, "SAE: Possible elements at the end of the frame",
-		    *pos, end - *pos);
 	if (!sae_is_rejected_groups_elem(*pos, end)) {
 		wpabuf_free(sae->tmp->peer_rejected_groups);
 		sae->tmp->peer_rejected_groups = NULL;
@@ -2141,8 +2156,6 @@ static int sae_parse_akm_suite_selector(struct sae_data *sae,
 	const u8 *epos;
 	u8 len;
 
-	wpa_hexdump(MSG_DEBUG, "SAE: Possible elements at the end of the frame",
-		    *pos, end - *pos);
 	if (!sae_is_akm_suite_selector_elem(*pos, end))
 		return WLAN_STATUS_SUCCESS;
 
@@ -2195,8 +2208,13 @@ u16 sae_parse_commit(struct sae_data *sae, const u8 *data, size_t len,
 	if (ie_offset)
 		*ie_offset = pos - data;
 
+	if (end > pos)
+		wpa_hexdump(MSG_DEBUG,
+			    "SAE: Possible elements at the end of the frame",
+			    pos, end - pos);
+
 	/* Optional Password Identifier element */
-	res = sae_parse_password_identifier(sae, &pos, end);
+	res = sae_parse_password_identifier(sae, h2e, &pos, end);
 	if (res != WLAN_STATUS_SUCCESS)
 		return res;
 

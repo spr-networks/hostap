@@ -97,6 +97,8 @@ struct hapd_interfaces {
 #ifdef CONFIG_IEEE80211BE
 	struct hostapd_mld **mld;
 	size_t mld_count;
+	int (*mld_ctrl_iface_init)(struct hostapd_mld *mld);
+	void (*mld_ctrl_iface_deinit)(struct hostapd_mld *mld);
 #endif /* CONFIG_IEEE80211BE */
 };
 
@@ -495,6 +497,10 @@ struct hostapd_data {
 	/* Cached partner info for ML probe response */
 	struct mld_link_info partner_links[MAX_NUM_MLD_LINKS];
 
+	/* 5 characters for "_link", up to 2 characters for <link ID>, so in
+	 * total, additional 7 characters required. */
+	char ctrl_sock_iface[IFNAMSIZ + 7 + 1];
+
 #ifdef CONFIG_TESTING_OPTIONS
 	u8 eht_mld_link_removal_count;
 #endif /* CONFIG_TESTING_OPTIONS */
@@ -537,6 +543,10 @@ struct hostapd_mld {
 
 	struct hostapd_data *fbss;
 	struct dl_list links; /* List head of all affiliated links */
+
+	int ctrl_sock;
+	struct dl_list ctrl_dst;
+	char *ctrl_interface; /* Directory for UNIX domain sockets */
 };
 
 #define HOSTAPD_MLD_MAX_REF_COUNT      0xFF
@@ -730,6 +740,10 @@ struct hostapd_iface {
 	bool is_no_ir;
 
 	bool is_ch_switch_dfs; /* Channel switch from ACS to DFS */
+
+	struct hostapd_multi_hw_info *multi_hw_info;
+	unsigned int num_multi_hws;
+	struct hostapd_multi_hw_info *current_hw_info;
 };
 
 /* hostapd.c */
@@ -752,6 +766,8 @@ struct hostapd_iface * hostapd_init(struct hapd_interfaces *interfaces,
 struct hostapd_iface *
 hostapd_interface_init_bss(struct hapd_interfaces *interfaces, const char *phy,
 			   const char *config_fname, int debug);
+void hostapd_bss_setup_multi_link(struct hostapd_data *hapd,
+				  struct hapd_interfaces *interfaces);
 void hostapd_new_assoc_sta(struct hostapd_data *hapd, struct sta_info *sta,
 			   int reassoc);
 void hostapd_interface_deinit_free(struct hostapd_iface *iface);
@@ -773,7 +789,7 @@ void hostapd_chan_switch_config(struct hostapd_data *hapd,
 int hostapd_switch_channel(struct hostapd_data *hapd,
 			   struct csa_settings *settings);
 int hostapd_force_channel_switch(struct hostapd_iface *iface,
-				 struct csa_settings settings);
+				 struct csa_settings *settings);
 void
 hostapd_switch_channel_fallback(struct hostapd_iface *iface,
 				const struct hostapd_freq_params *freq_params);
@@ -843,8 +859,11 @@ bool hostapd_is_ml_partner(struct hostapd_data *hapd1,
 u8 hostapd_get_mld_id(struct hostapd_data *hapd);
 int hostapd_mld_add_link(struct hostapd_data *hapd);
 int hostapd_mld_remove_link(struct hostapd_data *hapd);
+u8 hostapd_get_active_links(struct hostapd_data *hapd);
 struct hostapd_data * hostapd_mld_get_first_bss(struct hostapd_data *hapd);
 
+int hostapd_build_beacon_data(struct hostapd_data *hapd,
+			      struct beacon_data *beacon);
 void free_beacon_data(struct beacon_data *beacon);
 int hostapd_fill_cca_settings(struct hostapd_data *hapd,
 			      struct cca_settings *settings);
@@ -852,6 +871,7 @@ int hostapd_fill_cca_settings(struct hostapd_data *hapd,
 #ifdef CONFIG_IEEE80211BE
 
 bool hostapd_mld_is_first_bss(struct hostapd_data *hapd);
+void hostapd_mld_interface_freed(struct hostapd_data *hapd);
 
 #define for_each_mld_link(partner, self) \
 	dl_list_for_each(partner, &self->mld->links, struct hostapd_data, link)
@@ -869,5 +889,12 @@ static inline bool hostapd_mld_is_first_bss(struct hostapd_data *hapd)
 #endif /* CONFIG_IEEE80211BE */
 
 u16 hostapd_get_punct_bitmap(struct hostapd_data *hapd);
+
+static inline bool ap_pmf_enabled(struct hostapd_bss_config *conf)
+{
+	return conf->ieee80211w != NO_MGMT_FRAME_PROTECTION ||
+		conf->rsn_override_mfp != NO_MGMT_FRAME_PROTECTION ||
+		conf->rsn_override_mfp_2 != NO_MGMT_FRAME_PROTECTION;
+}
 
 #endif /* HOSTAPD_H */

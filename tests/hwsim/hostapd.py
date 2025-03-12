@@ -165,12 +165,14 @@ class HostapdGlobal:
 
 class Hostapd:
     def __init__(self, ifname, bssidx=0, hostname=None, ctrl=hapd_ctrl,
-                 port=8877, remote_cli=False):
+                 port=8877, remote_cli=False, link=None):
         self.hostname = hostname
         self.host = remotehost.Host(hostname, ifname)
         self.ifname = ifname
         self.remote_cli = remote_cli
         if hostname is None:
+            if link is not None:
+                ifname = ifname + "_link" + str(link)
             self.ctrl = wpaspy.Ctrl(os.path.join(ctrl, ifname))
             self.mon = wpaspy.Ctrl(os.path.join(ctrl, ifname))
             self.dbg = ifname
@@ -694,7 +696,7 @@ def add_ap(apdev, params, wait_enabled=True, no_enable=False, timeout=30,
         fields = ["ssid", "wpa_passphrase", "nas_identifier", "wpa_key_mgmt",
                   "wpa", "wpa_deny_ptk0_rekey",
                   "wpa_pairwise", "rsn_pairwise", "auth_server_addr",
-                  "acct_server_addr", "osu_server_uri"]
+                  "acct_server_addr"]
         for field in fields:
             if field in params:
                 hapd.set(field, params[field])
@@ -767,7 +769,7 @@ def add_iface(apdev, confname):
         raise Exception("Could not ping hostapd")
     return hapd
 
-def add_mld_link(apdev, params):
+def add_mld_link(apdev, link_id, params):
     if isinstance(apdev, dict):
         ifname = apdev['ifname']
         try:
@@ -793,7 +795,8 @@ def add_mld_link(apdev, params):
         if str(e) == "Could not add hostapd link":
             raise utils.HwsimSkip("No MLO support in hostapd")
     port = hapd_global.get_ctrl_iface_port(ifname)
-    hapd = Hostapd(ifname, hostname=hostname, ctrl=ctrl_iface, port=port)
+    hapd = Hostapd(ifname, hostname=hostname, ctrl=ctrl_iface, port=port,
+                   link=link_id)
     if not hapd.ping():
         raise Exception("Could not ping hostapd")
     return hapd
@@ -1066,9 +1069,6 @@ def cfg_mld_link_file(ifname, params):
 
     fd, fname = tempfile.mkstemp(dir='/tmp', prefix=conf + '-')
     f = os.fdopen(fd, 'w')
-
-    if idx != 0:
-        ctrl_iface="/var/run/hostapd_%d" % idx
 
     f.write("ctrl_interface=%s\n" % ctrl_iface)
     f.write("driver=nl80211\n")

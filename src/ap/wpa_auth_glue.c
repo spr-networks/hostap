@@ -35,7 +35,8 @@
 #include "wpa_auth_glue.h"
 
 
-static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
+static void hostapd_wpa_auth_conf(struct hostapd_iface *iface,
+				  struct hostapd_bss_config *conf,
 				  struct hostapd_config *iconf,
 				  struct wpa_auth_config *wconf)
 {
@@ -109,17 +110,6 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 #endif /* CONFIG_IEEE80211R_AP */
 #ifdef CONFIG_HS20
 	wconf->disable_gtk = conf->disable_dgaf;
-	if (conf->osen) {
-		wconf->disable_gtk = 1;
-		wconf->wpa = WPA_PROTO_OSEN;
-		wconf->wpa_key_mgmt = WPA_KEY_MGMT_OSEN;
-		wconf->wpa_pairwise = 0;
-		wconf->wpa_group = WPA_CIPHER_CCMP;
-		wconf->rsn_pairwise = WPA_CIPHER_CCMP;
-		wconf->rsn_preauth = 0;
-		wconf->disable_pmksa_caching = 1;
-		wconf->ieee80211w = 1;
-	}
 #endif /* CONFIG_HS20 */
 #ifdef CONFIG_TESTING_OPTIONS
 	wconf->corrupt_gtk_rekey_mic_probability =
@@ -277,6 +267,8 @@ static void hostapd_wpa_auth_conf(struct hostapd_bss_config *conf,
 		conf->no_disconnect_on_group_keyerror;
 
 	wconf->rsn_override_omit_rsnxe = conf->rsn_override_omit_rsnxe;
+	wconf->spp_amsdu = conf->spp_amsdu &&
+		(iface->drv_flags2 & WPA_DRIVER_FLAGS2_SPP_AMSDU);
 }
 
 
@@ -509,6 +501,7 @@ static int hostapd_wpa_auth_set_key(void *ctx, int vlan_id, enum wpa_alg alg,
 {
 	struct hostapd_data *hapd = ctx;
 	const char *ifname = hapd->conf->iface;
+	int set_tx = !(key_flag & KEY_FLAG_NEXT);
 
 	if (vlan_id > 0) {
 		ifname = hostapd_get_vlan_id_ifname(hapd->conf->vlan, vlan_id);
@@ -561,8 +554,8 @@ static int hostapd_wpa_auth_set_key(void *ctx, int vlan_id, enum wpa_alg alg,
 		hapd->last_gtk_len = key_len;
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
-	return hostapd_drv_set_key(ifname, hapd, alg, addr, idx, vlan_id, 1,
-				   NULL, 0, key, key_len, key_flag);
+	return hostapd_drv_set_key(ifname, hapd, alg, addr, idx, vlan_id,
+				   set_tx, NULL, 0, key, key_len, key_flag);
 }
 
 
@@ -1587,7 +1580,8 @@ static int hostapd_set_ltf_keyseed(void *ctx, const u8 *peer_addr,
 #ifdef CONFIG_IEEE80211BE
 
 static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
-					    struct wpa_auth_ml_key_info *info)
+					    struct wpa_auth_ml_key_info *info,
+					    bool rekey)
 {
 	struct hostapd_data *hapd = ctx;
 	unsigned int i;
@@ -1611,7 +1605,8 @@ static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
 			wpa_auth_ml_get_key_info(hapd->wpa_auth,
 						 &info->links[i],
 						 info->mgmt_frame_prot,
-						 info->beacon_prot);
+						 info->beacon_prot,
+						 rekey);
 			continue;
 		}
 
@@ -1622,7 +1617,8 @@ static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
 			wpa_auth_ml_get_key_info(bss->wpa_auth,
 						 &info->links[i],
 						 info->mgmt_frame_prot,
-						 info->beacon_prot);
+						 info->beacon_prot,
+						 rekey);
 			link_bss_found = true;
 			break;
 		}
@@ -1633,6 +1629,21 @@ static int hostapd_wpa_auth_get_ml_key_info(void *ctx,
 	}
 
 	return 0;
+}
+
+
+static struct wpa_authenticator * hostapd_next_primary_auth(void *cb_ctx)
+{
+	struct hostapd_data *hapd = cb_ctx, *bss;
+
+	for_each_mld_link(bss, hapd) {
+		if (bss == hapd)
+			continue;
+		if (bss->wpa_auth)
+			return bss->wpa_auth;
+	}
+
+	return NULL;
 }
 
 #endif /* CONFIG_IEEE80211BE */
@@ -1704,6 +1715,7 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 #endif /* CONFIG_PASN */
 #ifdef CONFIG_IEEE80211BE
 		.get_ml_key_info = hostapd_wpa_auth_get_ml_key_info,
+		.next_primary_auth = hostapd_next_primary_auth,
 #endif /* CONFIG_IEEE80211BE */
 		.get_drv_flags = hostapd_wpa_auth_get_drv_flags,
 	};
@@ -1711,7 +1723,7 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 	size_t wpa_ie_len;
 	struct hostapd_data *tx_bss;
 
-	hostapd_wpa_auth_conf(hapd->conf, hapd->iconf, &_conf);
+	hostapd_wpa_auth_conf(hapd->iface, hapd->conf, hapd->iconf, &_conf);
 	_conf.msg_ctx = hapd->msg_ctx;
 	tx_bss = hostapd_mbssid_get_tx_bss(hapd);
 	if (tx_bss != hapd)
@@ -1837,7 +1849,9 @@ int hostapd_setup_wpa(struct hostapd_data *hapd)
 void hostapd_reconfig_wpa(struct hostapd_data *hapd)
 {
 	struct wpa_auth_config wpa_auth_conf;
-	hostapd_wpa_auth_conf(hapd->conf, hapd->iconf, &wpa_auth_conf);
+
+	hostapd_wpa_auth_conf(hapd->iface, hapd->conf, hapd->iconf,
+			      &wpa_auth_conf);
 	wpa_reconfig(hapd->wpa_auth, &wpa_auth_conf);
 }
 

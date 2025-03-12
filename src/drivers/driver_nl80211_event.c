@@ -186,6 +186,9 @@ static const char * nl80211_command_to_string(enum nl80211_commands cmd)
 	C2S(NL80211_CMD_REMOVE_LINK_STA)
 	C2S(NL80211_CMD_SET_HW_TIMESTAMP)
 	C2S(NL80211_CMD_LINKS_REMOVED)
+	C2S(NL80211_CMD_SET_TID_TO_LINK_MAPPING)
+	C2S(NL80211_CMD_ASSOC_MLO_RECONF)
+	C2S(NL80211_CMD_EPCS_CFG)
 	C2S(__NL80211_CMD_AFTER_LAST)
 	}
 #undef C2S
@@ -1204,9 +1207,6 @@ static void mlme_event_ch_switch(struct wpa_driver_nl80211_data *drv,
 	int chan_offset = 0;
 	int ifidx;
 
-	wpa_printf(MSG_DEBUG, "nl80211: Channel switch%s event",
-		   finished ? "" : " started");
-
 	if (!freq)
 		return;
 
@@ -1217,6 +1217,9 @@ static void mlme_event_ch_switch(struct wpa_driver_nl80211_data *drv,
 			   ifidx);
 		return;
 	}
+
+	wpa_printf(MSG_DEBUG, "nl80211: Channel switch%s event for %s",
+		   finished ? "" : " started", bss->ifname);
 
 	if (type) {
 		enum nl80211_channel_type ch_type = nla_get_u32(type);
@@ -1249,6 +1252,8 @@ static void mlme_event_ch_switch(struct wpa_driver_nl80211_data *drv,
 
 	os_memset(&data, 0, sizeof(data));
 	data.ch_switch.freq = nla_get_u32(freq);
+	if (is_6ghz_freq(data.ch_switch.freq))
+		ht_enabled = 0;
 	data.ch_switch.ht_enabled = ht_enabled;
 	data.ch_switch.ch_offset = chan_offset;
 	if (punct_bitmap)
@@ -1260,10 +1265,13 @@ static void mlme_event_ch_switch(struct wpa_driver_nl80211_data *drv,
 	if (cf2)
 		data.ch_switch.cf2 = nla_get_u32(cf2);
 
-	if (link)
+	if (link) {
 		data.ch_switch.link_id = nla_get_u8(link);
-	else
+		wpa_printf(MSG_DEBUG, "nl80211: Link ID: %d",
+			   data.ch_switch.link_id);
+	} else {
 		data.ch_switch.link_id = NL80211_DRV_LINK_ID_NA;
+	}
 
 	if (finished) {
 		if (data.ch_switch.link_id != NL80211_DRV_LINK_ID_NA) {
@@ -1298,6 +1306,14 @@ static void mlme_event_ch_switch(struct wpa_driver_nl80211_data *drv,
 
 		if (link_id != drv->sta_mlo_info.assoc_link_id)
 			return;
+	}
+
+	if (link && is_ap_interface(drv->nlmode) &&
+	    !nl80211_link_valid(bss->valid_links, data.ch_switch.link_id)) {
+		wpa_printf(MSG_WARNING,
+			   "nl80211: Unknown link ID (%d) for channel switch (%s), ignoring",
+			   data.ch_switch.link_id, bss->ifname);
+		return;
 	}
 
 	drv->assoc_freq = data.ch_switch.freq;
@@ -1707,7 +1723,7 @@ static void mlme_event(struct i802_bss *bss,
 	}
 
 	if (cmd == NL80211_CMD_FRAME && stype == WLAN_FC_STYPE_AUTH &&
-	    auth_type == host_to_le16(WLAN_AUTH_PASN)) {
+	    auth_type == WLAN_AUTH_PASN) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: %s: Allow PASN frame for foreign address",
 			   bss->ifname);
@@ -2431,10 +2447,33 @@ static void nl80211_tdls_oper_event(struct wpa_driver_nl80211_data *drv,
 }
 
 
-static void nl80211_stop_ap(struct wpa_driver_nl80211_data *drv,
-			    struct nlattr **tb)
+static void nl80211_stop_ap(struct i802_bss *bss, struct nlattr **tb)
 {
-	wpa_supplicant_event(drv->ctx, EVENT_INTERFACE_UNAVAILABLE, NULL);
+	struct i802_link *mld_link = NULL;
+	void *ctx = bss->ctx;
+	int link_id = -1;
+
+	if (tb[NL80211_ATTR_MLO_LINK_ID]) {
+		link_id = nla_get_u8(tb[NL80211_ATTR_MLO_LINK_ID]);
+		if (!nl80211_link_valid(bss->valid_links, link_id)) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Ignoring STOP_AP event for invalid link ID %d (valid: 0x%04x)",
+				   link_id, bss->valid_links);
+			return;
+		}
+
+		mld_link = nl80211_get_link(bss, link_id);
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: STOP_AP event on link %d", link_id);
+		ctx = mld_link->ctx;
+
+		/* The driver would have already deleted the link and this call
+		 * will return an error. Ignore that since nl80211_remove_link()
+		 * is called here only to update the bss->links[] state. */
+		nl80211_remove_link(bss, link_id);
+	}
+
+	wpa_supplicant_event(ctx, EVENT_INTERFACE_UNAVAILABLE, NULL);
 }
 
 
@@ -2475,28 +2514,61 @@ static void nl80211_connect_failed_event(struct wpa_driver_nl80211_data *drv,
 }
 
 
-static void nl80211_radar_event(struct wpa_driver_nl80211_data *drv,
-				struct nlattr **tb)
+static void nl80211_process_radar_event(struct i802_bss *bss,
+					union wpa_event_data *data,
+					enum nl80211_radar_event event_type)
 {
+	wpa_printf(MSG_DEBUG,
+		   "nl80211: DFS event on freq %d MHz, ht: %d, offset: %d, width: %d, cf1: %dMHz, cf2: %dMHz, link_id=%d",
+		   data->dfs_event.freq, data->dfs_event.ht_enabled,
+		   data->dfs_event.chan_offset, data->dfs_event.chan_width,
+		   data->dfs_event.cf1, data->dfs_event.cf2,
+		   data->dfs_event.link_id);
+
+	switch (event_type) {
+	case NL80211_RADAR_DETECTED:
+		wpa_supplicant_event(bss->ctx, EVENT_DFS_RADAR_DETECTED, data);
+		break;
+	case NL80211_RADAR_CAC_FINISHED:
+		wpa_supplicant_event(bss->ctx, EVENT_DFS_CAC_FINISHED, data);
+		break;
+	case NL80211_RADAR_CAC_ABORTED:
+		wpa_supplicant_event(bss->ctx, EVENT_DFS_CAC_ABORTED, data);
+		break;
+	case NL80211_RADAR_NOP_FINISHED:
+		wpa_supplicant_event(bss->ctx, EVENT_DFS_NOP_FINISHED, data);
+		break;
+	case NL80211_RADAR_PRE_CAC_EXPIRED:
+		wpa_supplicant_event(bss->ctx, EVENT_DFS_PRE_CAC_EXPIRED,
+				     data);
+		break;
+	case NL80211_RADAR_CAC_STARTED:
+		wpa_supplicant_event(bss->ctx, EVENT_DFS_CAC_STARTED, data);
+		break;
+	default:
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Unknown radar event %d received",
+			   event_type);
+		break;
+	}
+}
+
+
+static void nl80211_radar_event(struct i802_bss *bss, struct nlattr **tb)
+{
+	struct wpa_driver_nl80211_data *drv = bss->drv;
 	union wpa_event_data data;
 	enum nl80211_radar_event event_type;
+	struct i802_bss *bss_iter;
+	int i;
+	bool hit = false;
 
 	if (!tb[NL80211_ATTR_WIPHY_FREQ] || !tb[NL80211_ATTR_RADAR_EVENT])
 		return;
 
 	os_memset(&data, 0, sizeof(data));
-	data.dfs_event.link_id = NL80211_DRV_LINK_ID_NA;
 	data.dfs_event.freq = nla_get_u32(tb[NL80211_ATTR_WIPHY_FREQ]);
 	event_type = nla_get_u32(tb[NL80211_ATTR_RADAR_EVENT]);
-
-	if (tb[NL80211_ATTR_MLO_LINK_ID]) {
-		data.dfs_event.link_id =
-			nla_get_u8(tb[NL80211_ATTR_MLO_LINK_ID]);
-	} else if (data.dfs_event.freq) {
-		data.dfs_event.link_id =
-			nl80211_get_link_id_by_freq(drv->first_bss,
-						    data.dfs_event.freq);
-	}
 
 	/* Check HT params */
 	if (tb[NL80211_ATTR_WIPHY_CHANNEL_TYPE]) {
@@ -2529,37 +2601,62 @@ static void nl80211_radar_event(struct wpa_driver_nl80211_data *drv,
 		data.dfs_event.cf2 = nla_get_u32(tb[NL80211_ATTR_CENTER_FREQ2]);
 
 	wpa_printf(MSG_DEBUG,
-		   "nl80211: DFS event on freq %d MHz, ht: %d, offset: %d, width: %d, cf1: %dMHz, cf2: %dMHz, link_id=%d",
-		   data.dfs_event.freq, data.dfs_event.ht_enabled,
-		   data.dfs_event.chan_offset, data.dfs_event.chan_width,
-		   data.dfs_event.cf1, data.dfs_event.cf2,
-		   data.dfs_event.link_id);
+		   "nl80211: Checking suitable BSS for the DFS event");
 
-	switch (event_type) {
-	case NL80211_RADAR_DETECTED:
-		wpa_supplicant_event(drv->ctx, EVENT_DFS_RADAR_DETECTED, &data);
-		break;
-	case NL80211_RADAR_CAC_FINISHED:
-		wpa_supplicant_event(drv->ctx, EVENT_DFS_CAC_FINISHED, &data);
-		break;
-	case NL80211_RADAR_CAC_ABORTED:
-		wpa_supplicant_event(drv->ctx, EVENT_DFS_CAC_ABORTED, &data);
-		break;
-	case NL80211_RADAR_NOP_FINISHED:
-		wpa_supplicant_event(drv->ctx, EVENT_DFS_NOP_FINISHED, &data);
-		break;
-	case NL80211_RADAR_PRE_CAC_EXPIRED:
-		wpa_supplicant_event(drv->ctx, EVENT_DFS_PRE_CAC_EXPIRED,
-				     &data);
-		break;
-	case NL80211_RADAR_CAC_STARTED:
-		wpa_supplicant_event(drv->ctx, EVENT_DFS_CAC_STARTED, &data);
-		break;
-	default:
-		wpa_printf(MSG_DEBUG, "nl80211: Unknown radar event %d "
-			   "received", event_type);
-		break;
+	/* It is possible to have the event without ifidx and wdev_id, e.g.,
+	 * with NL80211_RADAR_NOP_FINISHED and NL80211_RADAR_PRE_CAC_EXPIRED.
+	 * Hence need to check on all BSSs. */
+	for (bss_iter = drv->first_bss; bss_iter; bss_iter = bss_iter->next) {
+		/* Find a link match based on the frequency. If
+		 * NL80211_DRV_LINK_ID_NA is returned, either a match was not
+		 * found or the BSS could be operating as a non-MLO. */
+		data.dfs_event.link_id = nl80211_get_link_id_by_freq(
+			bss_iter, data.dfs_event.freq);
+		/* If a link match is found, exit the loop after the handler is
+		 * called */
+		if (data.dfs_event.link_id != NL80211_DRV_LINK_ID_NA)
+			return nl80211_process_radar_event(bss_iter, &data,
+							   event_type);
+		if (data.dfs_event.link_id == NL80211_DRV_LINK_ID_NA) {
+			/* For non-MLO operation, frequency should still match
+			 */
+			if (!bss_iter->valid_links &&
+			    bss_iter->links[0].freq == data.dfs_event.freq)
+				return nl80211_process_radar_event(
+					bss_iter, &data, event_type);
+		}
+
+		/* For event like NL80211_RADAR_NOP_FINISHED, frequency
+		 * information will not match exactly the link frequency. Hence,
+		 * if the link frequency is 5 GHz, pass the event to it.
+		 */
+		for_each_link_default(bss_iter->valid_links, i, 0) {
+			if (bss_iter->links[i].freq < 5180 ||
+			    bss_iter->links[i].freq > 5900)
+				continue;
+
+			data.dfs_event.link_id = bss_iter->valid_links ?
+				i : NL80211_DRV_LINK_ID_NA;
+
+			/* Cannot just return after one match since if split
+			 * hardware is participating in MLO, possibly the event
+			 * is for 5 GHz upper band and this iteration has picked
+			 * a 5 GHz low band link, but 5 GHz freq check will be
+			 * true for both. Hence, iterate on all possible links.
+			 * The handler should take care whether the event is
+			 * actually for it. */
+			nl80211_process_radar_event(bss_iter, &data,
+						    event_type);
+
+			hit = true;
+		}
 	}
+
+	if (hit)
+		return;
+
+	wpa_printf(MSG_DEBUG, "nl80211: DFS event on unknown freq on %s",
+		   bss->ifname);
 }
 
 
@@ -4085,10 +4182,10 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 		mlme_event_ft_event(drv, tb);
 		break;
 	case NL80211_CMD_RADAR_DETECT:
-		nl80211_radar_event(drv, tb);
+		nl80211_radar_event(bss, tb);
 		break;
 	case NL80211_CMD_STOP_AP:
-		nl80211_stop_ap(drv, tb);
+		nl80211_stop_ap(bss, tb);
 		break;
 	case NL80211_CMD_VENDOR:
 		nl80211_vendor_event(drv, tb);
@@ -4222,7 +4319,16 @@ int process_global_event(struct nl_msg *msg, void *arg)
 			     wdev_id == bss->wdev_id)) {
 				processed = true;
 				do_process_drv_event(bss, gnlh->cmd, tb);
-				if (!wiphy_idx_set)
+				/* There are two types of events that may need
+				 * to be delivered to multiple interfaces:
+				 * 1. Events for a wiphy, as it can have
+				 * multiple interfaces.
+				 * 2. "Global" events, like
+				 * NL80211_CMD_REG_CHANGE.
+				 *
+				 * Terminate early only if the event is directed
+				 * to a specific interface or wdev. */
+				if (ifidx != -1 || wdev_id_set)
 					return NL_SKIP;
 				/* The driver instance could have been removed,
 				 * e.g., due to NL80211_CMD_RADAR_DETECT event,

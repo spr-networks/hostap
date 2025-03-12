@@ -2639,6 +2639,7 @@ def find_wpas_process(dev):
 
 def read_process_memory(pid, key=None):
     buf = []
+    buflen = 0
     logger.info("Reading process memory (pid=%d)" % pid)
     with open('/proc/%d/maps' % pid, 'r') as maps, \
          open('/proc/%d/mem' % pid, 'rb') as mem:
@@ -2657,7 +2658,7 @@ def read_process_memory(pid, key=None):
                 continue
             for name in ["[heap]", "[stack]"]:
                 if name in l:
-                    logger.info("%s 0x%x-0x%x is at %d-%d" % (name, start, end, len(buf), len(buf) + (end - start)))
+                    logger.info("%s 0x%x-0x%x is at %d-%d" % (name, start, end, buflen, buflen + (end - start)))
 
             if end - start >= 256 * 1024 * 1024:
                 logger.info("Large memory block of >= 256MiB, assuming ASAN shadow memory")
@@ -2670,9 +2671,10 @@ def read_process_memory(pid, key=None):
                 logger.info("Could not read mem: start=%d end=%d: %s" % (start, end, str(e)))
                 continue
             buf.append(data)
+            buflen += len(data)
             if key and key in data:
                 logger.info("Key found in " + l)
-    logger.info("Total process memory read: %d bytes" % len(buf))
+    logger.info("Total process memory read: %d bytes" % buflen)
     return b''.join(buf)
 
 def verify_not_present(buf, key, fname, keyname):
@@ -3723,7 +3725,8 @@ def test_ap_wpa2_psk_4addr(dev, apdev):
         subprocess.check_call(['ip', 'link', 'set', 'dev', br_ifname, 'up'])
         subprocess.check_call(['brctl', 'addif', br_ifname, ifname])
         cmd = subprocess.Popen(['brctl', 'show'], stdout=subprocess.PIPE)
-        res = cmd.stdout.read().decode()
+        out, err = cmd.communicate()
+        res = out.decode()
     finally:
         subprocess.call(['brctl', 'delif', br_ifname, ifname])
         subprocess.call(['ip', 'link', 'set', 'dev', br_ifname, 'down'])
@@ -3849,3 +3852,14 @@ def test_rsn_eapol_m4_encrypt(dev, apdev):
     dev[0].set("encrypt_eapol_m4", "1")
     dev[0].connect(ssid, psk=passphrase, scan_freq="2412")
     hapd.wait_sta()
+
+def test_ap_wpa2_psk_tkip_only_as_group(dev, apdev):
+    """WPA2-PSK AP and TKIP as a group cipher, but not pairwise"""
+    skip_without_tkip(dev[0])
+    params = {"ssid": "wpapsk", "wpa": "2", "wpa_key_mgmt": "WPA-PSK",
+              "rsn_pairwise": "CCMP", "group_cipher": "TKIP",
+              "wpa_passphrase": "1234567890"}
+    hapd = hostapd.add_ap(apdev[0], params)
+    dev[0].connect("wpapsk", psk="1234567890", scan_freq="2412")
+    hapd.wait_sta()
+    hwsim_utils.test_connectivity(dev[0], hapd)

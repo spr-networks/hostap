@@ -475,6 +475,10 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 
 #ifdef CONFIG_IEEE80211BE
 	if (sta->mld_info.mld_sta) {
+		u16 mld_sta_capa = sta->mld_info.common_info.mld_capa;
+		u8 max_simul_links = mld_sta_capa &
+			EHT_ML_MLD_CAPA_MAX_NUM_SIM_LINKS_MASK;
+
 		for (i = 0; i < MAX_NUM_MLD_LINKS; ++i) {
 			if (!sta->mld_info.links[i].valid)
 				continue;
@@ -485,6 +489,11 @@ static int hostapd_ctrl_iface_sta_mib(struct hostapd_data *hapd,
 			if (!os_snprintf_error(buflen - len, ret))
 				len += ret;
 		}
+
+		ret = os_snprintf(buf + len, buflen - len,
+				  "max_simul_links=%d\n", max_simul_links);
+		if (!os_snprintf_error(buflen - len, ret))
+			len += ret;
 	}
 #endif /* CONFIG_IEEE80211BE */
 
@@ -917,6 +926,15 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 			len += ret;
 		}
 
+		if (hapd->iconf->punct_bitmap) {
+			ret = os_snprintf(buf + len, buflen - len,
+					  "punct_bitmap=0x%x\n",
+					  hapd->iconf->punct_bitmap);
+			if (os_snprintf_error(buflen - len, ret))
+				return len;
+			len += ret;
+		}
+
 		if (hapd->conf->mld_ap) {
 			struct hostapd_data *link_bss;
 
@@ -951,6 +969,15 @@ int hostapd_ctrl_iface_status(struct hostapd_data *hapd, char *buf,
 					return len;
 				len += ret;
 			}
+
+			ret = os_snprintf(buf + len, buflen - len,
+					  "ap_mld_type=%s\n",
+					  (hapd->iface->mld_mld_capa &
+					   EHT_ML_MLD_CAPA_AP_MLD_TYPE_IND_MASK)
+					  ? "NSTR" : "STR");
+			if (os_snprintf_error(buflen - len, ret))
+				return len;
+			len += ret;
 		}
 	}
 #endif /* CONFIG_IEEE80211BE */
@@ -1127,27 +1154,18 @@ int hostapd_parse_csa_settings(const char *pos,
 		} \
 	} while (0)
 
-#define SET_CSA_SETTING_EXT(str) \
-	do { \
-		const char *pos2 = os_strstr(pos, " " #str "="); \
-		if (pos2) { \
-			pos2 += sizeof(" " #str "=") - 1; \
-			settings->str = atoi(pos2); \
-		} \
-	} while (0)
-
 	SET_CSA_SETTING(center_freq1);
 	SET_CSA_SETTING(center_freq2);
 	SET_CSA_SETTING(bandwidth);
 	SET_CSA_SETTING(sec_channel_offset);
-	SET_CSA_SETTING_EXT(punct_bitmap);
+	SET_CSA_SETTING(punct_bitmap);
 	settings->freq_params.ht_enabled = !!os_strstr(pos, " ht");
 	settings->freq_params.vht_enabled = !!os_strstr(pos, " vht");
-	settings->freq_params.he_enabled = !!os_strstr(pos, " he");
 	settings->freq_params.eht_enabled = !!os_strstr(pos, " eht");
+	settings->freq_params.he_enabled = !!os_strstr(pos, " he") ||
+		settings->freq_params.eht_enabled;
 	settings->block_tx = !!os_strstr(pos, " blocktx");
 #undef SET_CSA_SETTING
-#undef SET_CSA_SETTING_EXT
 
 	return 0;
 }
@@ -1180,6 +1198,7 @@ int hostapd_ctrl_iface_pmksa_add(struct hostapd_data *hapd, char *cmd)
 	size_t pmk_len;
 	char *pos, *pos2;
 	int akmp = 0, expiration = 0;
+	int ret;
 
 	/*
 	 * Entry format:
@@ -1215,8 +1234,18 @@ int hostapd_ctrl_iface_pmksa_add(struct hostapd_data *hapd, char *cmd)
 	if (sscanf(pos, "%d %d", &expiration, &akmp) != 2)
 		return -1;
 
-	return wpa_auth_pmksa_add2(hapd->wpa_auth, spa, pmk, pmk_len,
-				   pmkid, expiration, akmp, NULL);
+	ret = wpa_auth_pmksa_add2(hapd->wpa_auth, spa, pmk, pmk_len,
+				  pmkid, expiration, akmp, NULL, false);
+	if (ret)
+		return ret;
+
+#ifdef CONFIG_IEEE80211BE
+	if (hapd->conf->mld_ap)
+		ret = wpa_auth_pmksa_add2(hapd->wpa_auth, spa, pmk, pmk_len,
+					  pmkid, expiration, akmp, NULL, true);
+#endif /* CONFIG_IEEE80211BE */
+
+	return ret;
 }
 
 
