@@ -148,7 +148,7 @@ int wpas_wps_eapol_cb(struct wpa_supplicant *wpa_s)
 
 		wpa_printf(MSG_DEBUG, "WPS: Checking whether fast association "
 			   "without a new scan can be used");
-		bss = wpa_supplicant_pick_network(wpa_s, &ssid);
+		bss = wpa_supplicant_pick_network(wpa_s, &ssid, true);
 		if (bss) {
 			struct wpabuf *wps;
 			struct wps_parse_attr attr;
@@ -1709,6 +1709,7 @@ void wpas_wps_deinit(struct wpa_supplicant *wpa_s)
 #endif /* CONFIG_WPS_ER */
 
 	wps_registrar_deinit(wpa_s->wps->registrar);
+	dh5_free(wpa_s->wps->dh_ctx);
 	wpabuf_free(wpa_s->wps->dh_pubkey);
 	wpabuf_free(wpa_s->wps->dh_privkey);
 	wpabuf_free(wpa_s->wps->dev.vendor_ext_m1);

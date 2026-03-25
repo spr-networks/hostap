@@ -1883,20 +1883,21 @@ def test_radius_tls_freeradius(dev, apdev, test_params):
             if pid > 0:
                 os.kill(pid, signal.SIGTERM)
 
-def foo():
-    params['auth_server_addr'] = "127.0.0.1"
-    params['auth_server_port'] = "2083"
-    params['auth_server_type'] = "TLS"
-    params['auth_server_shared_secret'] = "radsec"
-    params['auth_server_ca_cert'] = certdir + "/ca.pem"
-    params['auth_server_client_cert'] = certdir + "/client.pem"
-    params['auth_server_private_key'] = certdir + "/client.key"
-    params['auth_server_private_key_passwd'] = "whatever"
-    params['acct_server_addr'] = "127.0.0.1"
-    params['acct_server_port'] = "2083"
-    params['acct_server_type'] = "TLS"
-    params['acct_server_shared_secret'] = "radsec"
-    params['acct_server_ca_cert'] = certdir + "/ca.pem"
-    params['acct_server_client_cert'] = certdir + "/client.pem"
-    params['acct_server_private_key'] = certdir + "/client.key"
-    params['acct_server_private_key_passwd'] = "whatever"
+def test_radius_eapol_test(dev, apdev, test_params):
+    """RADIUS testing with eapol_test"""
+    et_path = "../../wpa_supplicant/eapol_test"
+    if not os.path.exists(et_path):
+        raise HwsimSkip("eapol_test not available")
+
+    config = test_params['prefix'] + ".eapol_test.conf"
+    with open(config, "w") as f:
+        f.write("network={\n")
+        f.write("eap=PWD\n")
+        f.write('identity="pwd user"\n')
+        f.write('password="secret password"\n')
+        f.write("}\n")
+
+    res = subprocess.check_output([et_path, '-c', config])
+    logger.debug("eapol_test: " + res.decode().strip())
+    if "SUCCESS" not in res.decode().splitlines():
+        raise Exception("eapol_test did not report success")

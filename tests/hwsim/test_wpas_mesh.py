@@ -490,13 +490,15 @@ def test_mesh_secure_ocv_mix_legacy(dev, apdev):
 
 def run_mesh_secure_ocv_mix_legacy(dev, apdev):
     check_mesh_support(dev[0], secure=True)
-    set_reg(dev, 'AZ')
+    dev[0].set("country", "AZ")
 
     dev[0].request("SET sae_groups ")
     id = add_mesh_secure_net(dev[0], pmf=True, ocv=True)
     dev[0].set_network(id, "frequency", "5200")
     dev[0].set_network(id, "max_oper_chwidth", "2")
     dev[0].mesh_group_add(id)
+    check_dfs_started(dev[0])
+    check_dfs_finished(dev[0])
 
     dev[1].request("SET sae_groups ")
     id = add_mesh_secure_net(dev[1], pmf=True, ocv=True)
@@ -516,13 +518,15 @@ def test_mesh_secure_ocv_mix_ht(dev, apdev):
 
 def run_mesh_secure_ocv_mix_ht(dev, apdev):
     check_mesh_support(dev[0], secure=True)
-    set_reg(dev, 'AZ')
+    dev[0].set("country", "AZ")
 
     dev[0].request("SET sae_groups ")
     id = add_mesh_secure_net(dev[0], pmf=True, ocv=True)
     dev[0].set_network(id, "frequency", "5200")
     dev[0].set_network(id, "max_oper_chwidth", "2")
     dev[0].mesh_group_add(id)
+    check_dfs_started(dev[0])
+    check_dfs_finished(dev[0])
 
     dev[1].request("SET sae_groups ")
     id = add_mesh_secure_net(dev[1], pmf=True, ocv=True)
@@ -1776,7 +1780,7 @@ def test_mesh_oom(dev, apdev):
         if ev is None:
             raise Exception("Init failure not reported")
 
-    with alloc_fail(dev[0], 2, "=wpa_supplicant_mesh_init"):
+    with alloc_fail(dev[0], 1, "int_array_dup;wpa_supplicant_mesh_init"):
         add_open_mesh_network(dev[0], basic_rates="60 120 240")
         ev = dev[0].wait_event(["Failed to init mesh"])
         if ev is None:

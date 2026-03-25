@@ -1,10 +1,11 @@
 # Test cases for Wi-Fi Direct R2 features like unsynchronized service discovery
 # (P2P USD), Bootstrapping and Pairing.
-# Copyright (c) 2024, Qualcomm Innovation Center, Inc.
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 #
 # This software may be distributed under the terms of the BSD license.
 # See README for more details.
 
+import time
 import binascii
 import logging
 
@@ -15,8 +16,9 @@ import os
 import hwsim_utils
 
 from wpasupplicant import WpaSupplicant
-from test_nan_usd import check_nan_usd_capab
+from test_nan_usd import check_nan_usd_capab, split_nan_event
 from test_pasn import check_pasn_capab
+from test_p2p_grpform import autogo
 
 def check_p2p2_capab(dev):
     check_nan_usd_capab(dev)
@@ -31,8 +33,6 @@ def check_p2p2_capab(dev):
 def set_p2p2_configs(dev):
     dev.global_request("P2P_SET pasn_type 3")
     dev.global_request("P2P_SET supported_bootstrapmethods 6")
-    dev.global_request("P2P_SET pairing_setup 1")
-    dev.global_request("P2P_SET pairing_cache 1")
 
 def test_p2p_usd_publish_invalid_param(dev):
     """P2P USD Publish with invalid parameters"""
@@ -348,6 +348,83 @@ def test_p2p_auto_go_and_client_join(dev, apdev):
     if ev is None:
         raise Exception("Group formation timed out")
     #dev[0].group_form_result(ev)
+    dev[0].dump_monitor()
+
+    dev[1].wait_sta()
+
+    dev[1].remove_group()
+    dev[0].wait_go_ending_session()
+    dev[0].dump_monitor()
+
+def test_p2p_pcc_auto_go_and_pcc_client_join(dev, apdev):
+    """A PCC client joining a PCC Auto GO using P2P join"""
+    check_p2p2_capab(dev[0])
+    check_p2p2_capab(dev[1])
+
+    set_p2p2_configs(dev[0])
+    set_p2p2_configs(dev[1])
+
+    cmd = "NAN_SUBSCRIBE service_name=_test active=1 srv_proto_type=2 ssi=1122334455 ttl=10 p2p=1"
+    id0 = dev[0].global_request(cmd)
+    if "FAIL" in id0:
+        raise Exception("NAN_SUBSCRIBE for P2P failed")
+
+    cmd = "NAN_PUBLISH service_name=_test unsolicited=0 srv_proto_type=2 ssi=6677 ttl=10 p2p=1"
+    id1 = dev[1].global_request(cmd)
+    if "FAIL" in id1:
+        raise Exception("NAN_PUBLISH for P2P failed")
+
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
+    if ev is None:
+        raise Exception("Peer not found")
+    ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=5)
+    if ev is None:
+        raise Exception("Peer not found")
+    ev = dev[0].wait_global_event(["NAN-DISCOVERY-RESULT"], timeout=5)
+    if ev is None:
+        raise Exception("DiscoveryResult event not seen")
+    if "srv_proto_type=2" not in ev.split(' '):
+        raise Exception("Unexpected srv_proto_type: " + ev)
+    if "ssi=6677" not in ev.split(' '):
+        raise Exception("Unexpected ssi: " + ev)
+
+    cmd = "NAN_CANCEL_SUBSCRIBE subscribe_id=" + id0
+    if "FAIL" in dev[0].global_request(cmd):
+        raise Exception("NAN_CANCEL_SUBSCRIBE for P2P failed")
+    cmd = "NAN_CANCEL_PUBLISH publish_id=" + id1
+    if "FAIL" in dev[1].global_request(cmd):
+        raise Exception("NAN_CANCEL_PUBLISH for P2P failed")
+
+    cmd = "P2P_GROUP_ADD p2p2 p2pmode=2 freq=2437"
+    res = dev[1].global_request(cmd)
+    if "FAIL" in res:
+        raise Exception("P2P_GROUP_ADD failed")
+    ev = dev[1].wait_global_event(["P2P-GROUP-STARTED"], timeout=10)
+    if ev is None:
+        raise Exception("Group formation timed out")
+
+    res = dev[1].group_form_result(ev)
+    if dev[1].get_group_status_field("passphrase", extra="WPS") != res['passphrase']:
+        raise Exception("passphrase mismatch")
+    if dev[1].group_request("P2P_GET_PASSPHRASE") != res['passphrase']:
+        raise Exception("passphrase mismatch(2)")
+
+    time.sleep(2)
+
+    cli = dev[0]
+    id2 = cli.p2pdev_add_network()
+    cli.p2pdev_set_network_quoted(id2, "ssid", res['ssid'])
+    cli.p2pdev_set_network_quoted(id2, "psk", res['passphrase'])
+    cli.p2pdev_set_network(id2, "mode", "0")
+    cli.p2pdev_set_network(id2, "disabled", "2")
+    cmd = "P2P_GROUP_ADD persistent=" + str(id2) + " p2p2 p2pmode=2 freq=2437"
+    id0 = dev[0].global_request(cmd)
+    if "FAIL" in id0:
+        raise Exception("P2P_GROUP_ADD join on client failed")
+
+    ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=10)
+    if ev is None:
+        raise Exception("Group formation timed out")
     dev[0].dump_monitor()
 
     dev[1].wait_sta()
@@ -748,3 +825,245 @@ def test_p2p_bootstrapping_comeback_pairing(dev, apdev):
     dev[1].remove_group()
     dev[0].wait_go_ending_session()
     dev[0].dump_monitor()
+
+def test_p2p_go_started_before_usd(dev, apdev):
+    """P2P GO with NAN USD discovery - GO as subscriber, device as publisher"""
+    check_p2p2_capab(dev[0])
+    check_p2p2_capab(dev[1])
+
+    set_p2p2_configs(dev[0])
+    set_p2p2_configs(dev[1])
+
+    # Create autonomous P2P GO on dev[0]
+    logger.info("Creating P2P GO on dev[0]")
+    cmd = "P2P_GROUP_ADD p2p2 freq=2437"
+    res = dev[0].global_request(cmd)
+    if "FAIL" in res:
+        raise Exception("P2P_GROUP_ADD failed")
+
+    ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=10)
+    if ev is None:
+        raise Exception("Group formation timed out")
+    dev[0].group_form_result(ev)
+
+    # Start NAN_PUBLISH (active subscriber) on P2P GO interface (dev[0])
+    logger.info("Starting NAN_PUBLISH (active subscriber) on P2P GO")
+    cmd = "NAN_PUBLISH service_name=_test unsolicited=0 srv_proto_type=2 ssi=6677 ttl=10 p2p=1"
+    pub_id = dev[0].global_request(cmd)
+    if "FAIL" in pub_id:
+        raise Exception("NAN_PUBLISH on P2P GO failed")
+    logger.info("NAN_PUBLISH ID on GO: %s" % pub_id)
+
+    # Start NAN_SUBSCRIBE (solicited publisher) on P2P device (dev[1])
+    logger.info("Starting NAN_SUBSCRIBE (solicited publisher) on P2P device")
+    cmd = "NAN_SUBSCRIBE service_name=_test active=1 srv_proto_type=2 ssi=1122334455 ttl=10 p2p=1"
+    sub_id = dev[1].global_request(cmd)
+    if "FAIL" in sub_id:
+        raise Exception("NAN_SUBSCRIBE on P2P device failed")
+    logger.info("NAN_SUBSCRIBE ID on device: %s" % sub_id)
+
+    # Wait for P2P-DEVICE-FOUND events
+    logger.info("Waiting for P2P-DEVICE-FOUND events")
+    ev = dev[0].wait_global_event(["P2P-DEVICE-FOUND"], timeout=10)
+    if ev is None:
+        raise Exception("Peer not found by GO")
+    logger.info("GO found peer: %s" % ev)
+
+    ev = dev[1].wait_global_event(["P2P-DEVICE-FOUND"], timeout=10)
+    if ev is None:
+        raise Exception("Peer not found by device")
+    logger.info("Device found peer: %s" % ev)
+
+    # Wait for NAN-DISCOVERY-RESULT on the subscriber (dev[1])
+    logger.info("Waiting for NAN-DISCOVERY-RESULT on subscriber")
+    ev = dev[1].wait_global_event(["NAN-DISCOVERY-RESULT"], timeout=10)
+    if ev is None:
+        raise Exception("DiscoveryResult event not seen on subscriber")
+    logger.info("Discovery result on subscriber: %s" % ev)
+
+    if "srv_proto_type=2" not in ev.split(' '):
+        raise Exception("Unexpected srv_proto_type: " + ev)
+    if "ssi=6677" not in ev.split(' '):
+        raise Exception("Unexpected ssi: " + ev)
+
+    # Wait for NAN-REPLIED on the publisher (dev[0] - P2P GO)
+    logger.info("Waiting for NAN-REPLIED on publisher (P2P GO)")
+    ev = dev[0].wait_global_event(["NAN-REPLIED"], timeout=10)
+    if ev is None:
+        logger.info("NAN-REPLIED event not seen on P2P GO (this is expected if SDF frames are not being processed)")
+    else:
+        logger.info("NAN-REPLIED on GO: %s" % ev)
+        if "srv_proto_type=2" not in ev.split(' '):
+            raise Exception("Unexpected srv_proto_type in REPLIED: " + ev)
+
+    # Cleanup
+    logger.info("Cleaning up")
+    cmd = "NAN_CANCEL_SUBSCRIBE subscribe_id=" + sub_id
+    if "FAIL" in dev[1].global_request(cmd):
+        raise Exception("NAN_CANCEL_SUBSCRIBE failed")
+
+    cmd = "NAN_CANCEL_PUBLISH publish_id=" + pub_id
+    if "FAIL" in dev[0].global_request(cmd):
+        raise Exception("NAN_CANCEL_PUBLISH failed")
+
+    dev[0].remove_group()
+    logger.info("Test completed successfully")
+
+def test_nan_usd_p2p_go_on_publisher_channel(dev, apdev):
+    """NAN USD Publish/Subscribe with P2P GO started on publisher channel"""
+    check_nan_usd_capab(dev[0])
+    check_nan_usd_capab(dev[1])
+
+    # Start USD solicited publisher on channel 6 (2437 MHz) with P2P attributes
+    logger.info("Starting NAN USD solicited publisher on channel 6 with P2P attributes")
+    cmd = "NAN_PUBLISH service_name=_test srv_proto_type=2 ssi=6677 ttl=60 freq=2437 p2p=1 unsolicited=0"
+    pub_id = dev[0].request(cmd)
+    if "FAIL" in pub_id:
+        raise Exception("NAN_PUBLISH failed")
+    logger.info("Solicited publisher started with ID: " + pub_id)
+
+    # Start USD active subscriber with P2P attributes
+    logger.info("Starting NAN USD active subscriber with P2P attributes")
+    cmd = "NAN_SUBSCRIBE service_name=_test srv_proto_type=2 ssi=1122334455 p2p=1 active=1"
+    sub_id = dev[1].request(cmd)
+    if "FAIL" in sub_id:
+        raise Exception("NAN_SUBSCRIBE failed")
+    logger.info("Active subscriber started with ID: " + sub_id)
+
+    # Wait for initial discovery (subscriber should receive response from
+    # publisher)
+    logger.info("Waiting for initial NAN discovery")
+    ev = dev[1].wait_event(["NAN-DISCOVERY-RESULT"], timeout=10)
+    if ev is None:
+        raise Exception("Initial DiscoveryResult event not seen")
+    vals = split_nan_event(ev)
+    if vals['srv_proto_type'] != '2':
+        raise Exception("Unexpected srv_proto_type: " + ev)
+    if vals['ssi'] != '6677':
+        raise Exception("Unexpected ssi: " + ev)
+    logger.info("Initial discovery successful - subscriber received response from publisher")
+
+    # Wait for publisher to receive query from active subscriber
+    logger.info("Waiting for publisher to receive query from active subscriber")
+    ev = dev[0].wait_event(["NAN-REPLIED"], timeout=10)
+    if ev is None:
+        raise Exception("Publisher did not receive query from active subscriber")
+    logger.info("Publisher received query from active subscriber")
+
+    # Clear the event queues
+    dev[0].dump_monitor()
+    dev[1].dump_monitor()
+
+    # Now start P2P GO on the same channel as the USD publisher (channel 6)
+    logger.info("Starting P2P GO on channel 6 (same as USD publisher)")
+    cmd = "P2P_GROUP_ADD p2p2 freq=2437"
+    res = dev[0].global_request(cmd)
+    if "FAIL" in res:
+        raise Exception("P2P_GROUP_ADD failed")
+
+    ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=10)
+    if ev is None:
+        raise Exception("Group formation timed out")
+    dev[0].group_form_result(ev)
+    logger.info("P2P GO started successfully")
+
+    time.sleep(1)
+
+    # Verify that the publisher (now P2P GO) continues to receive SDF frames
+    # from active subscriber
+    logger.info("Verifying that P2P GO (publisher) receives SDF frames from active subscriber")
+    for i in range(5):
+        ev = dev[0].wait_event(["NAN-REPLIED"], timeout=10)
+        if ev is None:
+            raise Exception("P2P GO (publisher) did not receive query %d from active subscriber - SDF frames may be getting dropped" % (i + 1))
+        logger.info("P2P GO (publisher) received query %d from active subscriber" % (i + 1))
+
+    logger.info("SUCCESS: P2P GO (publisher) continues to receive SDF frames from active subscriber")
+
+    # Also verify that subscriber continues to receive responses
+    logger.info("Verifying that subscriber continues to receive responses from P2P GO (publisher)")
+    for i in range(3):
+        ev = dev[1].wait_event(["NAN-DISCOVERY-RESULT"], timeout=10)
+        if ev is None:
+            raise Exception("Subscriber did not receive response %d from P2P GO (publisher)" % (i + 1))
+        vals = split_nan_event(ev)
+        if vals['srv_proto_type'] != '2':
+            raise Exception("Unexpected srv_proto_type: " + ev)
+        if vals['ssi'] != '6677':
+            raise Exception("Unexpected ssi: " + ev)
+        logger.info("Subscriber received response %d from P2P GO (publisher)" % (i + 1))
+
+    logger.info("SUCCESS: Bidirectional SDF exchange continues after P2P GO started")
+
+    # Cleanup
+    logger.info("Cleaning up...")
+    dev[0].remove_group()
+    dev[0].request("NAN_CANCEL_PUBLISH id=" + pub_id)
+    dev[1].request("NAN_CANCEL_SUBSCRIBE id=" + sub_id)
+    logger.info("Test completed successfully")
+
+def test_nan_usd_p2p_go_multi_channel(dev, apdev):
+    """NAN USD with P2P GO on different channel"""
+    check_nan_usd_capab(dev[0])
+    check_nan_usd_capab(dev[1])
+
+    # Start USD publisher on channel 6 (2437 MHz) with P2P attributes
+    logger.info("Starting NAN USD publisher on channel 6 with P2P attributes")
+    cmd = "NAN_PUBLISH service_name=_test srv_proto_type=2 ssi=6677 ttl=30 freq=2437 p2p=1 unsolicited=0"
+    pub_id = dev[0].request(cmd)
+    if "FAIL" in pub_id:
+        raise Exception("NAN_PUBLISH failed")
+    logger.info("Publisher started with ID: " + pub_id)
+
+    # Start USD subscriber with P2P attributes
+    logger.info("Starting NAN USD subscriber with P2P attributes")
+    cmd = "NAN_SUBSCRIBE service_name=_test srv_proto_type=2 ssi=1122334455 p2p=1 active=1"
+    sub_id = dev[1].request(cmd)
+    if "FAIL" in sub_id:
+        raise Exception("NAN_SUBSCRIBE failed")
+    logger.info("Subscriber started with ID: " + sub_id)
+
+    # Wait for initial discovery
+    logger.info("Waiting for initial NAN discovery")
+    ev = dev[1].wait_event(["NAN-DISCOVERY-RESULT"], timeout=10)
+    if ev is None:
+        raise Exception("Initial DiscoveryResult event not seen")
+    logger.info("Initial discovery successful")
+
+    # Clear the event queue
+    dev[1].dump_monitor()
+
+    # Start P2P GO on a different channel (channel 11)
+    logger.info("Starting P2P GO on channel 11 (different from USD publisher)")
+    cmd = "P2P_GROUP_ADD p2p2 freq=2462"
+    res = dev[0].global_request(cmd)
+    if "FAIL" in res:
+        raise Exception("P2P_GROUP_ADD failed")
+
+    ev = dev[0].wait_global_event(["P2P-GROUP-STARTED"], timeout=10)
+    if ev is None:
+        raise Exception("Group formation timed out")
+    dev[0].group_form_result(ev)
+    logger.info("P2P GO started successfully")
+
+    time.sleep(1)
+
+    # Verify that SDF frames are still being received
+    logger.info("Verifying SDF reception with P2P GO on different channel")
+    ev = dev[1].wait_event(["NAN-DISCOVERY-RESULT"], timeout=15)
+    if ev is None:
+        raise Exception("DiscoveryResult event not seen after P2P GO started on different channel")
+
+    vals = split_nan_event(ev)
+    if vals['srv_proto_type'] != '2':
+        raise Exception("Unexpected srv_proto_type: " + ev)
+    if vals['ssi'] != '6677':
+        raise Exception("Unexpected ssi: " + ev)
+    logger.info("SUCCESS: SDF frames received with P2P GO on different channel")
+
+    # Cleanup
+    logger.info("Cleaning up...")
+    dev[0].remove_group()
+    dev[0].request("NAN_CANCEL_PUBLISH id=" + pub_id)
+    dev[1].request("NAN_CANCEL_SUBSCRIBE id=" + sub_id)
+    logger.info("Test completed successfully")

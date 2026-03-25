@@ -425,6 +425,13 @@ static int wpa_cli_cmd_mlo_signal_poll(struct wpa_ctrl *ctrl, int argc, char *ar
 }
 
 
+static int wpa_cli_cmd_setup_link_reconfig(struct wpa_ctrl *ctrl, int argc,
+					   char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "SETUP_LINK_RECONFIG", 1, argc, argv);
+}
+
+
 static int wpa_cli_cmd_set(struct wpa_ctrl *ctrl, int argc, char *argv[])
 {
 	char cmd[256];
@@ -517,6 +524,7 @@ static char ** wpa_cli_complete_set(const char *str, int pos)
 #endif /* CONFIG_TESTING_OPTIONS */
 		"relative_rssi", "relative_band_adjust",
 		"extended_key_id",
+		"disable_op_classes_80_80_mhz",
 	};
 	int i, num_fields = ARRAY_SIZE(fields);
 
@@ -617,7 +625,8 @@ static char ** wpa_cli_complete_get(const char *str, int pos)
 		"tdls_external_control", "wowlan_triggers",
 		"p2p_search_delay", "mac_addr", "rand_addr_lifetime",
 		"preassoc_mac_addr", "key_mgmt_offload", "passive_scan",
-		"reassoc_same_bss_optim", "extended_key_id"
+		"reassoc_same_bss_optim", "extended_key_id",
+		"disable_op_classes_80_80_mhz"
 	};
 	int i, num_fields = ARRAY_SIZE(fields);
 
@@ -3277,6 +3286,31 @@ static int wpa_cli_cmd_pasn_deauth(struct wpa_ctrl *ctrl, int argc,
 	return wpa_cli_cmd(ctrl, "PASN_DEAUTH", 1, argc, argv);
 }
 
+
+#ifdef CONFIG_PR
+
+static int wpa_cli_cmd_pr_pasn_start(struct wpa_ctrl *ctrl, int argc,
+				     char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "PR_PASN_START", 4, argc, argv);
+}
+
+
+static int wpa_cli_cmd_pr_set_dik_context(struct wpa_ctrl *ctrl, int argc,
+					  char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "PR_SET_DIK_CONTEXT", 1, argc, argv);
+}
+
+
+static int wpa_cli_cmd_pr_clear_dik_context(struct wpa_ctrl *ctrl, int argc,
+					    char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "PR_CLEAR_DIK_CONTEXT");
+}
+
+#endif /* CONFIG_PR */
+
 #endif /* CONFIG_PASN */
 
 
@@ -3355,6 +3389,45 @@ static int wpa_cli_cmd_nan_flush(struct wpa_ctrl *ctrl, int argc,
 }
 
 #endif /* CONFIG_NAN_USD */
+
+
+#ifdef CONFIG_NAN
+
+static int wpa_cli_cmd_nan_start(struct wpa_ctrl *ctrl, int argc,
+				 char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "NAN_START", 0, argc, argv);
+}
+
+
+static int wpa_cli_cmd_nan_stop(struct wpa_ctrl *ctrl, int argc,
+				char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "NAN_STOP", 0, argc, argv);
+}
+
+
+static int wpa_cli_cmd_nan_set(struct wpa_ctrl *ctrl, int argc,
+			       char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "NAN_SET", 2, argc, argv);
+}
+
+
+static int wpa_cli_cmd_nan_update_conf(struct wpa_ctrl *ctrl, int argc,
+				       char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "NAN_UPDATE_CONF", 0, argc, argv);
+}
+
+#endif /* CONFIG_NAN */
+
+
+static int wpa_cli_cmd_generate_new_mac(struct wpa_ctrl *ctrl, int argc,
+					char *argv[])
+{
+	return wpa_ctrl_command(ctrl, "NEW_RANDOM_MAC_ADDRESS");
+}
 
 
 enum wpa_cli_cmd_flags {
@@ -4079,6 +4152,16 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "pasn_deauth", wpa_cli_cmd_pasn_deauth, NULL,
 	  cli_cmd_flag_none,
 	  "bssid=<BSSID> = Remove PASN PTKSA state" },
+#ifdef CONFIG_PR
+	{ "pr_pasn_start", wpa_cli_cmd_pr_pasn_start, NULL,
+	  cli_cmd_flag_none,
+	  "bssid=<BSSID> role=<ISTA/RSTA> ranging_type=<edca/ntb/ntb-open/ntb-secure>" },
+	{ "pr_set_dik_context", wpa_cli_cmd_pr_set_dik_context, NULL,
+	  cli_cmd_flag_sensitive,
+	  "self dik=<own_dik/peerdik> password=<global_pw/unique_pw> pmk=<pmk>" },
+	{ "pr_clear_dik_context", wpa_cli_cmd_pr_clear_dik_context, NULL,
+	  cli_cmd_flag_none, "= Clear all DIK contexts" },
+#endif /* CONFIG_PR */
 #endif /* CONFIG_PASN */
 	{ "mscs", wpa_cli_cmd_mscs, NULL,
 	  cli_cmd_flag_none,
@@ -4092,6 +4175,9 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "dscp_query", wpa_cli_cmd_dscp_query, NULL,
 	  cli_cmd_flag_none,
 	  "wildcard/domain_name=<string> = Send DSCP Query" },
+	{ "setup_link_reconfig", wpa_cli_cmd_setup_link_reconfig, NULL,
+	  cli_cmd_flag_none,
+	  "<<add=/delete=><ID1> [ID2]...> = Add new setup links and/or remove existing ones for the current MLO connection in STA mode" },
 	{ "mlo_status", wpa_cli_cmd_mlo_status, NULL,
 	  cli_cmd_flag_none,
 	  "= get MLO status" },
@@ -4101,14 +4187,14 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 #ifdef CONFIG_NAN_USD
 	{ "nan_publish", wpa_cli_cmd_nan_publish, NULL,
 	  cli_cmd_flag_none,
-	  "service_name=<name> [ttl=<time-to-live-in-sec>] [freq=<in MHz>] [freq_list=<comma separate list of MHz>] [srv_proto_type=<type>] [ssi=<service specific information (hexdump)>] [solicited=0] [unsolicited=0] [fsd=0] [p2p=1] = Publish NAN service" },
+	  "service_name=<name> [ttl=<time-to-live-in-sec>] [freq=<in MHz>] [freq_list=<comma separate list of MHz>] [srv_proto_type=<type>] [ssi=<service specific information (hexdump)>] [solicited=0] [unsolicited=0] [fsd=0] [p2p=1] [pr=1] = Publish NAN service" },
 	{ "nan_cancel_publish", wpa_cli_cmd_nan_cancel_publish, NULL,
 	  cli_cmd_flag_none, "publish_id=<id from NAN_PUBLISH> = Cancel NAN USD publish instance" },
 	{ "nan_update_publish", wpa_cli_cmd_nan_update_publish, NULL,
 	  cli_cmd_flag_none, "publish_id=<id from NAN_PUBLISH> [ssi=<service specific information (hexdump)> = Update publish" },
 	{ "nan_subscribe", wpa_cli_cmd_nan_subscribe, NULL,
 	  cli_cmd_flag_none,
-	  "service_name=<name> [active=1] [ttl=<time-to-live-in-sec>] [freq=<in MHz>] [srv_proto_type=<type>] [ssi=<service specific information (hexdump)>] [p2p=1] = Subscribe to NAN service" },
+	  "service_name=<name> [active=1] [ttl=<time-to-live-in-sec>] [freq=<in MHz>] [srv_proto_type=<type>] [ssi=<service specific information (hexdump)>] [p2p=1] [pr=1] = Subscribe to NAN service" },
 	{ "nan_cancel_subscribe", wpa_cli_cmd_nan_cancel_subscribe, NULL,
 	  cli_cmd_flag_none, "subscribe_id=<id from NAN_PUBLISH> = Cancel NAN USD subscribe instance" },
 	{ "nan_transmit", wpa_cli_cmd_nan_transmit, NULL,
@@ -4116,6 +4202,18 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "nan_flush", wpa_cli_cmd_nan_flush, NULL,
 	  cli_cmd_flag_none, "= Flush all NAN USD services" },
 #endif /* CONFIG_NAN_USD */
+#ifdef CONFIG_NAN
+	{ "nan_start", wpa_cli_cmd_nan_start, NULL, cli_cmd_flag_none,
+	  "= start/join NAN cluster with current configuration" },
+	{ "nan_stop", wpa_cli_cmd_nan_stop, NULL, cli_cmd_flag_none,
+	  "= stop NAN operation" },
+	{ "nan_set", wpa_cli_cmd_nan_set, NULL, cli_cmd_flag_none,
+	  "= set NAN configuration variable" },
+	{ "nan_update_conf", wpa_cli_cmd_nan_update_conf, NULL,
+	  cli_cmd_flag_none, "= update NAN configuration" },
+#endif /* CONFIG_NAN */
+	{ "new_random_mac_address", wpa_cli_cmd_generate_new_mac, NULL,
+	  cli_cmd_flag_none, "= Generate new random MAC address" },
 	{ NULL, NULL, NULL, cli_cmd_flag_none, NULL }
 };
 

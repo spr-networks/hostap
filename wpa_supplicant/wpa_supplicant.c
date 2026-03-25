@@ -43,6 +43,7 @@
 #include "common/gas_server.h"
 #include "common/dpp.h"
 #include "common/ptksa_cache.h"
+#include "common/proc_coord.h"
 #include "p2p/p2p.h"
 #include "fst/fst.h"
 #include "bssid_ignore.h"
@@ -65,7 +66,8 @@
 #include "wpas_kay.h"
 #include "mesh.h"
 #include "dpp_supplicant.h"
-#include "nan_usd.h"
+#include "pr_supplicant.h"
+#include "nan_supplicant.h"
 #ifdef CONFIG_MESH
 #include "ap/ap_config.h"
 #include "ap/hostapd.h"
@@ -132,6 +134,8 @@ static void wpas_update_fils_connect_params(struct wpa_supplicant *wpa_s);
 #ifdef CONFIG_OWE
 static void wpas_update_owe_connect_params(struct wpa_supplicant *wpa_s);
 #endif /* CONFIG_OWE */
+static void radio_remove_pending_connect(struct wpa_supplicant *wpa_s,
+					 const struct wpa_ssid *ssid);
 
 
 #ifdef CONFIG_WEP
@@ -450,6 +454,7 @@ void wpa_supplicant_set_non_wpa_policy(struct wpa_supplicant *wpa_s,
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_MGMT_GROUP,
 			 wpa_s->mgmt_group_cipher);
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SSID_PROTECTION, 0);
+	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_ASSOC_ENC, 0);
 
 	pmksa_cache_clear_current(wpa_s->wpa);
 	os_memset(&mlo, 0, sizeof(mlo));
@@ -511,7 +516,6 @@ static struct wpabuf * wpas_wfa_gen_capab_attr(struct wpa_supplicant *wpa_s)
 	size_t gen_len, supp_len;
 	const u8 *supp;
 	u8 supp_buf[1];
-	bool add_cert;
 
 	if (wpa_s->conf->wfa_gen_capa == WFA_GEN_CAPA_DISABLED)
 		return NULL;
@@ -534,14 +538,7 @@ static struct wpabuf * wpas_wfa_gen_capab_attr(struct wpa_supplicant *wpa_s)
 		supp = wpabuf_head(wpa_s->conf->wfa_gen_capa_supp);
 	}
 
-	add_cert = wpa_s->conf->wfa_gen_capa_cert &&
-		wpabuf_len(wpa_s->conf->wfa_gen_capa_cert) == supp_len;
-
 	gen_len = 1 + supp_len;
-	if (add_cert) {
-		gen_len++;
-		gen_len += wpabuf_len(wpa_s->conf->wfa_gen_capa_cert);
-	}
 
 	attr = wpabuf_alloc(2 + gen_len);
 	if (!attr)
@@ -551,11 +548,6 @@ static struct wpabuf * wpas_wfa_gen_capab_attr(struct wpa_supplicant *wpa_s)
 	wpabuf_put_u8(attr, gen_len);
 	wpabuf_put_u8(attr, supp_len);
 	wpabuf_put_data(attr, supp, supp_len);
-	if (add_cert) {
-		wpabuf_put_u8(attr,
-			      wpabuf_len(wpa_s->conf->wfa_gen_capa_cert));
-		wpabuf_put_buf(attr, wpa_s->conf->wfa_gen_capa_cert);
-	}
 
 	return attr;
 }
@@ -658,6 +650,10 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 	wpabuf_free(wpa_s->rsnxe_override_eapol);
 	wpa_s->rsnxe_override_eapol = NULL;
 	wpas_clear_driver_signal_override(wpa_s);
+	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
+		wpabuf_free(wpa_s->link_ies[i]);
+		wpa_s->link_ies[i] = NULL;
+	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
 	if (wpa_s->conf != NULL) {
@@ -734,6 +730,8 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 
 	wpas_p2p_deinit(wpa_s);
 
+	wpas_pr_deinit(wpa_s);
+
 #ifdef CONFIG_OFFCHANNEL
 	offchannel_deinit(wpa_s);
 #endif /* CONFIG_OFFCHANNEL */
@@ -794,10 +792,13 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 	os_free(wpa_s->last_scan_res);
 	wpa_s->last_scan_res = NULL;
 
-#ifdef CONFIG_HS20
+#ifdef CONFIG_P2P
+	os_free(wpa_s->p2p_pmksa_entry);
+	wpa_s->p2p_pmksa_entry = NULL;
+#endif /* CONFIG_P2P */
+
 	if (wpa_s->drv_priv)
 		wpa_drv_configure_frame_filters(wpa_s, 0);
-#endif /* CONFIG_HS20 */
 
 	for (i = 0; i < NUM_VENDOR_ELEM_FRAMES; i++) {
 		wpabuf_free(wpa_s->vendor_elem[i]);
@@ -853,9 +854,7 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 	wpa_s->dpp = NULL;
 #endif /* CONFIG_DPP */
 
-#ifdef CONFIG_NAN_USD
-	wpas_nan_usd_deinit(wpa_s);
-#endif /* CONFIG_NAN_USD */
+	wpas_nan_de_deinit(wpa_s);
 
 #ifdef CONFIG_PASN
 	wpas_pasn_auth_stop(wpa_s);
@@ -869,6 +868,11 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 	os_free(wpa_s->owe_trans_scan_freq);
 	wpa_s->owe_trans_scan_freq = NULL;
 #endif /* CONFIG_OWE */
+
+	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
+		wpabuf_free(wpa_s->links[i].ies);
+		wpa_s->links[i].ies = NULL;
+	}
 }
 
 
@@ -1263,6 +1267,12 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 	}
 	wpa_s->wpa_state = state;
 
+#ifndef CONFIG_NO_ROBUST_AV
+	if (state == WPA_COMPLETED && dl_list_len(&wpa_s->active_scs_ids) &&
+	    wpa_s->scs_reconfigure)
+		wpas_scs_reconfigure(wpa_s);
+#endif /* CONFIG_NO_ROBUST_AV */
+
 #ifdef CONFIG_BGSCAN
 	if (state == WPA_COMPLETED && wpa_s->current_ssid != wpa_s->bgscan_ssid)
 		wpa_supplicant_reset_bgscan(wpa_s);
@@ -1310,6 +1320,8 @@ void wpa_supplicant_set_state(struct wpa_supplicant *wpa_s,
 	if (update_fils_connect_params)
 		wpas_update_fils_connect_params(wpa_s);
 #endif /* CONFIG_FILS && IEEE8021X_EAPOL */
+
+	wpas_nan_usd_state_change_notif(wpa_s);
 }
 
 
@@ -1385,14 +1397,16 @@ int wpa_supplicant_reload_configuration(struct wpa_supplicant *wpa_s)
 
 	if (wpa_s->confname == NULL)
 		return -1;
-	conf = wpa_config_read(wpa_s->confname, NULL, false);
+	conf = wpa_config_read(wpa_s->confname, NULL, false,
+			       wpa_s->global->params.show_details);
 	if (conf == NULL) {
 		wpa_msg(wpa_s, MSG_ERROR, "Failed to parse the configuration "
 			"file '%s' - exiting", wpa_s->confname);
 		return -1;
 	}
 	if (wpa_s->confanother &&
-	    !wpa_config_read(wpa_s->confanother, conf, true)) {
+	    !wpa_config_read(wpa_s->confanother, conf, true,
+			     wpa_s->global->params.show_details)) {
 		wpa_msg(wpa_s, MSG_ERROR,
 			"Failed to parse the configuration file '%s' - exiting",
 			wpa_s->confanother);
@@ -1819,6 +1833,7 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_SAE */
 	const u8 *bss_wpa, *bss_rsn, *bss_rsnx;
 	bool wmm;
+	struct rsn_pmksa_cache_entry *pmksa;
 
 	if (bss) {
 		bss_wpa = wpa_bss_get_vendor_ie(bss, WPA_IE_VENDOR_TYPE);
@@ -2131,6 +2146,26 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
+	/* There might be a PMKSA cache entry for the target AP, but the current
+	 * connection is trying to use PSK (which does not use PMKSA caching) or
+	 * an AKM that does not match the one that was used to generate the
+	 * selected PMKSA entry. The previously selected PMKSA cache entry needs
+	 * to be cleared in such cases to avoid indicating an incorrect PMKID
+	 * and exchange that would likely end up failing with the AP attempting
+	 * to use a different PMK. This is not really supposed to happen in
+	 * normal use cases, but it is possible that some corner cases of the AP
+	 * changing its configuration might trigger a failure due to mismatching
+	 * PMK. */
+	pmksa = pmksa_cache_get_current(wpa_s->wpa);
+	if (pmksa &&
+	    (wpa_key_mgmt_wpa_psk_no_sae(wpa_s->key_mgmt) ||
+	     (pmksa->akmp && pmksa->akmp != wpa_s->key_mgmt))) {
+		wpa_printf(MSG_DEBUG,
+			   "RSN: Disable PMKSA caching due to incompatible AKMP (PMKSA: 0x%x, selected: 0x%x)",
+			   pmksa->akmp, wpa_s->key_mgmt);
+		pmksa_cache_clear_current(wpa_s->wpa);
+	}
+
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_KEY_MGMT, wpa_s->key_mgmt);
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_PAIRWISE,
 			 wpa_s->pairwise_cipher);
@@ -2253,6 +2288,27 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SSID_PROTECTION, false);
 	}
 
+#ifdef CONFIG_ENC_ASSOC
+	if (proto == WPA_PROTO_RSN &&
+	    (wpa_s->drv_flags2 &
+	     WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION)) {
+		bool assoc_enc;
+
+		/* Enable association frame encryption based on the AP
+		 * advertising support for it to avoid potential
+		 * interoperability issues with incorrect AP behavior if we
+		 * were to send an "unexpected" RSNXE with multiple octets of
+		 * payload. */
+		assoc_enc = ieee802_11_rsnx_capab(
+			bss_rsnx, WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION);
+		if (!skip_default_rsne)
+			wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_ASSOC_ENC,
+					 assoc_enc);
+	} else {
+		wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_ASSOC_ENC, false);
+	}
+#endif /* CONFIG_ENC_ASSOC */
+
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SPP_AMSDU,
 			 (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SPP_AMSDU) &&
 			 ieee802_11_rsnx_capab(bss_rsnx,
@@ -2262,6 +2318,13 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 						   WPA_CIPHER_CCMP |
 						   WPA_CIPHER_GCMP) &&
 			 (wpa_s->wpa_proto & WPA_PROTO_RSN));
+
+	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SAE_PW_ID_CHANGE,
+			 ssid->sae_password_id && ssid->sae_password_id_change);
+#ifdef CONFIG_PMKSA_PRIVACY
+	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_PMKSA_CACHING_PRIVACY,
+			 ssid->pmksa_privacy);
+#endif /* CONFIG_PMKSA_PRIVACY */
 
 	if (!skip_default_rsne) {
 		if (wpa_sm_set_assoc_wpa_ie_default(wpa_s->wpa, wpa_ie,
@@ -2618,6 +2681,7 @@ int wpas_update_random_addr(struct wpa_supplicant *wpa_s,
 	}
 
 	wpas_p2p_update_dev_addr(wpa_s);
+	wpas_pr_update_dev_addr(wpa_s);
 
 	wpa_msg(wpa_s, MSG_DEBUG, "Using random MAC address " MACSTR,
 		MAC2STR(addr));
@@ -2646,6 +2710,10 @@ void wpa_s_setup_sae_pt(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 	int default_groups[] = { 19, 20, 21, 0 };
 	const char *password;
 	enum sae_pwe sae_pwe;
+	const u8 *password_id = (const u8 *) ssid->sae_password_id;
+	size_t password_id_len = ssid->sae_password_id ?
+		os_strlen(ssid->sae_password_id) : 0;
+	struct wpabuf_array *ids;
 
 	if (!groups || groups[0] <= 0)
 		groups = default_groups;
@@ -2669,11 +2737,36 @@ void wpa_s_setup_sae_pt(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 		return;
 	}
 
-	if (ssid->pt)
-		return; /* PT already derived */
+	ids = ssid->alt_sae_password_ids;
+	if (ids && ids->num) {
+		unsigned int idx = os_random() % ids->num;
+		struct wpabuf *id = ids->buf[idx];
+
+		password_id = wpabuf_head(id);
+		password_id_len = wpabuf_len(id);
+		wpa_hexdump(MSG_DEBUG,
+			    "SAE: Prepare PT for alternative password ID",
+			    password_id, password_id_len);
+		ssid->alt_sae_passwords_ids_idx = idx;
+		ssid->alt_sae_passwords_ids_used = true;
+	}
+
+	if (ssid->pt) {
+		if (!password_id && !ssid->pt->password_id)
+			return; /* PT already derived for no PW ID */
+		if (password_id && ssid->pt->password_id &&
+		    password_id_len == wpabuf_len(ssid->pt->password_id) &&
+		    os_memcmp(password_id, wpabuf_head(ssid->pt->password_id),
+			      password_id_len == 0))
+			return; /* PT already derived for same PW ID */
+
+		/* PT was derived for another password identifier */
+		sae_deinit_pt(ssid->pt);
+		ssid->pt = NULL;
+	}
 	ssid->pt = sae_derive_pt(groups, ssid->ssid, ssid->ssid_len,
 				 (const u8 *) password, os_strlen(password),
-				 ssid->sae_password_id);
+				 password_id, password_id_len);
 #endif /* CONFIG_SAE */
 }
 
@@ -2915,8 +3008,8 @@ void wpa_supplicant_associate(struct wpa_supplicant *wpa_s,
 	cwork->bss = bss;
 	cwork->ssid = ssid;
 
-	if (radio_add_work(wpa_s, bss ? bss->freq : 0, "connect", 1,
-			   wpas_start_assoc_cb, cwork) < 0) {
+	if (!radio_add_work(wpa_s, bss ? bss->freq : 0, "connect", 1,
+			    wpas_start_assoc_cb, cwork)) {
 		os_free(cwork);
 	}
 }
@@ -3090,18 +3183,25 @@ static void ibss_mesh_select_40mhz(struct wpa_supplicant *wpa_s,
 				   const struct wpa_ssid *ssid,
 				   struct hostapd_hw_modes *mode,
 				   struct hostapd_freq_params *freq,
-				   int obss_scan) {
+				   int obss_scan, bool is_6ghz)
+{
 	int chan_idx;
 	struct hostapd_channel_data *pri_chan = NULL, *sec_chan = NULL;
 	int i, res;
 	unsigned int j;
-	static const int ht40plus[] = {
+	static const int ht40plus_5ghz[] = {
 		36, 44, 52, 60, 100, 108, 116, 124, 132, 140,
 		149, 157, 165, 173, 184, 192
 	};
+	static const int ht40plus_6ghz[] = {
+		1, 9, 17, 25, 33, 41, 49, 57, 65, 73,
+		81, 89, 97, 105, 113, 121, 129, 137, 145, 153,
+		161, 169, 177, 185, 193, 201, 209, 217, 225
+	};
+
 	int ht40 = -1;
 
-	if (!freq->ht_enabled)
+	if (!freq->ht_enabled && !is_6ghz)
 		return;
 
 	for (chan_idx = 0; chan_idx < mode->num_channels; chan_idx++) {
@@ -3123,10 +3223,19 @@ static void ibss_mesh_select_40mhz(struct wpa_supplicant *wpa_s,
 #endif
 
 	/* Check/setup HT40+/HT40- */
-	for (j = 0; j < ARRAY_SIZE(ht40plus); j++) {
-		if (ht40plus[j] == freq->channel) {
-			ht40 = 1;
-			break;
+	if (is_6ghz) {
+		for (j = 0; j < ARRAY_SIZE(ht40plus_6ghz); j++) {
+			if (ht40plus_6ghz[j] == freq->channel) {
+				ht40 = 1;
+				break;
+			}
+		}
+	} else {
+		for (j = 0; j < ARRAY_SIZE(ht40plus_5ghz); j++) {
+			if (ht40plus_5ghz[j] == freq->channel) {
+				ht40 = 1;
+				break;
+			}
 		}
 	}
 
@@ -3144,12 +3253,14 @@ static void ibss_mesh_select_40mhz(struct wpa_supplicant *wpa_s,
 	if (sec_chan->flag & (HOSTAPD_CHAN_DISABLED | HOSTAPD_CHAN_NO_IR))
 		return;
 
-	if (ht40 == -1) {
-		if (!(pri_chan->flag & HOSTAPD_CHAN_HT40MINUS))
-			return;
-	} else {
-		if (!(pri_chan->flag & HOSTAPD_CHAN_HT40PLUS))
-			return;
+	if (freq->ht_enabled) {
+		if (ht40 == -1) {
+			if (!(pri_chan->flag & HOSTAPD_CHAN_HT40MINUS))
+				return;
+		} else {
+			if (!(pri_chan->flag & HOSTAPD_CHAN_HT40PLUS))
+				return;
+		}
 	}
 	freq->sec_channel_offset = ht40;
 
@@ -3225,7 +3336,8 @@ static bool ibss_mesh_select_80_160mhz(struct wpa_supplicant *wpa_s,
 		6515, 6595, 6675, 6755, 6835, 6915, 6995
 	};
 	static const int bw160[] = {
-		5955, 6115, 6275, 6435, 6595, 6755, 6915
+		5180, 5500, 5745, 5955, 6115, 6275, 6435,
+		6595, 6755, 6915
 	};
 	static const int bw320[]= {
 		5955, 6255, 6115, 6415, 6275, 6575, 6435,
@@ -3236,6 +3348,8 @@ static bool ibss_mesh_select_80_160mhz(struct wpa_supplicant *wpa_s,
 	int i;
 	unsigned int j, k;
 	int chwidth, seg0, seg1;
+	int offset_in_160 = 1;
+	int offset_in_320 = 0;
 	u32 vht_caps = 0;
 	u8 channel = freq->channel;
 
@@ -3275,18 +3389,50 @@ static bool ibss_mesh_select_80_160mhz(struct wpa_supplicant *wpa_s,
 	seg0 = channel + 6;
 	seg1 = 0;
 
+	for (k = 0; k < ARRAY_SIZE(bw160); k++) {
+		if (bw80[j] >= bw160[k] &&
+		    bw80[j] < bw160[k] + 160) {
+			if (bw80[j] == bw160[k])
+				offset_in_160 = 1;
+			else
+				offset_in_160 = -1;
+			break;
+		}
+	}
+
+	for (k = 0; k < ARRAY_SIZE(bw320); k++) {
+		if (bw80[j] >= bw320[k] &&
+		    bw80[j] < bw320[k] + 320) {
+			if (bw80[j] == bw320[k])
+				offset_in_320 = 0;
+			else if (bw80[j] == bw320[k] + 80)
+				offset_in_320 = 1;
+			else if (bw80[j] == bw320[k] + 160)
+				offset_in_320 = 2;
+			else
+				offset_in_320 = 3;
+			break;
+		}
+	}
+
 	/* In 160 MHz, the initial four 20 MHz channels were validated
 	 * above. If 160 MHz is supported, check the remaining four 20 MHz
-	 * channels for the total of 160 MHz bandwidth for 6 GHz.
+	 * channels for the total of 160 MHz bandwidth.
 	 */
 	if ((mode->he_capab[ieee80211_mode].phy_cap[
 		     HE_PHYCAP_CHANNEL_WIDTH_SET_IDX] &
-	     HE_PHYCAP_CHANNEL_WIDTH_SET_160MHZ_IN_5G) && is_6ghz &&
-	    ibss_mesh_is_80mhz_avail(channel + 16, mode)) {
+	     HE_PHYCAP_CHANNEL_WIDTH_SET_160MHZ_IN_5G) &&
+	    (ssid->max_oper_chwidth == CONF_OPER_CHWIDTH_160MHZ ||
+	     ssid->max_oper_chwidth == CONF_OPER_CHWIDTH_320MHZ) &&
+	    ibss_mesh_is_80mhz_avail(channel + 16 * offset_in_160, mode)) {
 		for (j = 0; j < ARRAY_SIZE(bw160); j++) {
-			if (freq->freq == bw160[j]) {
+			u8 start_chan;
+
+			if (freq->freq >= bw160[j] &&
+			    freq->freq < bw160[j] + 160) {
 				chwidth = CONF_OPER_CHWIDTH_160MHZ;
-				seg0 = channel + 14;
+				ieee80211_freq_to_chan(bw160[j], &start_chan);
+				seg0 = start_chan + 14;
 				break;
 			}
 		}
@@ -3299,9 +3445,13 @@ static bool ibss_mesh_select_80_160mhz(struct wpa_supplicant *wpa_s,
 	if ((mode->eht_capab[ieee80211_mode].phy_cap[
 		     EHT_PHYCAP_320MHZ_IN_6GHZ_SUPPORT_IDX] &
 	     EHT_PHYCAP_320MHZ_IN_6GHZ_SUPPORT_MASK) && is_6ghz &&
-	    ibss_mesh_is_80mhz_avail(channel + 16, mode) &&
-	    ibss_mesh_is_80mhz_avail(channel + 32, mode) &&
-	    ibss_mesh_is_80mhz_avail(channel + 48, mode)) {
+	    ssid->max_oper_chwidth == CONF_OPER_CHWIDTH_320MHZ &&
+	    ibss_mesh_is_80mhz_avail(channel + 16 -
+				     64 * ((offset_in_320 + 1) / 4), mode) &&
+	    ibss_mesh_is_80mhz_avail(channel + 32 -
+				     64 * ((offset_in_320 + 2) / 4), mode) &&
+	    ibss_mesh_is_80mhz_avail(channel + 48 -
+				     64 * ((offset_in_320 + 3) / 4), mode)) {
 		for (j = 0; j < ARRAY_SIZE(bw320); j += 2) {
 			if (freq->freq >= bw320[j] &&
 			    freq->freq <= bw320[j + 1]) {
@@ -3428,9 +3578,10 @@ void ibss_mesh_setup_freq(struct wpa_supplicant *wpa_s,
 		freq->he_enabled = ibss_mesh_can_use_he(wpa_s, ssid, mode,
 							ieee80211_mode);
 	freq->channel = channel;
-	/* Setup higher BW only for 5 GHz */
+	/* Setup higher BW only for 5 and 6 GHz */
 	if (mode->mode == HOSTAPD_MODE_IEEE80211A) {
-		ibss_mesh_select_40mhz(wpa_s, ssid, mode, freq, obss_scan);
+		ibss_mesh_select_40mhz(wpa_s, ssid, mode, freq, obss_scan,
+				       is_6ghz);
 		if (!ibss_mesh_select_80_160mhz(wpa_s, ssid, mode, freq,
 						ieee80211_mode, is_6ghz))
 			freq->he_enabled = freq->vht_enabled = false;
@@ -3900,11 +4051,11 @@ static u8 * wpas_populate_assoc_ies(
 				wpa_ie_len += wpabuf_len(hs20);
 			}
 			wpabuf_free(hs20);
-
-			hs20_configure_frame_filters(wpa_s);
 		}
 	}
 #endif /* CONFIG_HS20 */
+
+	wpas_configure_frame_filters(wpa_s);
 
 	if (wpa_s->vendor_elem[VENDOR_ELEM_ASSOC_REQ]) {
 		struct wpabuf *buf = wpa_s->vendor_elem[VENDOR_ELEM_ASSOC_REQ];
@@ -4573,6 +4724,9 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 		params.pbss = (ssid->pbss != 2) ? ssid->pbss : 0;
 	}
 
+	params.bssid_filter = wpa_s->bssid_filter;
+	params.bssid_filter_count = wpa_s->bssid_filter_count;
+
 	if (ssid->mode == WPAS_MODE_IBSS && ssid->bssid_set &&
 	    wpa_s->conf->ap_scan == 2) {
 		params.bssid = ssid->bssid;
@@ -4861,6 +5015,15 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 		wpa_supplicant_req_auth_timeout(wpa_s, timeout, 0);
 	}
 
+#ifdef CONFIG_P2P
+	if (ssid->pmk_valid && wpa_s->p2p_pmksa_entry &&
+	    !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME)) {
+		wpa_sm_pmksa_cache_add_entry(wpa_s->wpa,
+					     wpa_s->p2p_pmksa_entry);
+		wpa_s->p2p_pmksa_entry = NULL;
+	}
+#endif /* CONFIG_P2P */
+
 #ifdef CONFIG_WEP
 	if (wep_keys_set &&
 	    (wpa_s->drv_flags & WPA_DRIVER_FLAGS_SET_KEYS_AFTER_ASSOC)) {
@@ -4883,9 +5046,7 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 #endif /* CONFIG_P2P */
 	    ssid->bssid_set) {
 		wpa_s->current_bss = bss;
-#ifdef CONFIG_HS20
-		hs20_configure_frame_filters(wpa_s);
-#endif /* CONFIG_HS20 */
+		wpas_configure_frame_filters(wpa_s);
 	}
 
 	wpa_supplicant_rsn_supp_set_config(wpa_s, wpa_s->current_ssid);
@@ -5075,6 +5236,7 @@ int wpa_supplicant_remove_network(struct wpa_supplicant *wpa_s, int id)
 	if (!ssid)
 		return -1;
 	wpas_notify_network_removed(wpa_s, ssid);
+	radio_remove_pending_connect(wpa_s, ssid);
 
 	if (ssid == prev || !prev) {
 #ifdef CONFIG_SME
@@ -5762,14 +5924,14 @@ struct wpa_ssid * wpa_supplicant_get_ssid(struct wpa_supplicant *wpa_s)
 		      (!entry->ssid ||
 		       os_memcmp(ssid, entry->ssid, ssid_len) == 0)) ||
 		     wired) &&
-		    (!entry->bssid_set ||
+		    (wpa_s->valid_links || !entry->bssid_set ||
 		     ether_addr_equal(bssid, entry->bssid)))
 			return entry;
 #ifdef CONFIG_WPS
 		if (!wpas_network_disabled(wpa_s, entry) &&
 		    (entry->key_mgmt & WPA_KEY_MGMT_WPS) &&
 		    (entry->ssid == NULL || entry->ssid_len == 0) &&
-		    (!entry->bssid_set ||
+		    (wpa_s->valid_links || !entry->bssid_set ||
 		     ether_addr_equal(bssid, entry->bssid)))
 			return entry;
 #endif /* CONFIG_WPS */
@@ -5779,7 +5941,7 @@ struct wpa_ssid * wpa_supplicant_get_ssid(struct wpa_supplicant *wpa_s)
 		    (entry->ssid &&
 		     owe_trans_ssid_match(wpa_s, bssid, entry->ssid,
 					  entry->ssid_len)) &&
-		    (!entry->bssid_set ||
+		    (wpa_s->valid_links || !entry->bssid_set ||
 		     ether_addr_equal(bssid, entry->bssid)))
 			return entry;
 #endif /* CONFIG_OWE */
@@ -5910,6 +6072,7 @@ void wpa_supplicant_rx_eapol(void *ctx, const u8 *src_addr,
 #endif /* CONFIG_TESTING_OPTIONS */
 
 	if (wpa_s->wpa_state < WPA_ASSOCIATED ||
+	    wpa_s->ext_auth_to_same_bss ||
 	    (wpa_s->last_eapol_matches_bssid &&
 #ifdef CONFIG_AP
 	     !wpa_s->ap_iface &&
@@ -6081,7 +6244,8 @@ int wpa_supplicant_update_mac_addr(struct wpa_supplicant *wpa_s)
 
 	if ((!wpa_s->p2p_mgmt ||
 	     !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_DEDICATED_P2P_DEVICE)) &&
-	    !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_P2P_DEDICATED_INTERFACE)) {
+	    !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_P2P_DEDICATED_INTERFACE) &&
+	    !wpa_s->nan_mgmt) {
 		l2_packet_deinit(wpa_s->l2);
 		wpa_s->l2 = l2_packet_init(wpa_s->ifname,
 					   wpa_drv_get_mac_addr(wpa_s),
@@ -6110,6 +6274,11 @@ int wpa_supplicant_update_mac_addr(struct wpa_supplicant *wpa_s)
 
 	wpa_sm_set_own_addr(wpa_s->wpa, wpa_s->own_addr);
 	wpas_wps_update_mac_addr(wpa_s);
+
+#ifdef CONFIG_NAN_USD
+	if (wpa_s->nan_de)
+		nan_de_update_nmi(wpa_s->nan_de, wpa_s->own_addr);
+#endif /* CONFIG_NAN_USD */
 
 #ifdef CONFIG_FST
 	if (wpa_s->fst)
@@ -7038,7 +7207,6 @@ static void radio_work_free(struct wpa_radio_work *work)
 			work->wpa_s->radio->num_active_works);
 	}
 
-	dl_list_del(&work->list);
 	os_free(work);
 }
 
@@ -7231,6 +7399,7 @@ void radio_remove_works(struct wpa_supplicant *wpa_s,
 
 		wpa_dbg(wpa_s, MSG_DEBUG, "Remove radio work '%s'@%p%s",
 			work->type, work, work->started ? " (started)" : "");
+		dl_list_del(&work->list);
 		work->cb(work, 1);
 		radio_work_free(work);
 	}
@@ -7240,18 +7409,28 @@ void radio_remove_works(struct wpa_supplicant *wpa_s,
 }
 
 
-void radio_remove_pending_work(struct wpa_supplicant *wpa_s, void *ctx)
+static void radio_remove_pending_connect(struct wpa_supplicant *wpa_s,
+					 const struct wpa_ssid *ssid)
 {
-	struct wpa_radio_work *work;
+	struct wpa_radio_work *work, *tmp;
 	struct wpa_radio *radio = wpa_s->radio;
+	struct wpa_connect_work *cwork;
 
-	dl_list_for_each(work, &radio->work, struct wpa_radio_work, list) {
-		if (work->ctx != ctx)
+	dl_list_for_each_safe(work, tmp, &radio->work, struct wpa_radio_work,
+			      list) {
+		if (!radio_work_is_connect(work))
 			continue;
-		wpa_dbg(wpa_s, MSG_DEBUG, "Free pending radio work '%s'@%p%s",
-			work->type, work, work->started ? " (started)" : "");
+
+		cwork = work->ctx;
+		if (cwork->ssid != ssid)
+			continue;
+
+		wpa_printf(MSG_DEBUG, "Remove radio work '%s'@%p ssid=%s",
+			   work->type, work,
+			   wpa_ssid_txt(ssid->ssid, ssid->ssid_len));
+		dl_list_del(&work->list);
+		work->cb(work, 1);
 		radio_work_free(work);
-		break;
 	}
 }
 
@@ -7305,7 +7484,7 @@ void radio_work_check_next(struct wpa_supplicant *wpa_s)
  * @next: Force as the next work to be executed
  * @cb: Callback function for indicating when radio is available
  * @ctx: Context pointer for the work (work->ctx in cb())
- * Returns: 0 on success, -1 on failure
+ * Returns: Pointer to the newly created work, or %NULL on failure
  *
  * This function is used to request time for an operation that requires
  * exclusive radio control. Once the radio is available, the registered callback
@@ -7322,10 +7501,11 @@ void radio_work_check_next(struct wpa_supplicant *wpa_s)
  * Setting this to 0 indicates that the work item may use multiple channels or
  * requires exclusive control of the radio.
  */
-int radio_add_work(struct wpa_supplicant *wpa_s, unsigned int freq,
-		   const char *type, int next,
-		   void (*cb)(struct wpa_radio_work *work, int deinit),
-		   void *ctx)
+struct wpa_radio_work *
+radio_add_work(struct wpa_supplicant *wpa_s, unsigned int freq,
+	       const char *type, int next,
+	       void (*cb)(struct wpa_radio_work *work, int deinit),
+	       void *ctx)
 {
 	struct wpa_radio *radio = wpa_s->radio;
 	struct wpa_radio_work *work;
@@ -7333,7 +7513,7 @@ int radio_add_work(struct wpa_supplicant *wpa_s, unsigned int freq,
 
 	work = os_zalloc(sizeof(*work));
 	if (work == NULL)
-		return -1;
+		return NULL;
 	wpa_dbg(wpa_s, MSG_DEBUG, "Add radio work '%s'@%p", type, work);
 	os_get_reltime(&work->time);
 	work->freq = freq;
@@ -7368,7 +7548,7 @@ int radio_add_work(struct wpa_supplicant *wpa_s, unsigned int freq,
 		radio_work_check_next(wpa_s);
 	}
 
-	return 0;
+	return work;
 }
 
 
@@ -7385,11 +7565,16 @@ void radio_work_done(struct wpa_radio_work *work)
 	struct os_reltime now, diff;
 	unsigned int started = work->started;
 
+	/* If next is poisoned, then we are free'ing it already */
+	if (work->list.next == NULL)
+		return;
+
 	os_get_reltime(&now);
 	os_reltime_sub(&now, &work->time, &diff);
 	wpa_dbg(wpa_s, MSG_DEBUG, "Radio work '%s'@%p %s in %ld.%06ld seconds",
 		work->type, work, started ? "done" : "canceled",
 		diff.sec, diff.usec);
+	dl_list_del(&work->list);
 	radio_work_free(work);
 	if (started)
 		radio_work_check_next(wpa_s);
@@ -7529,7 +7714,9 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 #else /* CONFIG_BACKEND_FILE */
 		wpa_s->confname = os_strdup(iface->confname);
 #endif /* CONFIG_BACKEND_FILE */
-		wpa_s->conf = wpa_config_read(wpa_s->confname, NULL, false);
+		wpa_s->conf = wpa_config_read(
+			wpa_s->confname, NULL, false,
+			wpa_s->global->params.show_details);
 		if (wpa_s->conf == NULL) {
 			wpa_printf(MSG_ERROR, "Failed to read or parse "
 				   "configuration '%s'.", wpa_s->confname);
@@ -7537,7 +7724,8 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		}
 		wpa_s->confanother = os_rel2abs_path(iface->confanother);
 		if (wpa_s->confanother &&
-		    !wpa_config_read(wpa_s->confanother, wpa_s->conf, true)) {
+		    !wpa_config_read(wpa_s->confanother, wpa_s->conf, true,
+				     wpa_s->global->params.show_details)) {
 			wpa_printf(MSG_ERROR,
 				   "Failed to read or parse configuration '%s'.",
 				   wpa_s->confanother);
@@ -7660,6 +7848,7 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 						      &wpa_s->hw.num_modes,
 						      &wpa_s->hw.flags,
 						      &dfs_domain);
+	wpa_s->hw_dfs_domain = dfs_domain;
 	if (wpa_s->hw.modes) {
 		u16 i;
 
@@ -7680,6 +7869,8 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 
 	capa_res = wpa_drv_get_capa(wpa_s, &capa);
 	if (capa_res == 0) {
+		u16 eml_capa, mld_capa;
+
 		wpa_s->drv_capa_known = 1;
 		wpa_s->drv_flags = capa.flags;
 		wpa_s->drv_flags2 = capa.flags2;
@@ -7722,6 +7913,12 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		    wpa_s->extended_capa_len >= 3 &&
 		    wpa_s->extended_capa[2] & 0x40)
 			wpa_s->multi_bss_support = 1;
+
+		if (wpa_drv_get_mld_capa(wpa_s, WPA_IF_STATION,
+					 &eml_capa, &mld_capa) == 0) {
+			wpa_s->eml_capa = eml_capa;
+			wpa_s->mld_capa = mld_capa;
+		}
 	} else {
 		wpa_s->drv_max_probe_req_ie_len = 1500;
 	}
@@ -7742,6 +7939,12 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 	if (wpa_s->drv_flags & WPA_DRIVER_FLAGS_DEDICATED_P2P_DEVICE)
 		wpa_s->p2p_mgmt = iface->p2p_mgmt;
 
+	wpa_s->nan_mgmt = iface->nan_mgmt;
+
+	if ((wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_P2P_ASSISTED_DFS) &&
+	    wpa_s->conf->p2p_assisted_dfs_chan_enable)
+		wpa_s->allow_p2p_assisted_dfs = true;
+
 	if (wpa_s->num_multichan_concurrent == 0)
 		wpa_s->num_multichan_concurrent = 1;
 
@@ -7749,7 +7952,7 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		return -1;
 
 #ifdef CONFIG_TDLS
-	if (!iface->p2p_mgmt && wpa_tdls_init(wpa_s->wpa))
+	if (!iface->p2p_mgmt && !iface->nan_mgmt && wpa_tdls_init(wpa_s->wpa))
 		return -1;
 #endif /* CONFIG_TDLS */
 
@@ -7797,10 +8000,12 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		return -1;
 #endif /* CONFIG_DPP */
 
-#ifdef CONFIG_NAN_USD
-	if (wpas_nan_usd_init(wpa_s) < 0)
+	if (wpas_nan_de_init(wpa_s) < 0)
 		return -1;
-#endif /* CONFIG_NAN_USD */
+
+#ifdef CONFIG_NAN
+	wpa_s->nan_drv_flags = capa.nan_flags;
+#endif /* CONFIG_NAN */
 
 	if (wpa_supplicant_init_eapol(wpa_s) < 0)
 		return -1;
@@ -7826,12 +8031,23 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
+#ifdef CONFIG_P2P
+	if (wpa_s->drv_flags2 & (WPA_DRIVER_FLAGS2_P2P_FEATURE_V2 |
+				 WPA_DRIVER_FLAGS2_P2P_FEATURE_PCC_MODE)) {
+		wpa_s->p2p_pairing_setup = true;
+		wpa_s->p2p_pairing_cache = true;
+	}
+#endif /* CONFIG_P2P */
+
 	if ((!(wpa_s->drv_flags & WPA_DRIVER_FLAGS_DEDICATED_P2P_DEVICE) ||
 	     wpa_s->p2p_mgmt) &&
 	    wpas_p2p_init(wpa_s->global, wpa_s) < 0) {
 		wpa_msg(wpa_s, MSG_ERROR, "Failed to init P2P");
 		return -1;
 	}
+
+	if (wpas_pr_init(wpa_s->global, wpa_s, &capa) < 0)
+		return -1;
 
 	if (wpa_bss_init(wpa_s) < 0)
 		return -1;
@@ -7888,6 +8104,11 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 
 	wpa_supplicant_set_default_scan_ies(wpa_s);
 
+	if (wpa_s->nan_mgmt && wpas_nan_init(wpa_s) < 0) {
+		wpa_msg(wpa_s, MSG_ERROR, "Failed to init NAN");
+		return -1;
+	}
+
 	return 0;
 }
 
@@ -7938,6 +8159,8 @@ static void wpa_supplicant_deinit_iface(struct wpa_supplicant *wpa_s,
 
 	wpa_supplicant_cleanup(wpa_s);
 	wpas_p2p_deinit_iface(wpa_s);
+
+	wpas_nan_deinit(wpa_s);
 
 	wpas_ctrl_radio_work_flush(wpa_s);
 	radio_remove_interface(wpa_s);
@@ -8106,7 +8329,7 @@ struct wpa_supplicant * wpa_supplicant_add_iface(struct wpa_global *global,
 		return NULL;
 	}
 
-	if (iface->p2p_mgmt == 0) {
+	if (iface->p2p_mgmt == 0 && !iface->nan_mgmt) {
 		/* Notify the control interfaces about new iface */
 		if (wpas_notify_iface_added(wpa_s)) {
 			wpa_supplicant_deinit_iface(wpa_s, 1, 0);
@@ -8124,7 +8347,7 @@ struct wpa_supplicant * wpa_supplicant_add_iface(struct wpa_global *global,
 	wpa_supplicant_set_state(wpa_s, WPA_DISCONNECTED);
 
 #ifdef CONFIG_P2P
-	if (wpa_s->global->p2p == NULL &&
+	if (!wpa_s->global->p2p && !iface->nan_mgmt &&
 	    !wpa_s->global->p2p_disabled && !wpa_s->conf->p2p_disabled &&
 	    (wpa_s->drv_flags & WPA_DRIVER_FLAGS_DEDICATED_P2P_DEVICE) &&
 	    wpas_p2p_add_p2pdev_interface(
@@ -8342,6 +8565,7 @@ struct wpa_global * wpa_supplicant_init(struct wpa_params *params)
 	global->params.daemonize = params->daemonize;
 	global->params.wait_for_monitor = params->wait_for_monitor;
 	global->params.dbus_ctrl_interface = params->dbus_ctrl_interface;
+	global->params.show_details = params->show_details;
 
 	if (params->pid_file) {
 		global->params.pid_file = os_strdup(params->pid_file);
@@ -8432,6 +8656,16 @@ struct wpa_global * wpa_supplicant_init(struct wpa_params *params)
 	}
 
 	random_init(params->entropy_file);
+
+#ifdef CONFIG_PROCESS_COORDINATION
+	if (params->proc_coord_dir) {
+		global->pc = proc_coord_init(params->proc_coord_dir);
+		if (!global->pc) {
+			wpa_supplicant_deinit(global);
+			return NULL;
+		}
+	}
+#endif /* CONFIG_PROCESS_COORDINATION */
 
 	global->ctrl_iface = wpa_supplicant_global_ctrl_iface_init(global);
 	if (global->ctrl_iface == NULL) {
@@ -8553,6 +8787,10 @@ void wpa_supplicant_deinit(struct wpa_global *global)
 
 	random_deinit();
 
+#ifdef CONFIG_PROCESS_COORDINATION
+	proc_coord_deinit(global->pc);
+#endif /* CONFIG_PROCESS_COORDINATION */
+
 	eloop_destroy();
 
 	if (global->params.pid_file) {
@@ -8578,6 +8816,24 @@ void wpa_supplicant_deinit(struct wpa_global *global)
 	wpa_debug_close_syslog();
 	wpa_debug_close_file();
 	wpa_debug_close_linux_tracing();
+}
+
+
+int wpa_supplicant_parse_config(const char *fname)
+{
+	struct wpa_config *conf;
+	int ret = -1;
+
+	wpa_printf(MSG_INFO, "Validating parsing of %s", fname);
+	conf = wpa_config_read(fname, NULL, false, true);
+	if (conf) {
+		wpa_printf(MSG_INFO, "Parsing succeeded");
+		ret = 0;
+		wpa_config_free(conf);
+	} else {
+		wpa_printf(MSG_INFO, "Parsing failed");
+	}
+	return ret;
 }
 
 
@@ -8618,6 +8874,11 @@ void wpa_supplicant_update_config(struct wpa_supplicant *wpa_s)
 		wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_FT_PREPEND_PMKID,
 				 wpa_s->conf->ft_prepend_pmkid);
 
+#ifdef CONFIG_P2P
+	if (wpa_s->conf->changed_parameters & CFG_CHANGED_P2P_DISABLED)
+		wpas_p2p_disabled_changed(wpa_s);
+#endif /* CONFIG_P2P */
+
 #ifdef CONFIG_BGSCAN
 	/*
 	 * We default to global bgscan parameters only when per-network bgscan
@@ -8638,60 +8899,11 @@ void wpa_supplicant_update_config(struct wpa_supplicant *wpa_s)
 }
 
 
-void add_freq(int *freqs, int *num_freqs, int freq)
-{
-	int i;
-
-	for (i = 0; i < *num_freqs; i++) {
-		if (freqs[i] == freq)
-			return;
-	}
-
-	freqs[*num_freqs] = freq;
-	(*num_freqs)++;
-}
-
-
-static int * get_bss_freqs_in_ess(struct wpa_supplicant *wpa_s)
-{
-	struct wpa_bss *bss, *cbss;
-	const int max_freqs = 10;
-	int *freqs;
-	int num_freqs = 0;
-
-	freqs = os_calloc(max_freqs + 1, sizeof(int));
-	if (freqs == NULL)
-		return NULL;
-
-	cbss = wpa_s->current_bss;
-
-	dl_list_for_each(bss, &wpa_s->bss, struct wpa_bss, list) {
-		if (bss == cbss)
-			continue;
-		if (bss->ssid_len == cbss->ssid_len &&
-		    os_memcmp(bss->ssid, cbss->ssid, bss->ssid_len) == 0 &&
-		    !wpa_bssid_ignore_is_listed(wpa_s, bss->bssid)) {
-			add_freq(freqs, &num_freqs, bss->freq);
-			if (num_freqs == max_freqs)
-				break;
-		}
-	}
-
-	if (num_freqs == 0) {
-		os_free(freqs);
-		freqs = NULL;
-	}
-
-	return freqs;
-}
-
-
 void wpas_connection_failed(struct wpa_supplicant *wpa_s, const u8 *bssid,
 			    const u8 **link_bssids)
 {
 	int timeout;
 	int count;
-	int *freqs = NULL;
 
 	wpas_connect_work_done(wpa_s);
 
@@ -8728,27 +8940,15 @@ void wpas_connection_failed(struct wpa_supplicant *wpa_s, const u8 *bssid,
 	 * attempt if there could be other APs that could accept association.
 	 */
 	count = wpa_bssid_ignore_add(wpa_s, bssid);
-	if (count == 1 && wpa_s->current_bss) {
-		/*
-		 * This BSS was not in the ignore list before. If there is
-		 * another BSS available for the same ESS, we should try that
-		 * next. Otherwise, we may as well try this one once more
-		 * before allowing other, likely worse, ESSes to be considered.
-		 */
-		freqs = get_bss_freqs_in_ess(wpa_s);
-		if (freqs) {
-			wpa_dbg(wpa_s, MSG_DEBUG, "Another BSS in this ESS "
-				"has been seen; try it next");
-			wpa_bssid_ignore_add(wpa_s, bssid);
-			/*
-			 * On the next scan, go through only the known channels
-			 * used in this ESS based on previous scans to speed up
-			 * common load balancing use case.
-			 */
-			os_free(wpa_s->next_scan_freqs);
-			wpa_s->next_scan_freqs = freqs;
-		}
-	}
+
+	/*
+	 * This BSS was not in the ignore list before. If there is
+	 * another BSS available for the same ESS, we should try that
+	 * next. Otherwise, we may as well try this one once more
+	 * before allowing other, likely worse, ESSes to be considered.
+	 */
+	if (count == 1 && wpa_supplicant_fast_associate(wpa_s) == 1)
+		return;
 
 	wpa_s->consecutive_conn_failures++;
 
@@ -8783,11 +8983,6 @@ void wpas_connection_failed(struct wpa_supplicant *wpa_s, const u8 *bssid,
 	wpa_dbg(wpa_s, MSG_DEBUG,
 		"Consecutive connection failures: %d --> request scan in %d ms",
 		wpa_s->consecutive_conn_failures, timeout);
-
-	/*
-	 * TODO: if more than one possible AP is available in scan results,
-	 * could try the other ones before requesting a new scan.
-	 */
 
 	/* speed up the connection attempt with normal scan */
 	wpa_s->normal_scans = 0;
@@ -9312,6 +9507,9 @@ void wpas_request_connection(struct wpa_supplicant *wpa_s)
 	wpa_s->disconnected = 0;
 	wpa_s->reassociate = 1;
 	wpa_s->last_owe_group = 0;
+#ifdef CONFIG_PASN
+	wpa_pasn_reset(&wpa_s->pasn);
+#endif /* CONFIG_PASN */
 
 	if (wpa_supplicant_fast_associate(wpa_s) != 1)
 		wpa_supplicant_req_scan(wpa_s, 0, 0);
@@ -9375,7 +9573,6 @@ int get_shared_radio_freqs_data(struct wpa_supplicant *wpa_s,
 {
 	struct wpa_supplicant *ifs;
 	u8 bssid[ETH_ALEN];
-	int freq;
 	unsigned int idx = 0, i;
 
 	wpa_dbg(wpa_s, MSG_DEBUG,
@@ -9384,36 +9581,64 @@ int get_shared_radio_freqs_data(struct wpa_supplicant *wpa_s,
 
 	dl_list_for_each(ifs, &wpa_s->radio->ifaces, struct wpa_supplicant,
 			 radio_list) {
+		int freqs[MAX_NUM_MLD_LINKS];
+		unsigned int j, n_freqs = 0;
+
 		if (idx == len)
 			break;
 
 		if (exclude_current && ifs == wpa_s)
 			continue;
 
-		if (ifs->current_ssid == NULL || ifs->assoc_freq == 0)
+		if (!ifs->current_ssid ||
+		    (!ifs->assoc_freq && !ifs->valid_links))
 			continue;
 
 		if (ifs->current_ssid->mode == WPAS_MODE_AP ||
 		    ifs->current_ssid->mode == WPAS_MODE_P2P_GO ||
-		    ifs->current_ssid->mode == WPAS_MODE_MESH)
-			freq = ifs->current_ssid->frequency;
-		else if (wpa_drv_get_bssid(ifs, bssid) == 0)
-			freq = ifs->assoc_freq;
-		else
+		    ifs->current_ssid->mode == WPAS_MODE_MESH) {
+			freqs[n_freqs++] = ifs->current_ssid->frequency;
+		} else if (ifs->valid_links) {
+			struct driver_sta_mlo_info drv_mlo;
+
+			os_memset(&drv_mlo, 0, sizeof(drv_mlo));
+
+			if (wpas_drv_get_sta_mlo_info(ifs, &drv_mlo)) {
+				wpa_dbg(wpa_s, MSG_INFO,
+					"Failed to get MLO link info");
+				continue;
+			}
+
+			if (!drv_mlo.valid_links)
+				continue;
+
+			for_each_link(drv_mlo.valid_links, j) {
+				if (!drv_mlo.links[j].freq)
+					continue;
+
+				freqs[n_freqs++] = drv_mlo.links[j].freq;
+			}
+		} else if (wpa_drv_get_bssid(ifs, bssid) == 0) {
+			freqs[n_freqs++] = ifs->assoc_freq;
+		} else {
 			continue;
+		}
 
 		/* Hold only distinct freqs */
-		for (i = 0; i < idx; i++)
-			if (freqs_data[i].freq == freq)
-				break;
+		for (j = 0; j < n_freqs && idx < len; j++) {
+			for (i = 0; i < idx; i++)
+				if (freqs_data[i].freq == freqs[j])
+					break;
 
-		if (i == idx)
-			freqs_data[idx++].freq = freq;
+			if (i == idx)
+				freqs_data[idx++].freq = freqs[j];
 
-		if (ifs->current_ssid->mode == WPAS_MODE_INFRA) {
-			freqs_data[i].flags |= ifs->current_ssid->p2p_group ?
-				WPA_FREQ_USED_BY_P2P_CLIENT :
-				WPA_FREQ_USED_BY_INFRA_STATION;
+			if (ifs->current_ssid->mode == WPAS_MODE_INFRA) {
+				freqs_data[i].flags |=
+					ifs->current_ssid->p2p_group ?
+					WPA_FREQ_USED_BY_P2P_CLIENT :
+					WPA_FREQ_USED_BY_INFRA_STATION;
+			}
 		}
 	}
 
@@ -9972,4 +10197,76 @@ int wpas_get_owe_trans_network(const u8 *owe_ie, const u8 **bssid,
 #else /* CONFIG_OWE */
 	return -1;
 #endif /* CONFIG_OWE */
+}
+
+
+void wpas_update_dfs_ap_info(struct wpa_supplicant *wpa_s, int freq,
+			     enum chan_width ap_ch_width,
+			     bool disconnect_evt)
+{
+	if (disconnect_evt) {
+		wpa_printf(MSG_DEBUG, "Disconnect event of DFS AP");
+		wpa_s->sta_connected_freq = 0;
+		wpa_s->sta_connected_chan_width = CHAN_WIDTH_UNKNOWN;
+	} else {
+		wpa_s->sta_connected_freq = freq;
+		wpa_s->sta_connected_chan_width = ap_ch_width;
+	}
+	wpa_s->dfs_ap_connected = !disconnect_evt;
+
+#ifdef CONFIG_P2P
+	if (wpa_s->global->p2p)
+		p2p_update_dfs_ap_info(wpa_s->global->p2p, freq, ap_ch_width,
+				       disconnect_evt);
+#endif /* CONFIG_P2P */
+}
+
+
+void wpas_configure_frame_filters(struct wpa_supplicant *wpa_s)
+{
+	struct wpa_bss *bss = wpa_s->current_bss;
+	u32 filter = 0;
+	bool hs20, proxy_arp_capa;
+
+	if (!bss)
+		return;
+
+#ifdef CONFIG_HS20
+	hs20 = is_hs20_network(wpa_s, wpa_s->current_ssid, bss);
+#else /* CONFIG_HS20 */
+	hs20 = false;
+#endif /* CONFIG_HS20 */
+
+	if (wpa_s->current_ssid &&
+	    wpa_s->current_ssid->drop_unicast_ip_in_l2_multicast) {
+		filter |= WPA_DATA_FRAME_FILTER_FLAG_GTK;
+	} else if (!hs20) {
+		/* Not configuring frame filtering - BSS is not a Hotspot 2.0
+		 * network */
+		return;
+	} else {
+#ifdef CONFIG_HS20
+		const u8 *ie;
+
+		ie = wpa_bss_get_vendor_ie(bss, HS20_IE_VENDOR_TYPE);
+
+		/* Check if DGAF disabled bit is zero (5th byte in the IE) */
+		if (!ie || ie[1] < 5)
+			wpa_printf(MSG_DEBUG,
+				   "Not configuring frame filtering - Can't extract DGAF bit");
+		else if (!(ie[6] & HS20_DGAF_DISABLED))
+			filter |= WPA_DATA_FRAME_FILTER_FLAG_GTK;
+#endif /* CONFIG_HS20 */
+	}
+
+	proxy_arp_capa = wpa_bss_ext_capab(bss, WLAN_EXT_CAPAB_PROXY_ARP);
+
+	if ((hs20 && proxy_arp_capa) ||
+	    wpa_s->current_ssid->always_use_proxy_arp == 2 ||
+	    (proxy_arp_capa && wpa_s->current_ssid &&
+	     wpa_s->current_ssid->always_use_proxy_arp == 1))
+		filter |= WPA_DATA_FRAME_FILTER_FLAG_ARP |
+			WPA_DATA_FRAME_FILTER_FLAG_NA;
+
+	wpa_drv_configure_frame_filters(wpa_s, filter);
 }

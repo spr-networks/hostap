@@ -9,6 +9,8 @@
 #ifndef IEEE802_11_H
 #define IEEE802_11_H
 
+#include "utils/list.h"
+
 struct hostapd_iface;
 struct hostapd_data;
 struct sta_info;
@@ -24,6 +26,35 @@ struct sae_pk;
 struct sae_pt;
 struct sae_password_entry;
 struct mld_info;
+struct mld_link_info;
+
+enum link_parse_type {
+	LINK_PARSE_ASSOC,
+	LINK_PARSE_REASSOC,
+	LINK_PARSE_RECONF,
+};
+
+#define LINK_RECONF_GROUP_KDE_MAX_LEN 255
+
+struct link_reconf_req_info {
+	struct dl_list list;
+	u16 status;
+	u8 link_id;
+	u8 local_addr[ETH_ALEN];
+	u8 peer_addr[ETH_ALEN];
+	size_t sta_prof_len;
+	u8 sta_prof[];
+};
+
+struct link_reconf_req_list {
+	u8 sta_mld_addr[ETH_ALEN];
+	u8 dialog_token;
+	u16 links_add_ok;
+	u16 links_del_ok;
+	u16 new_valid_links;
+	struct dl_list del_req; /* list of struct link_reconf_req_info */
+	struct dl_list add_req; /* list of struct link_reconf_req_info */
+};
 
 int ieee802_11_mgmt(struct hostapd_data *hapd, const u8 *buf, size_t len,
 		    struct hostapd_frame_info *fi);
@@ -94,6 +125,12 @@ u8 * hostapd_eid_eht_ml_beacon(struct hostapd_data *hapd,
 			       u8 *eid, bool include_mld_id);
 u8 * hostapd_eid_eht_ml_assoc(struct hostapd_data *hapd, struct sta_info *info,
 			      u8 *eid);
+u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
+				     u8 *eid, struct mld_info *mld_info,
+				     bool include_mld_id, bool include_bpcc);
+size_t hostapd_eid_eht_basic_ml_len(struct hostapd_data *hapd,
+				    struct sta_info *info,
+				    bool include_mld_id, bool include_pbcc);
 size_t hostapd_eid_eht_ml_beacon_len(struct hostapd_data *hapd,
 				     struct mld_info *info,
 				     bool include_mld_id);
@@ -252,9 +289,12 @@ u8 * hostapd_eid_mbssid(struct hostapd_data *hapd, u8 *eid, u8 *end,
 			u8 **elem_offset,
 			const u8 *known_bss, size_t known_bss_len, u8 *rnr_eid,
 			u8 *rnr_count, u8 **rnr_offset, size_t rnr_len);
-bool hostapd_is_mld_ap(struct hostapd_data *hapd);
+bool hostapd_is_multiple_link_mld(struct hostapd_data *hapd);
+int sae_password_bind(struct hostapd_data *hapd, const u8 *addr,
+		      const char *password);
 const char * sae_get_password(struct hostapd_data *hapd,
-			      struct sta_info *sta, const char *rx_id,
+			      struct sta_info *sta, const u8 *rx_id,
+			      size_t rx_id_len,
 			      struct sae_password_entry **pw_entry,
 			      struct sae_pt **s_pt, const struct sae_pk **s_pk);
 struct sta_info * hostapd_ml_get_assoc_sta(struct hostapd_data *hapd,
@@ -264,6 +304,28 @@ int hostapd_process_assoc_ml_info(struct hostapd_data *hapd,
 				  struct sta_info *sta,
 				  const u8 *ies, size_t ies_len,
 				  bool reassoc, int tx_link_status,
-				  bool offload);
+				  bool offload,
+				  bool *set_beacon);
+
+void ml_deinit_link_reconf_req(struct link_reconf_req_list **req_list_ptr);
+int ieee80211_ml_process_link(struct hostapd_data *hapd,
+			      struct sta_info *origin_sta,
+			      struct mld_link_info *link,
+			      const u8 *ies, size_t ies_len,
+			      enum link_parse_type type, bool offload,
+			      bool *set_beacon);
+void ieee80211_ml_build_assoc_resp(struct hostapd_data *hapd,
+				   struct mld_link_info *link);
+
+void ieee802_11_rx_protected_eht_action(struct hostapd_data *hapd,
+					const struct ieee80211_mgmt *mgmt,
+					size_t len);
+void hostapd_link_reconf_resp_tx_status(struct hostapd_data *hapd,
+					struct sta_info *sta,
+					const struct ieee80211_mgmt *mgmt,
+					size_t len, int ok);
+
+size_t hostapd_eid_eht_ml_tid_to_link_map_len(struct hostapd_data *hapd);
+u8 * hostapd_eid_eht_ml_tid_to_link_map(struct hostapd_data *hapd, u8 *eid);
 
 #endif /* IEEE802_11_H */

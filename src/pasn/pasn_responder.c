@@ -2,7 +2,7 @@
  * PASN responder processing
  *
  * Copyright (C) 2019, Intel Corporation
- * Copyright (C) 2022, Qualcomm Innovation Center, Inc.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -17,6 +17,7 @@
 #include "common/ieee802_11_defs.h"
 #include "crypto/sha384.h"
 #include "crypto/sha256.h"
+#include "crypto/sha512.h"
 #include "crypto/random.h"
 #include "crypto/crypto.h"
 #include "ap/hostapd.h"
@@ -141,10 +142,16 @@ static int pasn_wd_handle_sae_commit(struct pasn_data *pasn,
 		return -1;
 	}
 
+	pasn->sae.akmp = pasn->akmp;
 	if (!pasn->password || !pasn->pt) {
 		wpa_printf(MSG_DEBUG, "PASN: No SAE PT found");
 		return -1;
 	}
+
+#ifdef CONFIG_ENC_ASSOC
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE && pasn->is_ml_peer)
+		own_addr = pasn->mld_addr;
+#endif /* CONFIG_ENC_ASSOC */
 
 	ret = sae_prepare_commit_pt(&pasn->sae, pasn->pt, own_addr, peer_addr,
 				    NULL, NULL);
@@ -154,7 +161,7 @@ static int pasn_wd_handle_sae_commit(struct pasn_data *pasn,
 	}
 
 	res = sae_parse_commit(&pasn->sae, data + 6, buf_len - 6, NULL, NULL,
-			       groups, 0, NULL);
+			       groups, 1, NULL);
 	if (res != WLAN_STATUS_SUCCESS) {
 		wpa_printf(MSG_DEBUG, "PASN: Failed parsing SAE commit");
 		return -1;
@@ -225,6 +232,10 @@ static int pasn_wd_handle_sae_confirm(struct pasn_data *pasn,
 	if (!pasn->sae.akmp)
 		pasn->sae.akmp = WPA_KEY_MGMT_SAE;
 
+#ifdef CONFIG_PMKSA_PRIVACY
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE)
+		os_memcpy(pasn->epp_pmkid_cur, pasn->sae.pmkid, PMKID_LEN);
+#endif /* CONFIG_PMKSA_PRIVACY */
 	pmksa_cache_auth_add(pasn->pmksa, pasn->sae.pmk, pasn->sae.pmk_len,
 			     pasn->sae.pmkid, NULL, 0, pasn->own_addr,
 			     peer_addr, 0, NULL, pasn->sae.akmp);
@@ -252,7 +263,7 @@ static struct wpabuf * pasn_get_sae_wd(struct pasn_data *pasn)
 	wpabuf_put_le16(buf, WLAN_STATUS_SAE_HASH_TO_ELEMENT);
 
 	/* Write the actual commit and update the length accordingly */
-	sae_write_commit(&pasn->sae, buf, NULL, NULL);
+	sae_write_commit(&pasn->sae, buf, NULL, NULL, 0);
 	len = wpabuf_len(buf);
 	WPA_PUT_LE16(len_ptr, len - 2);
 
@@ -293,7 +304,7 @@ static struct wpabuf * pasn_get_fils_wd(struct pasn_data *pasn)
 	wpabuf_put_le16(buf, WLAN_AUTH_FILS_SK);
 
 	/* Authentication Transaction seq# */
-	wpabuf_put_le16(buf, 2);
+	wpabuf_put_le16(buf, WLAN_AUTH_TR_SEQ_PASN_AUTH2);
 
 	/* Status Code */
 	wpabuf_put_le16(buf, WLAN_STATUS_SUCCESS);
@@ -303,9 +314,9 @@ static struct wpabuf * pasn_get_fils_wd(struct pasn_data *pasn)
 
 	/* FILS Nonce */
 	wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
-	wpabuf_put_u8(buf, 1 + FILS_NONCE_LEN);
-	wpabuf_put_u8(buf, WLAN_EID_EXT_FILS_NONCE);
-	wpabuf_put_data(buf, fils->anonce, FILS_NONCE_LEN);
+	wpabuf_put_u8(buf, 1 + NONCE_LEN);
+	wpabuf_put_u8(buf, WLAN_EID_EXT_NONCE);
+	wpabuf_put_data(buf, fils->anonce, NONCE_LEN);
 
 	/* FILS Session */
 	wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
@@ -331,6 +342,7 @@ static struct wpabuf * pasn_get_wrapped_data(struct pasn_data *pasn)
 		/* no wrapped data */
 		return NULL;
 	case WPA_KEY_MGMT_SAE:
+	case WPA_KEY_MGMT_SAE_EXT_KEY:
 #ifdef CONFIG_SAE
 		return pasn_get_sae_wd(pasn);
 #else /* CONFIG_SAE */
@@ -389,9 +401,10 @@ pasn_derive_keys(struct pasn_data *pasn,
 		switch (pasn->akmp) {
 #ifdef CONFIG_SAE
 		case WPA_KEY_MGMT_SAE:
+		case WPA_KEY_MGMT_SAE_EXT_KEY:
 			if (pasn->sae.state == SAE_COMMITTED) {
-				pmk_len = PMK_LEN;
-				os_memcpy(pmk, pasn->sae.pmk, PMK_LEN);
+				pmk_len = pasn->sae.pmk_len;
+				os_memcpy(pmk, pasn->sae.pmk, pmk_len);
 				break;
 			}
 #endif /* CONFIG_SAE */
@@ -406,10 +419,23 @@ pasn_derive_keys(struct pasn_data *pasn,
 
 	pasn->pmk_len = pmk_len;
 	os_memcpy(pasn->pmk, pmk, pmk_len);
+
+#ifdef CONFIG_ENC_ASSOC
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE && pasn->is_ml_peer)
+		own_addr = pasn->mld_addr;
+
+	if (pasn->derive_kek) {
+		pasn->kek_len = wpa_kek_len(pasn->akmp, pasn->pmk_len);
+		wpa_printf(MSG_DEBUG, "PASN: kek_len=%zu", pasn->kek_len);
+	}
+#endif /* CONFIG_ENC_ASSOC */
+
 	ret = pasn_pmk_to_ptk(pmk, pmk_len, peer_addr, own_addr,
 			      wpabuf_head(secret), wpabuf_len(secret),
 			      &pasn->ptk, pasn->akmp,
-			      pasn->cipher, pasn->kdk_len, pasn->kek_len);
+			      pasn->cipher, pasn->kdk_len, pasn->kek_len,
+			      &pasn->hash_alg,
+			      pasn->auth_alg == WLAN_AUTH_EPPKE);
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "PASN: Failed to derive PTK");
 		return -1;
@@ -446,7 +472,8 @@ static void handle_auth_pasn_comeback(struct pasn_data *pasn,
 		return;
 
 	wpa_pasn_build_auth_header(buf, pasn->bssid, own_addr, peer_addr, 2,
-				   WLAN_STATUS_ASSOC_REJECTED_TEMPORARILY);
+				   WLAN_STATUS_ASSOC_REJECTED_TEMPORARILY,
+				   pasn->auth_alg == WLAN_AUTH_EPPKE);
 
 	/*
 	 * Do not include the group as a part of the token since it is not going
@@ -504,7 +531,7 @@ int handle_auth_pasn_resp(struct pasn_data *pasn, const u8 *own_addr,
 		goto fail;
 
 	wpa_pasn_build_auth_header(buf, pasn->bssid, own_addr, peer_addr, 2,
-				   status);
+				   status, pasn->auth_alg == WLAN_AUTH_EPPKE);
 
 	if (status != WLAN_STATUS_SUCCESS)
 		goto done;
@@ -514,7 +541,8 @@ int handle_auth_pasn_resp(struct pasn_data *pasn, const u8 *own_addr,
 	else if (pmksa) {
 		pmkid = pmksa->pmkid;
 #ifdef CONFIG_SAE
-	} else if (pasn->akmp == WPA_KEY_MGMT_SAE) {
+	} else if (pasn->akmp == WPA_KEY_MGMT_SAE ||
+		   pasn->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
 		wpa_printf(MSG_DEBUG, "PASN: Use SAE PMKID");
 		pmkid = pasn->sae.pmkid;
 #endif /* CONFIG_SAE */
@@ -545,30 +573,43 @@ int handle_auth_pasn_resp(struct pasn_data *pasn, const u8 *own_addr,
 		goto fail;
 	}
 
-	wpa_pasn_add_parameter_ie(buf, pasn->group,
-				  pasn->wrapped_data_format,
-				  pubkey, true, NULL, 0);
-
 	if (wpa_pasn_add_wrapped_data(buf, wrapped_data_buf) < 0)
 		goto fail;
 
 	wpabuf_free(wrapped_data_buf);
 	wrapped_data_buf = NULL;
-	wpabuf_free(pubkey);
-	pubkey = NULL;
 
 	/* Add RSNXE if needed */
 	rsnxe_ie = pasn->rsnxe_ie;
 	if (rsnxe_ie)
 		wpabuf_put_data(buf, rsnxe_ie, 2 + rsnxe_ie[1]);
 
+	wpa_pasn_add_parameter_ie(buf, pasn->group,
+				  pasn->wrapped_data_format,
+				  pubkey, true, NULL, 0);
+
+	wpabuf_free(pubkey);
+	pubkey = NULL;
+
 	if (pasn->prepare_data_element && pasn->cb_ctx)
 		pasn->prepare_data_element(pasn->cb_ctx, peer_addr);
 
 	wpa_pasn_add_extra_ies(buf, pasn->extra_ies, pasn->extra_ies_len);
 
+#ifdef CONFIG_ENC_ASSOC
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE && pasn->is_ml_peer) {
+		wpa_printf(MSG_DEBUG, "EPPKE: Add Multi Link element");
+		wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
+		wpabuf_put_u8(buf, 10);
+		wpabuf_put_u8(buf, WLAN_EID_EXT_MULTI_LINK);
+		wpabuf_put_le16(buf, MULTI_LINK_CONTROL_TYPE_BASIC);
+		wpabuf_put_u8(buf, ETH_ALEN + 1);
+		wpabuf_put_data(buf, pasn->mld_addr, ETH_ALEN);
+	}
+#endif /* CONFIG_ENC_ASSOC */
+
 	/* Add the mic */
-	mic_len = pasn_mic_len(pasn->akmp, pasn->cipher);
+	mic_len = pasn_mic_len(pasn->hash_alg);
 	wpabuf_put_u8(buf, WLAN_EID_MIC);
 	wpabuf_put_u8(buf, mic_len);
 	ptr = wpabuf_put(buf, mic_len);
@@ -618,7 +659,12 @@ int handle_auth_pasn_resp(struct pasn_data *pasn, const u8 *own_addr,
 		data = rsn_ie;
 	}
 
-	ret = pasn_mic(pasn->ptk.kck, pasn->akmp, pasn->cipher,
+#ifdef CONFIG_ENC_ASSOC
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE && pasn->is_ml_peer)
+		own_addr = pasn->mld_addr;
+#endif /* CONFIG_ENC_ASSOC */
+
+	ret = pasn_mic(pasn->hash_alg, pasn->ptk.kck, pasn->ptk.kck_len,
 		       own_addr, peer_addr, data, data_len,
 		       frame, frame_len, mic);
 	os_free(data_buf);
@@ -657,6 +703,37 @@ fail:
 	wpabuf_free(rsn_buf);
 	wpabuf_free(buf);
 	return -1;
+}
+
+
+static struct rsn_pmksa_cache_entry *
+pasn_resp_find_pmksa(struct pasn_data *pasn, const struct ieee80211_mgmt *mgmt,
+		     const struct ieee802_11_elems *elems, const u8 *peer_addr,
+		     const u8 *pmkid)
+{
+#ifdef CONFIG_PMKSA_PRIVACY
+	/* Per IEEE 802.11bi/D4.0, 12.16.7 (PMKSA caching privacy), a STA can
+	 * randomize its MAC address or MLD MAC address to avoid tracking based
+	 * on the MAC address. With PMKSA caching privacy, PMKSA entries can
+	 * still be found using the latest derived PMKID. In this cases, the MAC
+	 * address matching is not used. */
+	if (pasn->pmksa_cache_search &&
+	    mgmt->u.auth.auth_alg == WLAN_AUTH_EPPKE &&
+	    pasn->pmksa_caching_privacy &&
+	    ieee802_11_rsnx_capab_len(elems->rsnxe, elems->rsnxe_len,
+				      WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY)) {
+		struct rsn_pmksa_cache_entry *pmksa;
+
+		pmksa = pasn->pmksa_cache_search(pasn->cb_ctx, NULL, pmkid,
+						 pasn->is_ml_peer);
+		if (pmksa) {
+			os_memcpy(pasn->epp_pmkid_cur, pmkid, PMKID_LEN);
+			return pmksa;
+		}
+	}
+#endif /* CONFIG_PMKSA_PRIVACY */
+
+	return pmksa_cache_auth_get(pasn->pmksa, peer_addr, pmkid);
 }
 
 
@@ -712,12 +789,25 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 		goto send_resp;
 	}
 
-	ret = wpa_pasn_validate_rsne(&rsn_data);
+	ret = wpa_pasn_validate_rsne(&rsn_data,
+				     pasn->auth_alg == WLAN_AUTH_EPPKE);
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "PASN: Failed validating RSNE");
 		status = WLAN_STATUS_INVALID_RSNIE;
 		goto send_resp;
 	}
+
+#ifdef CONFIG_ENC_ASSOC
+	/* IEEE 802.11bi/D4.0, 12.16.9 (Enhanced privacy protection key
+	 * exchange) allows the use of SAE-EXT/FT-SAE-EXT as the base AKMP.
+	 */
+	if (mgmt->u.auth.auth_alg == WLAN_AUTH_EPPKE &&
+	    !wpa_key_mgmt_sae_ext_key(rsn_data.key_mgmt)) {
+		wpa_printf(MSG_DEBUG, "EPPKE: Invalid base AKM");
+		status = WLAN_STATUS_INVALID_RSNIE;
+		goto send_resp;
+	}
+#endif /* CONFIG_ENC_ASSOC */
 
 	if (!(rsn_data.key_mgmt & pasn->wpa_key_mgmt) ||
 	    !(rsn_data.pairwise_cipher & pasn->rsn_pairwise)) {
@@ -741,13 +831,26 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 
 	wpa_printf(MSG_DEBUG, "PASN: kdk_len=%zu", pasn->kdk_len);
 
-	if (!ieee802_11_rsnx_capab_len(elems.rsnxe, elems.rsnxe_len,
+	if (!pasn->derive_kek ||
+	    !ieee802_11_rsnx_capab_len(elems.rsnxe, elems.rsnxe_len,
 				       WLAN_RSNX_CAPAB_KEK_IN_PASN)) {
 		pasn->kek_len = 0;
 		pasn->derive_kek = false;
 	}
 
 	wpa_printf(MSG_DEBUG, "PASN: kek_len=%zu", pasn->kek_len);
+
+#ifdef CONFIG_ENC_ASSOC
+	if (mgmt->u.auth.auth_alg == WLAN_AUTH_EPPKE &&
+	    !ieee802_11_rsnx_capab_len(elems.rsnxe, elems.rsnxe_len,
+				       WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION))
+	{
+		wpa_printf(MSG_DEBUG,
+			   "EPPKE: Missing (Re)Association Request/Response frame encryption support in RSNXE");
+		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
+		goto send_resp;
+	}
+#endif /* CONFIG_ENC_ASSOC */
 
 	if (!elems.pasn_params || !elems.pasn_params_len) {
 		wpa_printf(MSG_DEBUG,
@@ -803,6 +906,10 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 		return -1;
 	}
 
+	if (pasn->ecdh) {
+		crypto_ecdh_deinit(pasn->ecdh);
+		pasn->ecdh = NULL;
+	}
 	pasn->ecdh = crypto_ecdh_init(pasn_params.group);
 	if (!pasn->ecdh) {
 		wpa_printf(MSG_DEBUG, "PASN: Failed to init ECDH");
@@ -851,7 +958,8 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 		}
 
 #ifdef CONFIG_SAE
-		if (pasn->akmp == WPA_KEY_MGMT_SAE) {
+		if (pasn->akmp == WPA_KEY_MGMT_SAE ||
+		    pasn->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
 			ret = pasn_wd_handle_sae_commit(pasn, own_addr,
 							peer_addr,
 							wrapped_data);
@@ -887,11 +995,11 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 
 	pasn->wrapped_data_format = pasn_params.wrapped_data_format;
 
-	ret = pasn_auth_frame_hash(pasn->akmp, pasn->cipher,
-				   ((const u8 *) mgmt) + IEEE80211_HDRLEN,
-				   len - IEEE80211_HDRLEN, pasn->hash);
-	if (ret) {
-		wpa_printf(MSG_DEBUG, "PASN: Failed to compute hash");
+	wpabuf_free(pasn->auth1);
+	pasn->auth1 = wpabuf_alloc_copy(((const u8 *) mgmt) + IEEE80211_HDRLEN,
+					len - IEEE80211_HDRLEN);
+	if (!pasn->auth1) {
+		wpa_printf(MSG_DEBUG, "PASN: Failed to store a copy of Auth1");
 		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
 		goto send_resp;
 	}
@@ -941,7 +1049,7 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 					pmkid = rsn_data.pmkid;
 				}
 
-				pmksa = pmksa_cache_auth_get(pasn->pmksa,
+				pmksa = pasn_resp_find_pmksa(pasn, mgmt, &elems,
 							     peer_addr,
 							     pmkid);
 				if (pmksa) {
@@ -959,15 +1067,31 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 			       &pasn_params, wrapped_data, secret);
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "PASN: Failed to derive keys");
-		status = WLAN_STATUS_PASN_BASE_AKMP_FAILED;
+		if (rsn_data.num_pmkid && !wrapped_data && !cached_pmk)
+			status = WLAN_STATUS_INVALID_PMKID;
+		else
+			status = WLAN_STATUS_PASN_BASE_AKMP_FAILED;
 		goto send_resp;
 	}
 
-	ret = pasn_auth_frame_hash(pasn->akmp, pasn->cipher,
-				   ((const u8 *) mgmt) + IEEE80211_HDRLEN,
-				   len - IEEE80211_HDRLEN, pasn->hash);
-	if (ret) {
-		wpa_printf(MSG_DEBUG, "PASN: Failed to compute hash");
+#ifdef CONFIG_ENC_ASSOC
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE && !pasn->authorized &&
+	    pasn->eppke_set_key) {
+		/* TODO: Support VLAN ID assignment based on configured
+		 * SAE passwords. */
+		pasn->eppke_set_key(pasn->cb_ctx,
+				    wpa_cipher_to_alg(pasn->cipher),
+				    peer_addr, 0, pasn->ptk.tk,
+				    pasn->ptk.tk_len);
+		pasn->tk_configured = true;
+	}
+#endif /* CONFIG_ENC_ASSOC */
+
+	wpabuf_free(pasn->auth1);
+	pasn->auth1 = wpabuf_alloc_copy(((const u8 *) mgmt) + IEEE80211_HDRLEN,
+					len - IEEE80211_HDRLEN);
+	if (!pasn->auth1) {
+		wpa_printf(MSG_DEBUG, "PASN: Failed to store a copy of Auth1");
 		status = WLAN_STATUS_UNSPECIFIED_FAILURE;
 	}
 
@@ -1003,6 +1127,7 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 	int ret;
 	u8 *copy = NULL;
 	size_t copy_len, mic_offset;
+	u8 hash[SHA512_MAC_LEN];
 
 	if (ieee802_11_parse_elems(mgmt->u.auth.variable,
 				   len - offsetof(struct ieee80211_mgmt,
@@ -1014,7 +1139,7 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 	}
 
 	/* Check that the MIC IE exists. Save it and zero out the memory. */
-	mic_len = pasn_mic_len(pasn->akmp, pasn->cipher);
+	mic_len = pasn_mic_len(pasn->hash_alg);
 	if (!elems.mic || elems.mic_len != mic_len) {
 		wpa_printf(MSG_DEBUG,
 			   "PASN: Invalid MIC. Expecting len=%u", mic_len);
@@ -1043,6 +1168,11 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 		goto fail;
 	}
 
+#ifdef CONFIG_ENC_ASSOC
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE && pasn->is_ml_peer)
+		own_addr = pasn->mld_addr;
+#endif /* CONFIG_ENC_ASSOC */
+
 	/* Verify the MIC */
 	copy_len = len - offsetof(struct ieee80211_mgmt, u.auth);
 	mic_offset = elems.mic - (const u8 *) &mgmt->u.auth;
@@ -1053,9 +1183,14 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 	if (!copy)
 		goto fail;
 	os_memset(copy + mic_offset, 0, mic_len);
-	ret = pasn_mic(pasn->ptk.kck, pasn->akmp, pasn->cipher,
-		       peer_addr, own_addr,
-		       pasn->hash, mic_len * 2,
+	if (!pasn->auth1 ||
+	    pasn_auth_frame_hash(pasn->hash_alg, wpabuf_head(pasn->auth1),
+				 wpabuf_len(pasn->auth1), hash)) {
+		wpa_printf(MSG_INFO, "PASN: Failed to calculate Auth1 hash");
+		goto fail;
+	}
+	ret = pasn_mic(pasn->hash_alg, pasn->ptk.kck, pasn->ptk.kck_len,
+		       peer_addr, own_addr, hash, mic_len * 2,
 		       copy, copy_len, out_mic);
 	os_free(copy);
 	copy = NULL;
@@ -1077,7 +1212,8 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 		}
 
 #ifdef CONFIG_SAE
-		if (pasn->akmp == WPA_KEY_MGMT_SAE) {
+		if (pasn->akmp == WPA_KEY_MGMT_SAE ||
+		    pasn->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
 			ret = pasn_wd_handle_sae_confirm(pasn, peer_addr,
 							 wrapped_data);
 			if (ret) {
@@ -1100,7 +1236,9 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 		wpabuf_free(wrapped_data);
 	}
 
-	if (pasn_parse_encrypted_data(pasn, (const u8 *) mgmt, len) < 0) {
+	if (pasn_parse_encrypted_data(pasn, (const u8 *) mgmt->u.auth.variable,
+				      len - offsetof(struct ieee80211_mgmt,
+				      u.auth.variable)) < 0) {
 		wpa_printf(MSG_DEBUG, "PASN: Encrypted data processing failed");
 		goto fail;
 	}

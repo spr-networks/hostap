@@ -806,6 +806,20 @@ fi.w1.wpa_supplicant1.CreateInterface.
 	</dl>
       </li>
       <li>
+	<h3>NANPublishStopListen ( u : publish_id ) --> nothing</h3>
+	<p>Stop listen operation for a previously added NAN USD publisher service.</p>
+	<h4>Arguments</h4>
+	<dl>
+	  <dt>u : publish_id</dt>
+	  <dd>Publish ID from NANPublish().</dd>
+	</dl>
+	<h4>Possible errors</h4>
+	<dl>
+	  <dt>fi.w1.wpa_supplicant1.InvalidArgs</dt>
+	  <dd>Invalid entries were found in the passed argument.</dd>
+	</dl>
+      </li>
+      <li>
 	<h3>NANSubscribe ( a{sv} : args ) --> u : subscribe_id</h3>
 	<p>Subscribe to a NAN USD service.</p>
 	<h4>Arguments</h4>
@@ -836,6 +850,20 @@ fi.w1.wpa_supplicant1.CreateInterface.
       <li>
 	<h3>NANCancelSubscribe ( u : subscribe_id ) --> nothing</h3>
 	<p>Cancel a previously started NAN USD subscription.</p>
+	<h4>Arguments</h4>
+	<dl>
+	  <dt>u : subscribe_id</dt>
+	  <dd>Subscription ID from NANSubscribe().</dd>
+	</dl>
+	<h4>Possible errors</h4>
+	<dl>
+	  <dt>fi.w1.wpa_supplicant1.InvalidArgs</dt>
+	  <dd>Invalid entries were found in the passed argument.</dd>
+	</dl>
+      </li>
+      <li>
+	<h3>NANSubscribeStopListen ( u : subscribe_id ) --> nothing</h3>
+	<p>Stop listen operation for a previously started NAN USD subscription.</p>
 	<h4>Arguments</h4>
 	<dl>
 	  <dt>u : subscribe_id</dt>
@@ -1806,6 +1834,7 @@ Interface for performing P2P (Wi-Fi Peer-to-Peer) P2P Device operations.
 	<tr><td>peer</td><td>o</td><td></td><td>yes</td></tr>
 	<tr><td>persistent</td><td>b</td><td>Whether to form a persistent group.</td><td>no</td></tr>
 	<tr><td>join</td><td>b</td><td>Whether to join an already operating group instead of forming a new group.</td><td>no</td></tr>
+	<tr><td>auto_join</td><td>b</td><td>Automatically choose between joining an already operating group or forming a new group.</td><td>no</td></tr>
 	<tr><td>authorize_only</td><td>b</td><td>Whether to authorize a peer to initiate GO Negotiation instead of initiating immediately.</td><td>no</td></tr>
 	<tr><td>frequency</td><td>i</td><td>Operating frequency in MHz</td><td>no</td></tr>
 	<tr><td>go_intent</td><td>i</td><td>GO intent 0-15</td><td>no</td></tr>
@@ -2068,6 +2097,10 @@ Interface for performing P2P (Wi-Fi Peer-to-Peer) P2P Device operations.
 
   <li>
     <h3>PersistentGroups - ao - (read)</h3>
+  </li>
+
+  <li>
+    <h3>DeviceAddress - ay - (read)</h3>
   </li>
 </ul>
 
@@ -2627,6 +2660,11 @@ Interface implemented by objects representing active P2P groups.
   <li>
     <h3>WPSVendorExtensions - aay - (read/write)</h3>
     <p>WPS vendor extension attributes used on the GO. This is valid only the in the GO role. An empty array is returned in P2P Client role. At maximum, 10 separate vendor extension byte arrays can be configured. The GO device will include the configured attributes in WPS exchanges.</p>
+  </li>
+
+  <li>
+    <h3>GODeviceAddress - ay - (read)</h3>
+    <p>Returns the device address of the GO of the group. This is available for both client and GO roles.</p>
   </li>
 </ul>
 

@@ -666,6 +666,42 @@ static char * wpa_config_write_psk(const struct parse_data *data,
 #endif /* NO_CONFIG_WRITE */
 
 
+static int wpa_config_parse_alt_sae_password_ids(const struct parse_data *data,
+						 struct wpa_ssid *ssid,
+						 int line, const char *value)
+{
+	struct wpabuf *tmp;
+
+	if (!value[0]) {
+		wpabuf_array_free(ssid->alt_sae_password_ids);
+		return 0;
+	}
+
+	tmp = wpabuf_parse_bin(value);
+	if (!tmp) {
+		wpa_printf(MSG_ERROR, "Line %d: invalid alt_sae_password_ids",
+			   line);
+		return -1;
+	}
+
+	if (!ssid->alt_sae_password_ids)
+		ssid->alt_sae_password_ids = wpabuf_array_alloc();
+	if (wpabuf_array_add(ssid->alt_sae_password_ids, tmp) < 0)
+		return -1;
+	return 0;
+}
+
+
+#ifndef NO_CONFIG_WRITE
+static char *
+wpa_config_write_alt_sae_password_ids(const struct parse_data *data,
+				      struct wpa_ssid *ssid)
+{
+	return NULL;
+}
+#endif /* NO_CONFIG_WRITE */
+
+
 static int wpa_config_parse_proto(const struct parse_data *data,
 				  struct wpa_ssid *ssid, int line,
 				  const char *value)
@@ -849,6 +885,10 @@ static int wpa_config_parse_key_mgmt(const struct parse_data *data,
 		else if (os_strcmp(start, "DPP") == 0)
 			val |= WPA_KEY_MGMT_DPP;
 #endif /* CONFIG_DPP */
+#ifdef CONFIG_ENC_ASSOC
+		else if (os_strcmp(start, "EPPKE") == 0)
+			val |= WPA_KEY_MGMT_EPPKE;
+#endif /* CONFIG_ENC_ASSOC */
 		else {
 			wpa_printf(MSG_ERROR, "Line %d: invalid key_mgmt '%s'",
 				   line, start);
@@ -1145,6 +1185,18 @@ static char * wpa_config_write_key_mgmt(const struct parse_data *data,
 		pos += ret;
 	}
 #endif /* CONFIG_OWE */
+
+#ifdef CONFIG_ENC_ASSOC
+	if (ssid->key_mgmt & WPA_KEY_MGMT_EPPKE) {
+		ret = os_snprintf(pos, end - pos, "%sEPPKE",
+				  pos == buf ? "" : " ");
+		if (os_snprintf_error(end - pos, ret)) {
+			end[-1] = '\0';
+			return buf;
+		}
+		pos += ret;
+	}
+#endif /* CONFIG_ENC_ASSOC */
 
 	if (pos == buf) {
 		os_free(buf);
@@ -1445,6 +1497,29 @@ static int * wpa_config_parse_int_array(const char *value)
 	}
 
 	return freqs;
+}
+
+
+static int wpa_config_print_int_array(char *buf, size_t buflen, int *array)
+{
+	int res, tmp;
+
+	if (!array)
+		return -1;
+
+	res = 0;
+	for (; *array != 0; array++) {
+		tmp = os_snprintf(buf + res, buflen - res, "%d ", *array);
+		if (os_snprintf_error(buflen - res, tmp))
+			return -1;
+
+		res += tmp;
+	}
+	/* strip last space */
+	if (res > 0)
+		buf[--res] = '\0';
+
+	return res;
 }
 
 
@@ -2531,6 +2606,7 @@ static const struct parse_data ssid_fields[] = {
 	{ INT(mem_only_psk) },
 	{ STR_KEY(sae_password) },
 	{ STR(sae_password_id) },
+	{ FUNC(alt_sae_password_ids) },
 	{ INT(sae_pwe) },
 	{ FUNC(proto) },
 	{ FUNC(key_mgmt) },
@@ -2763,6 +2839,12 @@ static const struct parse_data ssid_fields[] = {
 	{ INT_RANGE(max_idle, 0, 65535)},
 	{ INT_RANGE(ssid_protection, 0, 1)},
 	{ INT_RANGE(rsn_overriding, 0, 2)},
+	{ INT_RANGE(sae_password_id_change, 0, 1)},
+#ifdef CONFIG_PMKSA_PRIVACY
+	{ INT_RANGE(pmksa_privacy, 0, 1)},
+#endif /* CONFIG_PMKSA_PRIVACY */
+	{ INT_RANGE(drop_unicast_ip_in_l2_multicast, 0, 1)},
+	{ INT_RANGE(always_use_proxy_arp, 0, 2)},
 };
 
 #undef OFFSET
@@ -2935,6 +3017,7 @@ void wpa_config_free_ssid(struct wpa_ssid *ssid)
 	os_free(ssid->ext_psk);
 	str_clear_free(ssid->sae_password);
 	os_free(ssid->sae_password_id);
+	wpabuf_array_free(ssid->alt_sae_password_ids);
 #ifdef IEEE8021X_EAPOL
 	eap_peer_config_free(&ssid->eap);
 #endif /* IEEE8021X_EAPOL */
@@ -3112,7 +3195,6 @@ void wpa_config_free(struct wpa_config *config)
 	os_free(config->dpp_extra_conf_req_value);
 	wpabuf_free(config->dik);
 	wpabuf_free(config->wfa_gen_capa_supp);
-	wpabuf_free(config->wfa_gen_capa_cert);
 
 	os_free(config);
 }
@@ -3328,6 +3410,7 @@ void wpa_config_set_network_defaults(struct wpa_ssid *ssid)
 	ssid->mac_addr = WPAS_MAC_ADDR_STYLE_NOT_SET;
 	ssid->max_oper_chwidth = DEFAULT_MAX_OPER_CHWIDTH;
 	ssid->rsn_overriding = RSN_OVERRIDING_NOT_SET;
+	ssid->drop_unicast_ip_in_l2_multicast = true;
 }
 
 
@@ -5429,6 +5512,70 @@ static int wpa_config_get_str(const char *name, struct wpa_config *config,
 }
 
 
+static int wpa_config_get_bgscan(const char *name, struct wpa_config *config,
+				 long offset, char *buf, size_t buflen,
+				 int pretty_print)
+{
+	char **val = (char **) (((u8 *) config) + (long) offset);
+	int res;
+
+	if (pretty_print) {
+		if (*val)
+			res = os_snprintf(buf, buflen, "%s=\"%s\"\n", name,
+					  *val);
+		else
+			res = os_snprintf(buf, buflen, "%s=null\n", name);
+	} else if (!*val) {
+		return -1;
+	} else {
+		res = os_snprintf(buf, buflen, "\"%s\"", *val);
+	}
+	if (os_snprintf_error(buflen, res))
+		res = -1;
+
+	return res;
+}
+
+
+static int wpa_config_get_freq_list(const char *name, struct wpa_config *config,
+				    long offset, char *buf, size_t buflen,
+				    int pretty_print)
+{
+	int **val = (int **) (((u8 *) config) + (long) offset);
+	int res, tmp;
+
+	if (pretty_print) {
+		if (*val) {
+			res = os_snprintf(buf, buflen, "%s=", name);
+			if (os_snprintf_error(buflen, res))
+				return -1;
+
+			tmp = wpa_config_print_int_array(buf + res,
+							 buflen - res, *val);
+			if (tmp < 0)
+				return -1;
+			res += tmp;
+
+			tmp = os_snprintf(buf + res, buflen - res, "\n");
+			if (os_snprintf_error(buflen - res, tmp))
+				return -1;
+			res += tmp;
+		} else {
+			res = os_snprintf(buf, buflen, "%s=null\n", name);
+		}
+
+	} else if (!*val) {
+		return -1;
+	} else {
+		res = wpa_config_print_int_array(buf, buflen, *val);
+	}
+	if (os_snprintf_error(buflen, res))
+		res = -1;
+
+	return res;
+}
+
+
 #ifdef CONFIG_P2P
 static int wpa_config_get_ipv4(const char *name, struct wpa_config *config,
 			       long offset, char *buf, size_t buflen,
@@ -5478,6 +5625,8 @@ static int wpa_config_process_mld_connect_bssid_pref(
 #define OFFSET(v) ((void *) &((struct wpa_config *) 0)->v)
 
 #define FUNC(f) #f, wpa_config_process_ ## f, NULL, OFFSET(f), NULL, NULL
+#define FUNC_WITH_GET(f) #f, wpa_config_process_ ## f, wpa_config_get_ ## f, \
+		OFFSET(f), NULL, NULL
 #define FUNC_NO_VAR(f) #f, wpa_config_process_ ## f, NULL, NULL, NULL, NULL
 #define _INT(f) #f, wpa_global_config_parse_int, wpa_config_get_int, OFFSET(f)
 #define INT(f) _INT(f), NULL, NULL
@@ -5504,7 +5653,7 @@ static const struct global_parse_data global_fields[] = {
 	{ INT_RANGE(eapol_version, 1, 2), 0 },
 #endif /* CONFIG_MACSEC */
 	{ INT(ap_scan), 0 },
-	{ FUNC(bgscan), CFG_CHANGED_BGSCAN },
+	{ FUNC_WITH_GET(bgscan), CFG_CHANGED_BGSCAN },
 #ifdef CONFIG_MESH
 	{ INT(user_mpm), 0 },
 	{ INT_RANGE(max_peer_links, 0, 255), 0 },
@@ -5575,7 +5724,7 @@ static const struct global_parse_data global_fields[] = {
 	{ INT(p2p_go_vht), 0 },
 	{ INT(p2p_go_he), 0 },
 	{ INT(p2p_go_edmg), 0 },
-	{ INT(p2p_disabled), 0 },
+	{ INT(p2p_disabled), CFG_CHANGED_P2P_DISABLED },
 	{ INT_RANGE(p2p_go_ctwindow, 0, 127), 0 },
 	{ INT(p2p_no_group_iface), 0 },
 	{ INT_RANGE(p2p_ignore_shared_freq, 0, 1), 0 },
@@ -5588,14 +5737,13 @@ static const struct global_parse_data global_fields[] = {
 	{ FUNC(p2p_device_persistent_mac_addr), 0 },
 	{ INT(p2p_interface_random_mac_addr), 0 },
 	{ INT(p2p_6ghz_disable), 0 },
-	{ BOOL(p2p_pairing_setup), 0 },
-	{ BOOL(p2p_pairing_cache), 0 },
 	{ INT(p2p_bootstrap_methods), 0 },
 	{ INT(p2p_pasn_type), 0 },
 	{ INT(p2p_comeback_after), 0 },
 	{ BOOL(p2p_twt_power_mgmt), 0 },
 	{ BOOL(p2p_chan_switch_req_enable), 0 },
 	{ INT(p2p_reg_info), 0 },
+	{ INT(p2p_assisted_dfs_chan_enable), 0 },
 	{ INT(dik_cipher), 0},
 	{ BIN(dik), 0 },
 #endif /* CONFIG_P2P */
@@ -5640,7 +5788,7 @@ static const struct global_parse_data global_fields[] = {
 	{ FUNC(ap_assocresp_elements), 0 },
 	{ FUNC(ap_vendor_elements), 0 },
 	{ INT_RANGE(ignore_old_scan_res, 0, 1), 0 },
-	{ FUNC(freq_list), 0 },
+	{ FUNC_WITH_GET(freq_list), 0 },
 	{ FUNC(initial_freq_list), 0},
 	{ INT(scan_cur_freq), 0 },
 	{ INT(scan_res_valid_for_connect), 0},
@@ -5706,7 +5854,9 @@ static const struct global_parse_data global_fields[] = {
 	{ BOOL(ft_prepend_pmkid), CFG_CHANGED_FT_PREPEND_PMKID },
 	{ INT_RANGE(wfa_gen_capa, 0, 2), 0},
 	{ BIN(wfa_gen_capa_supp), 0 },
-	{ BIN(wfa_gen_capa_cert), 0 },
+	{ BOOL(disable_op_classes_80_80_mhz), 0 },
+	{ INT(pr_pasn_type), 0 },
+	{ INT_RANGE(pr_preferred_role, 0, 1), 0},
 	/* NOTE: When adding new parameters here, add_interface() in
 	 * wpa_supplicant/dbus_new_introspect.c may need to be modified to
 	 * increase the size of the iface->xml buffer. */
@@ -5792,6 +5942,7 @@ const char * wpa_config_get_global_field_name(unsigned int i, int *no_var)
  * @config: Pointer to global configuration data
  * @pos: Name and value in the format "{name}={value}"
  * @line: Line number in configuration file or 0 if not used
+ * @show_details: Whether to show parsing errors and other details in debug log
  * Returns: 0 on success with a possible change in value, 1 on success with no
  * change to previously configured value, or -1 on failure
  *
@@ -5800,7 +5951,8 @@ const char * wpa_config_get_global_field_name(unsigned int i, int *no_var)
  * parameter must be in the same format as the text-based configuration file is
  * using. For example, strings are using double quotation marks.
  */
-int wpa_config_process_global(struct wpa_config *config, char *pos, int line)
+int wpa_config_process_global(struct wpa_config *config, char *pos, int line,
+			      bool show_details)
 {
 	size_t i;
 	int ret = 0;
@@ -5814,8 +5966,10 @@ int wpa_config_process_global(struct wpa_config *config, char *pos, int line)
 
 		ret = field->parser(field, config, line, pos + flen + 1);
 		if (ret < 0) {
-			wpa_printf(MSG_ERROR, "Line %d: failed to "
-				   "parse '%s'.", line, pos);
+			if (show_details)
+				wpa_printf(MSG_ERROR,
+					   "Line %d: failed to parse '%s'.",
+					   line, pos);
 			ret = -1;
 		}
 		if (ret == 1)
@@ -5831,7 +5985,7 @@ int wpa_config_process_global(struct wpa_config *config, char *pos, int line)
 			char *tmp = os_strchr(pos, '=');
 
 			if (!tmp) {
-				if (line < 0)
+				if (show_details)
 					wpa_printf(MSG_ERROR,
 						   "Line %d: invalid line %s",
 						   line, pos);
@@ -5840,9 +5994,10 @@ int wpa_config_process_global(struct wpa_config *config, char *pos, int line)
 			*tmp++ = '\0';
 			if (hostapd_config_tx_queue(config->tx_queue, pos,
 						    tmp)) {
-				wpa_printf(MSG_ERROR,
-					   "Line %d: invalid TX queue item",
-					   line);
+				if (show_details)
+					wpa_printf(MSG_ERROR,
+						   "Line %d: invalid TX queue item",
+						   line);
 				return -1;
 			}
 			return ret;
@@ -5853,15 +6008,19 @@ int wpa_config_process_global(struct wpa_config *config, char *pos, int line)
 			if (tmp == NULL) {
 				if (line < 0)
 					return -1;
-				wpa_printf(MSG_ERROR, "Line %d: invalid line "
-					   "'%s'", line, pos);
+				if (show_details)
+					wpa_printf(MSG_ERROR,
+						   "Line %d: invalid line '%s'",
+						   line, pos);
 				return -1;
 			}
 			*tmp++ = '\0';
 			if (hostapd_config_wmm_ac(config->wmm_ac_params, pos,
 						  tmp)) {
-				wpa_printf(MSG_ERROR, "Line %d: invalid WMM "
-					   "AC item", line);
+				if (show_details)
+					wpa_printf(MSG_ERROR,
+						   "Line %d: invalid WMM AC item",
+						   line);
 				return -1;
 			}
 			return ret;
@@ -5869,8 +6028,10 @@ int wpa_config_process_global(struct wpa_config *config, char *pos, int line)
 #endif /* CONFIG_AP */
 		if (line < 0)
 			return -1;
-		wpa_printf(MSG_ERROR, "Line %d: unknown global field '%s'.",
-			   line, pos);
+		if (show_details)
+			wpa_printf(MSG_ERROR,
+				   "Line %d: unknown global field '%s'.",
+				   line, pos);
 		ret = -1;
 	}
 

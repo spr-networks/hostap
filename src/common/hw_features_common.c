@@ -387,6 +387,7 @@ static void punct_update_legacy_bw_80(u8 bitmap, u8 pri_chan, u8 *seg0)
 
 	switch (bitmap) {
 	case 0x6:
+	case 0x9:
 		*seg0 = 0;
 		return;
 	case 0x8:
@@ -994,7 +995,7 @@ int chan_pri_allowed(const struct hostapd_channel_data *chan)
 }
 
 
-/* IEEE P802.11be/D3.0, Table 36-30 - Definition of the Punctured Channel
+/* IEEE Std 802.11be-2024, Table 36-30 - Definition of the Punctured Channel
  * Information field in the U-SIG for an EHT MU PPDU using non-OFDMA
  * transmissions */
 static const u16 punct_bitmap_80[] = { 0xF, 0xE, 0xD, 0xB, 0x7 };

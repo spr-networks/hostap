@@ -1291,6 +1291,11 @@ def test_scan_chan_switch(dev, apdev):
     run_scan(dev[0], bssid, 2412)
     dev[0].dump_monitor()
 
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+    hapd.disable()
+    dev[0].flush_scan_cache()
+
 def test_scan_new_only(dev, apdev):
     """Scan and only_new=1 multiple times"""
     dev[0].flush_scan_cache()
@@ -2039,3 +2044,21 @@ def test_scan_short_ssid_list(dev, apdev):
 
     if not found:
         raise Exception("AP not found in scan results")
+
+def test_scan_freq_network(dev, apdev):
+    """Scanning channels based on network profiles"""
+    hostapd.add_ap(apdev[0], {"ssid": "test-scan"})
+
+    id = dev[0].add_network()
+    dev[0].set_network_quoted(id, "ssid", "foo")
+    dev[0].set_network(id, "key_mgmt", "NONE")
+    dev[0].set_network(id, "disabled", "0")
+
+    id2 = dev[0].add_network()
+    dev[0].set_network_quoted(id2, "ssid", "test-scan")
+    dev[0].set_network(id2, "key_mgmt", "NONE")
+    dev[0].set_network(id2, "disabled", "0")
+    dev[0].set_network(id2, "scan_freq", "2412")
+
+    dev[0].select_network(id2)
+    dev[0].wait_connected()

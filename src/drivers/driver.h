@@ -22,7 +22,7 @@
 #include "common/defs.h"
 #include "common/ieee802_11_defs.h"
 #include "common/wpa_common.h"
-#include "common/nan.h"
+#include "common/nan_defs.h"
 #ifdef CONFIG_MACSEC
 #include "pae/ieee802_1x_kay.h"
 #endif /* CONFIG_MACSEC */
@@ -51,6 +51,7 @@ struct nan_publish_params;
 
 #define HOSTAPD_CHAN_INDOOR_ONLY 0x00010000
 #define HOSTAPD_CHAN_GO_CONCURRENT 0x00020000
+#define HOSTAPD_CHAN_AUTO_BW 0x00040000
 
 /* Allowed bandwidth mask */
 enum hostapd_chan_width_attr {
@@ -159,6 +160,12 @@ struct hostapd_channel_data {
 	 * need to set this)
 	 */
 	long double interference_factor;
+
+	/**
+	 * interference_bss_based - Indicates whether the interference was
+	 * calculated from number of BSSs
+	 */
+	bool interference_bss_based;
 #endif /* CONFIG_ACS */
 
 	/**
@@ -212,6 +219,7 @@ struct eht_capabilities {
 #define HOSTAPD_MODE_FLAG_HT_INFO_KNOWN BIT(0)
 #define HOSTAPD_MODE_FLAG_VHT_INFO_KNOWN BIT(1)
 #define HOSTAPD_MODE_FLAG_HE_INFO_KNOWN BIT(2)
+#define HOSTAPD_MODE_FLAG_EHT_INFO_KNOWN BIT(3)
 
 
 enum ieee80211_op_mode {
@@ -382,6 +390,8 @@ struct hostapd_multi_hw_info {
  * of TSF of the BSS specified by %tsf_bssid.
  * @tsf_bssid: The BSS that %parent_tsf TSF time refers to.
  * @beacon_newer: Whether the Beacon frame data is known to be newer
+ * @mlo_tput_accumulated: Whether the scan result throughput is accumulated
+ * (used during scan result processing)
  * @ie_len: length of the following IE field in octets
  * @beacon_ie_len: length of the following Beacon IE field in octets
  *
@@ -416,6 +426,7 @@ struct wpa_scan_res {
 	u64 parent_tsf;
 	u8 tsf_bssid[ETH_ALEN];
 	bool beacon_newer;
+	bool mlo_tput_accumulated;
 	size_t ie_len;
 	size_t beacon_ie_len;
 	/* Followed by ie_len + beacon_ie_len octets of IE data */
@@ -1406,6 +1417,21 @@ struct wpa_driver_associate_params {
 	 * spp_amsdu - SPP A-MSDU used on this connection
 	 */
 	bool spp_amsdu;
+
+	/**
+	 * bssid_filter - Allowed BSSIDs for the current association
+	 * This can be %NULL to indicate no constraint. */
+	const u8 *bssid_filter;
+
+	/**
+	 * bssid_filter_count - Number of allowed BSSIDs
+	 */
+	unsigned int bssid_filter_count;
+
+	/**
+	 * p2p_mode - P2P R1 only, P2P R2 only, or PCC mode
+	 */
+	enum wpa_p2p_mode p2p_mode;
 };
 
 enum hide_ssid {
@@ -1444,6 +1470,72 @@ struct unsol_bcast_probe_resp {
 	 * Unsolicited broadcast Probe Response template length
 	 */
 	size_t unsol_bcast_probe_resp_tmpl_len;
+};
+
+struct mbssid_data {
+	/**
+	 * mbssid_tx_iface - Transmitting interface of the MBSSID set
+	 */
+	const char *mbssid_tx_iface;
+
+	/**
+	 * mbssid_tx_iface_linkid - Link ID of the transmitting interface if
+	 * it is part of an MLD. Otherwise, -1.
+	 */
+	int mbssid_tx_iface_linkid;
+
+	/**
+	 * mbssid_index - The index of this BSS in the MBSSID set
+	 */
+	unsigned int mbssid_index;
+
+	/**
+	 * mbssid_elem - Buffer containing all MBSSID elements
+	 */
+	u8 *mbssid_elem;
+
+	/**
+	 * mbssid_elem_len - Total length of all MBSSID elements
+	 */
+	size_t mbssid_elem_len;
+
+	/**
+	 * mbssid_elem_count - The number of MBSSID elements
+	 */
+	u8 mbssid_elem_count;
+
+	/**
+	 * mbssid_elem_offset - Offsets to elements in mbssid_elem.
+	 * Kernel will use these offsets to generate multiple BSSID beacons.
+	 */
+	u8 **mbssid_elem_offset;
+
+	/**
+	 * ema - Enhanced MBSSID advertisements support.
+	 */
+	bool ema;
+
+	/**
+	 * rnr_elem - This buffer contains all of reduced neighbor report (RNR)
+	 * elements
+	 */
+	u8 *rnr_elem;
+
+	/**
+	 * rnr_elem_len - Length of rnr_elem buffer
+	 */
+	size_t rnr_elem_len;
+
+	/**
+	 * rnr_elem_count - Number of RNR elements
+	 */
+	u8 rnr_elem_count;
+
+	/**
+	 * rnr_elem_offset - The offsets to the elements in rnr_elem.
+	 * The driver will use these to include RNR elements in EMA beacons.
+	 */
+	u8 **rnr_elem_offset;
 };
 
 struct wpa_driver_ap_params {
@@ -1784,40 +1876,11 @@ struct wpa_driver_ap_params {
 	size_t fd_frame_tmpl_len;
 
 	/**
-	 * mbssid_tx_iface - Transmitting interface of the MBSSID set
+	 * mbssid - MBSSID element related params for Beacon frames
+	 *
+	 * This is used to add MBSSID element in beacon data.
 	 */
-	const char *mbssid_tx_iface;
-
-	/**
-	 * mbssid_index - The index of this BSS in the MBSSID set
-	 */
-	unsigned int mbssid_index;
-
-	/**
-	 * mbssid_elem - Buffer containing all MBSSID elements
-	 */
-	u8 *mbssid_elem;
-
-	/**
-	 * mbssid_elem_len - Total length of all MBSSID elements
-	 */
-	size_t mbssid_elem_len;
-
-	/**
-	 * mbssid_elem_count - The number of MBSSID elements
-	 */
-	u8 mbssid_elem_count;
-
-	/**
-	 * mbssid_elem_offset - Offsets to elements in mbssid_elem.
-	 * Kernel will use these offsets to generate multiple BSSID beacons.
-	 */
-	u8 **mbssid_elem_offset;
-
-	/**
-	 * ema - Enhanced MBSSID advertisements support.
-	 */
-	bool ema;
+	struct mbssid_data mbssid;
 
 	/**
 	 * punct_bitmap - Preamble puncturing bitmap
@@ -1827,27 +1890,6 @@ struct wpa_driver_ap_params {
 	 */
 	u16 punct_bitmap;
 
-	/**
-	 * rnr_elem - This buffer contains all of reduced neighbor report (RNR)
-	 * elements
-	 */
-	u8 *rnr_elem;
-
-	/**
-	 * rnr_elem_len - Length of rnr_elem buffer
-	 */
-	size_t rnr_elem_len;
-
-	/**
-	 * rnr_elem_count - Number of RNR elements
-	 */
-	unsigned int rnr_elem_count;
-
-	/**
-	 * rnr_elem_offset - The offsets to the elements in rnr_elem.
-	 * The driver will use these to include RNR elements in EMA beacons.
-	 */
-	u8 **rnr_elem_offset;
 
 	/* Unsolicited broadcast Probe Response data */
 	struct unsol_bcast_probe_resp ubpr;
@@ -2376,14 +2418,30 @@ struct wpa_driver_capa {
 #define WPA_DRIVER_FLAGS2_HT_VHT_TWT_RESPONDER	0x0000000000200000ULL
 /** Driver supports RSN override elements */
 #define WPA_DRIVER_FLAGS2_RSN_OVERRIDE_STA	0x0000000000400000ULL
-/** Driver supports NAN offload */
-#define WPA_DRIVER_FLAGS2_NAN_OFFLOAD		0x0000000000800000ULL
+/** Driver supports NAN USD offload */
+#define WPA_DRIVER_FLAGS2_NAN_USD_OFFLOAD	0x0000000000800000ULL
 /** Driver/device supports SPP A-MSDUs */
 #define WPA_DRIVER_FLAGS2_SPP_AMSDU		0x0000000001000000ULL
 /** Driver supports P2P V2 */
 #define WPA_DRIVER_FLAGS2_P2P_FEATURE_V2	0x0000000002000000ULL
 /** Driver supports P2P PCC mode */
 #define WPA_DRIVER_FLAGS2_P2P_FEATURE_PCC_MODE	0x0000000004000000ULL
+/** Driver supports arbitrary channel width changes in AP mode */
+#define WPA_DRIVER_FLAGS2_AP_CHANWIDTH_CHANGE	0x0000000008000000ULL
+/** Driver supports FTM initiator functionality */
+#define WPA_DRIVER_FLAGS2_FTM_INITIATOR		0x0000000010000000ULL
+/** Driver supports non-trigger based ranging responder functionality */
+#define WPA_DRIVER_FLAGS2_NON_TRIGGER_BASED_RESPONDER   0x0000000020000000ULL
+/** Driver supports non-trigger based ranging initiator functionality */
+#define WPA_DRIVER_FLAGS2_NON_TRIGGER_BASED_INITIATOR	0x0000000040000000ULL
+/** Driver supports NAN Device interface and NAN Synchronization */
+#define WPA_DRIVER_FLAGS2_SUPPORT_NAN			0x0000000080000000ULL
+/** Driver supports P2P assisted DFS */
+#define WPA_DRIVER_FLAGS2_P2P_ASSISTED_DFS		0x0000000100000000ULL
+/** Driver supports (Re)Association Request/Response frame encryption */
+#define WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION	0x0000000200000000ULL
+/** Driver supports EPPKE authentication */
+#define WPA_DRIVER_FLAGS2_EPPKE				0x0000000400000000ULL
 	u64 flags2;
 
 #define FULL_AP_CLIENT_STATE_SUPP(drv_flags) \
@@ -2508,6 +2566,32 @@ struct wpa_driver_capa {
 	/* Maximum number of bytes of extra IE(s) that can be added to Probe
 	 * Request frames */
 	size_t max_probe_req_ie_len;
+
+	/* EDCA based ranging capabilities */
+	u8 edca_format_and_bw;
+	u8 max_tx_antenna;
+	u8 max_rx_antenna;
+
+	/* NTB based ranging capabilities */
+	u8 ntb_format_and_bw;
+	u8 max_tx_ltf_repetations;
+	u8 max_rx_ltf_repetations;
+	u8 max_tx_ltf_total;
+	u8 max_rx_ltf_total;
+	u8 max_rx_sts_le_80;
+	u8 max_rx_sts_gt_80;
+	u8 max_tx_sts_le_80;
+	u8 max_tx_sts_gt_80;
+
+#ifdef CONFIG_NAN
+/* Driver supports dual band NAN operation */
+#define WPA_DRIVER_FLAGS_NAN_SUPPORT_DUAL_BAND		0x00000001
+/* Driver supports NAN synchronization configuration */
+#define WPA_DRIVER_FLAGS_NAN_SUPPORT_SYNC_CONFIG	0x00000002
+/* Driver supports DW notifications and SDF TX/RX over NAN device interface */
+#define WPA_DRIVER_FLAGS_NAN_SUPPORT_USERSPACE_DE	0x00000004
+	u32 nan_flags;
+#endif /* CONFIG_NAN */
 };
 
 
@@ -2597,6 +2681,9 @@ struct hostapd_sta_add_params {
 	size_t eht_capab_len;
 	u32 flags; /* bitmask of WPA_STA_* flags */
 	u32 flags_mask; /* unset bits in flags */
+#ifdef CONFIG_ENC_ASSOC
+	bool epp_sta;
+#endif /* CONFIG_ENC_ASSOC */
 #ifdef CONFIG_MESH
 	enum mesh_plink_state plink_state;
 	u16 peer_aid;
@@ -2731,6 +2818,22 @@ struct wpa_mlo_signal_info {
 };
 
 /**
+ * struct wpa_mlo_reconfig_info - Information about user-requested add and/or
+ * remove setup links for the current MLO association.
+ *
+ * @add_links: Bitmask of links to be added
+ * @add_link_bssid: Array of BSSIDs for the links to be added
+ * @add_link_freq: Array of frequencies for the links to be added
+ * @delete_links: Bitmask of links to be removed
+ */
+struct wpa_mlo_reconfig_info {
+	u16 add_links;
+	u8 add_link_bssid[MAX_NUM_MLD_LINKS][ETH_ALEN];
+	int add_link_freq[MAX_NUM_MLD_LINKS];
+	u16 delete_links;
+};
+
+/**
  * struct wpa_channel_info - Information about the current channel
  * @frequency: Center frequency of the primary 20 MHz channel
  * @chanwidth: Width of the current operating channel
@@ -2766,6 +2869,7 @@ struct wpa_channel_info {
  * @proberesp_ies_len: Length of proberesp_ies in octets
  * @proberesp_ies_len: Length of proberesp_ies in octets
  * @probe_resp_len: Length of probe response template (@probe_resp)
+ * @mbssid: MBSSID element(s) to add into Beacon frames
  */
 struct beacon_data {
 	u8 *head, *tail;
@@ -2779,6 +2883,8 @@ struct beacon_data {
 	size_t proberesp_ies_len;
 	size_t assocresp_ies_len;
 	size_t probe_resp_len;
+
+	struct mbssid_data mbssid;
 };
 
 /**
@@ -3001,6 +3107,14 @@ enum pasn_status {
  * @akmp: Authentication key management protocol type supported.
  * @cipher: Cipher suite.
  * @group: Finite cyclic group. Default group used is 19 (ECC).
+ * @temporary_network: Indicates if a temporary network was created to perform
+ *	PASN authentication.
+ * @password: Password of user requested network.
+ * @comeback_len: Length of the comeback cookie data.
+ * @comeback: Comeback cookie data that may be present in case a temporary
+ * rejection is received from the AP.
+ * @comeback_after: The time after which the STA can try for PASN handshake in
+ * case of temporary rejection.
  * @ltf_keyseed_required: Indicates whether LTF keyseed generation is required
  * @status: PASN response status, %PASN_STATUS_SUCCESS for successful
  *	authentication, use %PASN_STATUS_FAILURE if PASN authentication
@@ -3014,6 +3128,11 @@ struct pasn_peer {
 	int akmp;
 	int cipher;
 	int group;
+	bool temporary_network;
+	char *password;
+	size_t comeback_len;
+	u8 *comeback;
+	u16 comeback_after;
 	bool ltf_keyseed_required;
 	enum pasn_status status;
 };
@@ -3098,6 +3217,59 @@ struct driver_sta_mlo_info {
 		unsigned int freq;
 		struct t2lm_mapping t2lmap;
 	} links[MAX_NUM_MLD_LINKS];
+};
+
+/**
+ * struct nan_band_config - NAN band specific configuration
+ *
+ * For details on NAN band configuration, see the Wi-Fi Aware Specification
+ *
+ * @frequency: Frequency in MHz for the band
+ * @rssi_close: RSSI close threshold used for NAN state transition algorithm
+ * @rssi_middle: RSSI middle threshold used for NAN state transition algorithm
+ * @awake_dw_interval: Committed DW information
+ * @disable_scan: Disable scan for this band
+ */
+struct nan_band_config {
+	u16 frequency;
+	s8 rssi_close;
+	s8 rssi_middle;
+	u8 awake_dw_interval;
+	bool disable_scan;
+};
+
+/**
+ * struct nan_cluster_config - NAN cluster configuration
+ *
+ * @master_pref: Master preference for the cluster
+ * @dual_band: Dual band operation enabled
+ * @enable_dw_notif: Enable discovery window notifications
+ * @cluster_id: Cluster ID for the NAN cluster
+ * @scan_period: Period for NAN scan in seconds
+ * @scan_dwell_time: Dwell time for NAN scan in TUs per channel
+ * @discovery_beacon_interval: Interval for discovery beacon in TUs
+ * @low_band_cfg: Configuration for low band NAN operation
+ * @high_band_cfg: Configuration for high band NAN operation
+ * @extra_nan_attrs: Extra NAN attributes to be included in NAN beacons
+ * @extra_nan_attrs_len: Length of the extra NAN attributes
+ * @vendor_elems: Vendor specific elements to be included in NAN beacons
+ * @vendor_elems_len: Length of the vendor specific elements
+ */
+struct nan_cluster_config {
+	u8 master_pref;
+	u8 dual_band;
+	bool enable_dw_notif;
+
+	u8 cluster_id[ETH_ALEN];
+	u16 scan_period;
+	u16 scan_dwell_time;
+	u8 discovery_beacon_interval;
+	struct nan_band_config low_band_cfg;
+	struct nan_band_config high_band_cfg;
+	const u8 *extra_nan_attrs;
+	size_t extra_nan_attrs_len;
+	const u8 *vendor_elems;
+	size_t vendor_elems_len;
 };
 
 /**
@@ -3812,13 +3984,14 @@ struct wpa_driver_ops {
 	 * @own_addr: Source address and BSSID for the Disassociation frame
 	 * @addr: MAC address of the station to disassociate
 	 * @reason: Reason code for the Disassociation frame
+	 * @link_id: Link ID to use for Disassociation frame, or -1 if not set
 	 * Returns: 0 on success, -1 on failure
 	 *
 	 * This function requests a specific station to be disassociated and
 	 * a Disassociation frame to be sent to it.
 	 */
 	int (*sta_disassoc)(void *priv, const u8 *own_addr, const u8 *addr,
-			    u16 reason);
+			    u16 reason, int link_id);
 
 	/**
 	 * sta_remove - Remove a station entry (AP only)
@@ -4010,18 +4183,6 @@ struct wpa_driver_ops {
 	 */
 	int (*set_sta_vlan)(void *priv, const u8 *addr, const char *ifname,
 			    int vlan_id, int link_id);
-
-	/**
-	 * commit - Optional commit changes handler (AP only)
-	 * @priv: driver private data
-	 * Returns: 0 on success, -1 on failure
-	 *
-	 * This optional handler function can be registered if the driver
-	 * interface implementation needs to commit changes (e.g., by setting
-	 * network interface up) at the end of initial configuration. If set,
-	 * this handler will be called after initial setup has been completed.
-	 */
-	int (*commit)(void *priv);
 
 	/**
 	 * set_radius_acl_auth - Notification of RADIUS ACL change
@@ -4432,26 +4593,21 @@ struct wpa_driver_ops {
 			       struct wpa_mlo_signal_info *mlo_signal_info);
 
 	/**
+	 * setup_link_reconfig - Used to initiate Link Reconfiguration request
+	 * for the current MLO association.
+	 * @priv: Private driver interface data
+	 * @info: Link reconfiguration request info
+	 */
+	int (*setup_link_reconfig)(void *priv,
+				   struct wpa_mlo_reconfig_info *info);
+
+	/**
 	 * channel_info - Get parameters of the current operating channel
 	 * @priv: Private driver interface data
 	 * @channel_info: Channel info structure
 	 * Returns: 0 on success, negative (<0) on failure
 	 */
 	int (*channel_info)(void *priv, struct wpa_channel_info *channel_info);
-
-	/**
-	 * set_authmode - Set authentication algorithm(s) for static WEP
-	 * @priv: Private driver interface data
-	 * @authmode: 1=Open System, 2=Shared Key, 3=both
-	 * Returns: 0 on success, -1 on failure
-	 *
-	 * This function can be used to set authentication algorithms for AP
-	 * mode when static WEP is used. If the driver uses user space MLME/SME
-	 * implementation, there is no need to implement this function.
-	 *
-	 * DEPRECATED - use set_ap() instead
-	 */
-	int (*set_authmode)(void *priv, int authmode);
 
 #ifdef ANDROID
 	/**
@@ -4536,20 +4692,6 @@ struct wpa_driver_ops {
 	 */
 	 int (*sta_auth)(void *priv,
 			 struct wpa_driver_sta_auth_params *params);
-
-	/**
-	 * add_tspec - Add traffic stream
-	 * @priv: Private driver interface data
-	 * @addr: MAC address of the station to associate
-	 * @tspec_ie: tspec ie buffer
-	 * @tspec_ielen: tspec ie length
-	 * Returns: 0 on success, -1 on failure
-	 *
-	 * This function adds the traffic steam for the station
-	 * and fills the medium_time in tspec_ie.
-	 */
-	 int (*add_tspec)(void *priv, const u8 *addr, u8 *tspec_ie,
-			  size_t tspec_ielen);
 
 	/**
 	 * add_sta_node - Add a station node in the driver
@@ -5436,6 +5578,35 @@ struct wpa_driver_ops {
 	 */
 	struct hostapd_multi_hw_info *
 	(*get_multi_hw_info)(void *priv, unsigned int *num_multi_hws);
+
+#ifdef CONFIG_NAN
+	/**
+	 * nan_start - Start NAN operation
+	 * @priv: Private driver interface data
+	 * @conf: NAN configuration parameters
+	 * Returns: 0 on success, -1 on failure
+	 *
+	 * This command joins an existing NAN cluster or starts a new one.
+	 */
+	int (*nan_start)(void *priv, const struct nan_cluster_config *conf);
+
+	/**
+	 * nan_change_config - Update the NAN cluster configuration
+	 * @priv: Private driver interface data
+	 * @conf: NAN configuration parameters
+	 * Returns: 0 on success, -1 on failure
+	 *
+	 * This command modifies the NAN cluster configuration.
+	 */
+	int (*nan_change_config)(void *priv,
+				 const struct nan_cluster_config *conf);
+
+	/**
+	 * nan_stop - Stop NAN operation
+	 * @priv: Private driver interface data
+	 */
+	void (*nan_stop)(void *priv);
+#endif /* CONFIG_NAN */
 };
 
 /**
@@ -6068,6 +6239,41 @@ enum wpa_event_type {
 	 * EVENT_MLD_INTERFACE_FREED - Notification of AP MLD interface removal
 	 */
 	EVENT_MLD_INTERFACE_FREED,
+
+	/**
+	 * EVENT_SETUP_LINK_RECONFIG - Notification that new AP links added
+	 */
+	EVENT_SETUP_LINK_RECONFIG,
+
+	/**
+	 * EVENT_NAN_CLUSTER_JOIN - Notification of a new cluster having been
+	 * joined or started.
+	 *
+	 * This event is used to notify wpa_supplicant that a NAN cluster has
+	 * been joined or started. The event data includes the NAN cluster ID
+	 * and a boolean indicating whether a new cluster was started or an
+	 * existing cluster was joined.
+	 *
+	 * Described in wpa_event_data.nan_cluster_join_info.
+	 */
+	EVENT_NAN_CLUSTER_JOIN,
+
+	/**
+	 * EVENT_NAN_NEXT_DW - Notification of NAN next Discovery Window
+	 *
+	 * This event is used to notify wpa_supplicant that the device/driver
+	 * is ready for the next Discovery Window (DW) frames. It may be used
+	 * to trigger transmission of multicast SDFs (active subscribe and
+	 * unsolicited publish).
+	 * The event data includes the DW frequency.
+	 */
+	EVENT_NAN_NEXT_DW,
+
+	/**
+	 * EVENT_INCUMBT_SIG_INTF_DETECTED - Notification of incumbent signal
+	 * interference detection.
+	 */
+	EVENT_INCUMBT_SIG_INTF_DETECTED,
 };
 
 
@@ -6575,6 +6781,7 @@ union wpa_event_data {
 		const u8 *bssid;
 		const u8 *addr;
 		int wds;
+		int link_id;
 	} rx_from_unknown;
 
 	/**
@@ -7055,6 +7262,38 @@ union wpa_event_data {
 		u8 valid_links;
 		struct t2lm_mapping t2lmap[MAX_NUM_MLD_LINKS];
 	} t2l_map_info;
+
+	/**
+	 * struct reconfig_info - Data for EVENT_SETUP_LINK_RECONFIG
+	 */
+	struct reconfig_info {
+		u16 added_links;
+		u8 count;
+		const u8 *status_list;
+		const u8 *resp_ie; /* Starting from Group Key Data */
+		size_t resp_ie_len;
+	} reconfig_info;
+
+	struct nan_cluster_join_info {
+		const u8 *bssid;
+		bool new_cluster;
+	} nan_cluster_join_info;
+
+	struct nan_next_dw_info {
+		int freq;
+	} nan_next_dw_info;
+
+	/**
+	 * Data for EVENT_INCUMBT_SIG_INTF
+	 */
+	struct incumbt_sig_intf_event {
+		int freq;
+		enum chan_width chan_width;
+		int cf1;
+		int cf2;
+		u32 chan_bw_interference_bitmap;
+		int link_id;
+	} incumbt_sig_intf_event;
 };
 
 /**
@@ -7157,6 +7396,8 @@ int ht_supported(const struct hostapd_hw_modes *mode);
 int vht_supported(const struct hostapd_hw_modes *mode);
 bool he_supported(const struct hostapd_hw_modes *hw_mode,
 		  enum ieee80211_op_mode op_mode);
+bool eht_supported(const struct hostapd_hw_modes *hw_mode,
+		   enum ieee80211_op_mode op_mode);
 
 struct wowlan_triggers *
 wpa_get_wowlan_triggers(const char *wowlan_triggers,
@@ -7178,9 +7419,6 @@ extern const struct wpa_driver_ops wpa_driver_wext_ops; /* driver_wext.c */
 /* driver_nl80211.c */
 extern const struct wpa_driver_ops wpa_driver_nl80211_ops;
 #endif /* CONFIG_DRIVER_NL80211 */
-#ifdef CONFIG_DRIVER_HOSTAP
-extern const struct wpa_driver_ops wpa_driver_hostap_ops; /* driver_hostap.c */
-#endif /* CONFIG_DRIVER_HOSTAP */
 #ifdef CONFIG_DRIVER_BSD
 extern const struct wpa_driver_ops wpa_driver_bsd_ops; /* driver_bsd.c */
 #endif /* CONFIG_DRIVER_BSD */
@@ -7206,10 +7444,6 @@ extern const struct wpa_driver_ops wpa_driver_macsec_linux_ops;
 /* driver_roboswitch.c */
 extern const struct wpa_driver_ops wpa_driver_roboswitch_ops;
 #endif /* CONFIG_DRIVER_ROBOSWITCH */
-#ifdef CONFIG_DRIVER_ATHEROS
-/* driver_atheros.c */
-extern const struct wpa_driver_ops wpa_driver_atheros_ops;
-#endif /* CONFIG_DRIVER_ATHEROS */
 #ifdef CONFIG_DRIVER_NONE
 extern const struct wpa_driver_ops wpa_driver_none_ops; /* driver_none.c */
 #endif /* CONFIG_DRIVER_NONE */

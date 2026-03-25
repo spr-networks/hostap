@@ -1,6 +1,6 @@
 /*
  * NAN unsynchronized service discovery (USD)
- * Copyright (c) 2024, Qualcomm Innovation Center, Inc.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -150,6 +150,10 @@ int hostapd_nan_usd_init(struct hostapd_data *hapd)
 {
 	struct nan_callbacks cb;
 
+	/* If nan_de is already initialized, do not create a new instance. */
+	if (hapd->nan_de)
+		return 0;
+
 	os_memset(&cb, 0, sizeof(cb));
 	cb.ctx = hapd;
 	cb.tx = hostapd_nan_de_tx;
@@ -163,13 +167,19 @@ int hostapd_nan_usd_init(struct hostapd_data *hapd)
 	hapd->nan_de = nan_de_init(hapd->own_addr, false, true, 0, &cb);
 	if (!hapd->nan_de)
 		return -1;
+
+	hapd->nan_de_is_owned = true;
+
 	return 0;
 }
 
 
 void hostapd_nan_usd_deinit(struct hostapd_data *hapd)
 {
-	nan_de_deinit(hapd->nan_de);
+	if (hapd->nan_de_is_owned) {
+		nan_de_deinit(hapd->nan_de);
+		hapd->nan_de_is_owned = false;
+	}
 	hapd->nan_de = NULL;
 }
 
@@ -180,7 +190,7 @@ void hostapd_nan_usd_rx_sdf(struct hostapd_data *hapd, const u8 *src,
 {
 	if (!hapd->nan_de)
 		return;
-	nan_de_rx_sdf(hapd->nan_de, src, a3, freq, buf, len);
+	nan_de_rx_sdf(hapd->nan_de, src, a3, freq, buf, len, 0);
 }
 
 
@@ -204,7 +214,7 @@ int hostapd_nan_usd_publish(struct hostapd_data *hapd, const char *service_name,
 		return -1;
 
 	publish_id = nan_de_publish(hapd->nan_de, service_name, srv_proto_type,
-				    ssi, elems, params, p2p);
+				    ssi, elems, params, p2p, NULL);
 	wpabuf_free(elems);
 	return publish_id;
 }
@@ -243,7 +253,8 @@ int hostapd_nan_usd_subscribe(struct hostapd_data *hapd,
 		return -1;
 
 	subscribe_id = nan_de_subscribe(hapd->nan_de, service_name,
-					srv_proto_type, ssi, elems, params, p2p);
+					srv_proto_type, ssi, elems, params, p2p,
+					NULL);
 	wpabuf_free(elems);
 	return subscribe_id;
 }

@@ -259,10 +259,10 @@ L_CFLAGS += -DCONFIG_SAE
 OBJS += src/common/sae.c
 ifdef CONFIG_SAE_PK
 L_CFLAGS += -DCONFIG_SAE_PK
-NEED_AES_SIV=y
 NEED_BASE64=y
 OBJS += src/common/sae_pk.c
 endif
+NEED_AES_SIV=y
 NEED_ECC=y
 NEED_DH_GROUPS=y
 NEED_HMAC_SHA256_KDF=y
@@ -587,6 +587,16 @@ ifdef CONFIG_NAN_USD
 OBJS += src/common/nan_de.c
 OBJS += src/ap/nan_usd_ap.c
 L_CFLAGS += -DCONFIG_NAN_USD
+endif
+
+ifdef CONFIG_PMKSA_PRIVACY
+CONFIG_ENC_ASSOC=y
+L_CFLAGS += -DCONFIG_PMKSA_PRIVACY
+endif
+
+ifdef CONFIG_ENC_ASSOC
+CONFIG_PASN=y
+L_CFLAGS += -DCONFIG_ENC_ASSOC
 endif
 
 ifdef CONFIG_PASN
@@ -938,6 +948,9 @@ endif
 endif
 
 ifdef CONFIG_SAE
+ifdef CONFIG_IEEE80211BE
+NEED_SHA384=y
+endif
 ifdef NEED_SHA384
 # Need to add HMAC-SHA384 KDF as well, if SHA384 was enabled.
 NEED_HMAC_SHA384_KDF=y
@@ -1067,6 +1080,7 @@ OBJS += src/pasn/pasn_common.c
 OBJS += src/ap/ieee802_11.c
 OBJS += src/ap/hw_features.c
 OBJS += src/ap/dfs.c
+OBJS += src/ap/interference.c
 L_CFLAGS += -DNEED_AP_MLME
 endif
 OBJS += src/ap/ieee802_11_ht.c
@@ -1135,6 +1149,11 @@ endif
 
 ifdef CONFIG_ANDROID_LOG
 L_CFLAGS += -DCONFIG_ANDROID_LOG
+endif
+
+ifdef CONFIG_PROCESS_COORDINATION
+L_CFLAGS += -DCONFIG_PROCESS_COORDINATION
+OBJS += src/common/proc_coord.c
 endif
 
 OBJS_c = hostapd_cli.c

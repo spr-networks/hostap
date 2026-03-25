@@ -267,6 +267,7 @@ void ptksa_cache_flush(struct ptksa_cache *ptksa, const u8 *addr, u32 cipher)
  * @life_time_expiry_cb: Callback for alternative expiration handling
  * @ctx: Context pointer to save into e->ctx for the callback
  * @akmp: The key management mechanism that was used to derive the PTK
+ * @auth_alg: The authentication algorithm that was used to derive the PTK
  * Returns: Pointer to the added PTKSA cache entry or %NULL on error
  *
  * This function creates a PTKSA entry and adds it to the PTKSA cache.
@@ -280,7 +281,7 @@ struct ptksa_cache_entry * ptksa_cache_add(struct ptksa_cache *ptksa,
 					   const struct wpa_ptk *ptk,
 					   void (*life_time_expiry_cb)
 					   (struct ptksa_cache_entry *e),
-					   void *ctx, u32 akmp)
+					   void *ctx, u32 akmp, u16 auth_alg)
 {
 	struct ptksa_cache_entry *entry, *tmp, *tmp2 = NULL;
 	struct os_reltime now;
@@ -306,6 +307,7 @@ struct ptksa_cache_entry * ptksa_cache_add(struct ptksa_cache *ptksa,
 	entry->cb = life_time_expiry_cb;
 	entry->ctx = ctx;
 	entry->akmp = akmp;
+	entry->auth_alg = auth_alg;
 
 	if (own_addr)
 		os_memcpy(entry->own_addr, own_addr, ETH_ALEN);
@@ -374,7 +376,8 @@ int ptksa_cache_list(struct ptksa_cache *ptksa, char *buf, size_t len)
 struct ptksa_cache_entry *
 ptksa_cache_add(struct ptksa_cache *ptksa, const u8 *own_addr, const u8 *addr,
 		u32 cipher, u32 life_time, const struct wpa_ptk *ptk,
-		void (*cb)(struct ptksa_cache_entry *e), void *ctx, u32 akmp)
+		void (*cb)(struct ptksa_cache_entry *e), void *ctx, u32 akmp,
+		u16 auth_alg)
 {
 	return NULL;
 }

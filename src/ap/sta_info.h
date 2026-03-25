@@ -99,6 +99,16 @@ struct sta_info {
 	u8 supported_rates[WLAN_SUPP_RATES_MAX];
 	int supported_rates_len;
 	u8 qosinfo; /* Valid when WLAN_STA_WMM is set */
+#ifdef CONFIG_ENC_ASSOC
+	bool epp_sta; /* Indicates if the station is an EPP peer */
+#endif /* CONFIG_ENC_ASSOC */
+#ifdef CONFIG_PMKSA_PRIVACY
+	u8 snonce[NONCE_LEN]; /* SNonce to compute next PMKID if
+			       * PMKID caching privacy is on */
+	u8 anonce[NONCE_LEN]; /* ANonce to compute next PMKID if
+			       * PMKID caching privacy is on */
+	u8 epp_pmkid_next[PMKID_LEN];
+#endif /* CONFIG_PMKSA_PRIVACY */
 
 #ifdef CONFIG_MESH
 	enum mesh_plink_state plink_state;
@@ -262,7 +272,7 @@ struct sta_info {
 #endif /* CONFIG_TAXONOMY */
 
 #ifdef CONFIG_FILS
-	u8 fils_snonce[FILS_NONCE_LEN];
+	u8 fils_snonce[NONCE_LEN];
 	u8 fils_session[FILS_SESSION_LEN];
 	u8 fils_erp_pmkid[PMKID_LEN];
 	u8 *fils_pending_assoc_req;
@@ -316,12 +326,16 @@ struct sta_info {
 #ifdef CONFIG_IEEE80211BE
 	struct mld_info mld_info;
 	u8 mld_assoc_link_id;
+	struct link_reconf_req_list *reconf_req;
 #endif /* CONFIG_IEEE80211BE */
 
 	u16 max_idle_period; /* if nonzero, the granted BSS max idle period in
 			      * units of 1000 TUs */
 
 	u64 last_known_sta_id_timestamp;
+
+	struct wpabuf *sae_pw_id;
+	unsigned int sae_pw_id_counter;
 };
 
 
@@ -346,6 +360,8 @@ int ap_for_each_sta(struct hostapd_data *hapd,
 			      void *ctx),
 		    void *ctx);
 struct sta_info * ap_get_sta(struct hostapd_data *hapd, const u8 *sta);
+struct sta_info * ap_get_link_sta(struct hostapd_data *hapd,
+				  const u8 *link_addr);
 struct sta_info * ap_get_sta_p2p(struct hostapd_data *hapd, const u8 *addr);
 void ap_sta_hash_add(struct hostapd_data *hapd, struct sta_info *sta);
 void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta);
@@ -374,6 +390,8 @@ int ap_sta_set_vlan(struct hostapd_data *hapd, struct sta_info *sta,
 		    struct vlan_description *vlan_desc);
 void ap_sta_start_sa_query(struct hostapd_data *hapd, struct sta_info *sta);
 void ap_sta_stop_sa_query(struct hostapd_data *hapd, struct sta_info *sta);
+void ap_sta_set_sa_query_timeout(struct hostapd_data *hapd,
+				 struct sta_info *sta, int value);
 int ap_check_sa_query_timeout(struct hostapd_data *hapd, struct sta_info *sta);
 const char * ap_sta_wpa_get_keyid(struct hostapd_data *hapd,
 				  struct sta_info *sta);
@@ -431,5 +449,20 @@ static inline void ap_sta_set_mld(struct sta_info *sta, bool mld)
 void ap_sta_free_sta_profile(struct mld_info *info);
 
 void hostapd_free_link_stas(struct hostapd_data *hapd);
+void set_wpa_sm_for_each_partner_link(struct hostapd_data *hapd,
+				      struct sta_info *psta, void *wpa_sm);
+void clear_wpa_sm_for_each_partner_link(struct hostapd_data *hapd,
+					struct sta_info *psta);
+void clear_wpa_sm_for_all_sta(struct hostapd_data *hapd,
+			      struct wpa_state_machine *wpa_sm);
+
+static inline bool ap_sta_is_epp(const struct sta_info *sta)
+{
+#ifdef CONFIG_ENC_ASSOC
+	return sta && sta->epp_sta;
+#else /* CONFIG_ENC_ASSOC */
+	return false;
+#endif /* CONFIG_ENC_ASSOC */
+}
 
 #endif /* STA_INFO_H */

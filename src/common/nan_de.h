@@ -1,6 +1,6 @@
 /*
  * NAN Discovery Engine
- * Copyright (c) 2024, Qualcomm Innovation Center, Inc.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -9,7 +9,7 @@
 #ifndef NAN_DE_H
 #define NAN_DE_H
 
-#include "nan.h"
+#include "nan_defs.h"
 
 /* Maximum number of active local publish and subscribe instances */
 #ifndef NAN_DE_MAX_SERVICE
@@ -50,6 +50,9 @@ struct nan_callbacks {
 	void (*subscribe_terminated)(void *ctx, int subscribe_id,
 				     enum nan_de_reason reason);
 
+	void (*offload_cancel_publish)(void *ctx, int publish_id);
+	void (*offload_cancel_subscribe)(void *ctx, int subscribe_id);
+
 	void (*receive)(void *ctx, int id, int peer_instance_id,
 			const u8 *ssi, size_t ssi_len,
 			const u8 *peer_addr);
@@ -57,6 +60,10 @@ struct nan_callbacks {
 	void (*process_p2p_usd_elems)(void *ctx, const u8 *buf,
 				      u16 buf_len, const u8 *peer_addr,
 				      unsigned int freq);
+
+	void (*process_pr_usd_elems)(void *ctx, const u8 *buf,
+				     u16 buf_len, const u8 *peer_addr,
+				     unsigned int freq);
 };
 
 bool nan_de_is_nan_network_id(const u8 *addr);
@@ -70,11 +77,12 @@ void nan_de_deinit(struct nan_de *de);
 void nan_de_listen_started(struct nan_de *de, unsigned int freq,
 			   unsigned int duration);
 void nan_de_listen_ended(struct nan_de *de, unsigned int freq);
+void nan_de_update_nmi(struct nan_de *de, const u8 *nmi);
 void nan_de_tx_status(struct nan_de *de, unsigned int freq, const u8 *dst);
 void nan_de_tx_wait_ended(struct nan_de *de);
 
-void nan_de_rx_sdf(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
-		   unsigned int freq, const u8 *buf, size_t len);
+bool nan_de_rx_sdf(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
+		   unsigned int freq, const u8 *buf, size_t len, int rssi);
 const u8 * nan_de_get_service_id(struct nan_de *de, int id);
 
 struct nan_publish_params {
@@ -107,13 +115,33 @@ struct nan_publish_params {
 
 	/* Announcement period in ms; 0 = use default */
 	unsigned int announcement_period;
+
+	/* Proximity ranging flag */
+	bool proximity_ranging;
+
+	/* Synchronized discovery */
+	bool sync;
+
+	/*
+	 * Null-terminated string containing the hex-encoded
+	 * representation of the matching filters.
+	 */
+	const char *match_filter_tx;
+	const char *match_filter_rx;
+
+	/* RSSI range limit */
+	bool close_proximity;
+
+	/* Source MAC address for this service (optional) */
+	const u8 *forced_addr;
 };
 
 /* Returns -1 on failure or >0 publish_id */
 int nan_de_publish(struct nan_de *de, const char *service_name,
 		   enum nan_service_protocol_type srv_proto_type,
 		   const struct wpabuf *ssi, const struct wpabuf *elems,
-		   struct nan_publish_params *params, bool p2p);
+		   struct nan_publish_params *params, bool p2p,
+		   const u8 *addr);
 
 void nan_de_cancel_publish(struct nan_de *de, int publish_id);
 
@@ -140,13 +168,45 @@ struct nan_subscribe_params {
 
 	/* Query period in ms; 0 = use default */
 	unsigned int query_period;
+
+	/* Proximity ranging flag */
+	bool proximity_ranging;
+
+	/* Synchronized discovery */
+	bool sync;
+
+	/*
+	 * Null-terminated string containing the hex-encoded
+	 * representation of the matching filters.
+	 */
+	const char *match_filter_tx;
+	const char *match_filter_rx;
+
+	/* Service response filter include flag */
+	bool srf_include;
+
+	/* Service response filter MAC list */
+	const char *srf_mac_list;
+
+	/* Bloom filter length in octets. If 0, MAC list is used instead */
+	u8 srf_bf_len;
+
+	/* Bloom filter index (0-3) */
+	u8 srf_bf_idx;
+
+	/* RSSI range limit */
+	bool close_proximity;
+
+	/* Source MAC address for this service (optional) */
+	const u8 *forced_addr;
 };
 
 /* Returns -1 on failure or >0 subscribe_id */
 int nan_de_subscribe(struct nan_de *de, const char *service_name,
 		     enum nan_service_protocol_type srv_proto_type,
 		     const struct wpabuf *ssi, const struct wpabuf *elems,
-		     struct nan_subscribe_params *params, bool p2p);
+		     struct nan_subscribe_params *params, bool p2p,
+		     const u8 *addr);
 
 void nan_de_cancel_subscribe(struct nan_de *de, int subscribe_id);
 
@@ -155,5 +215,23 @@ void nan_de_cancel_subscribe(struct nan_de *de, int subscribe_id);
 int nan_de_transmit(struct nan_de *de, int handle,
 		    const struct wpabuf *ssi, const struct wpabuf *elems,
 		    const u8 *peer_addr, u8 req_instance_id);
+void nan_de_dw_trigger(struct nan_de *de, int freq);
+void nan_de_set_cluster_id(struct nan_de *de, const u8 *cluster_id);
+bool nan_de_is_valid_instance_id(struct nan_de *de, int handle,
+				 bool publish, u8 *service_id);
+
+int nan_de_stop_listen(struct nan_de *de, int handle);
+
+struct nan_de_cfg {
+	/* N and M minimal and maximal values */
+	u32 n_min, n_max;
+
+	/* When not in pause state, stop the DE radio usage for 'suspend' ms
+	 * every 'cycle' ms.
+	 */
+	u32 suspend, cycle;
+};
+
+int nan_de_config(struct nan_de *de, struct nan_de_cfg *cfg);
 
 #endif /* NAN_DE_H */

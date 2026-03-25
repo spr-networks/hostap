@@ -36,6 +36,7 @@ LIB_OBJS= \
 	ieee802_11_shared.o \
 	ieee802_11_vht.o \
 	ieee802_1x.o \
+	interference.o \
 	neighbor_db.o \
 	ndisc_snoop.o \
 	p2p_hostapd.o \

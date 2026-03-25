@@ -2,7 +2,7 @@
  * wpa_supplicant - DPP
  * Copyright (c) 2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2020, The Linux Foundation
- * Copyright (c) 2021-2022, Qualcomm Innovation Center, Inc.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -334,17 +334,17 @@ static char * wpas_dpp_scan_channel_list(struct wpa_supplicant *wpa_s)
 	u8 last_op_class = 0;
 	int res;
 
-	if (!wpa_s->last_scan_freqs || !wpa_s->num_last_scan_freqs)
+	len = int_array_len(wpa_s->last_scan_freqs);
+	if (!len)
 		return NULL;
 
-	len = wpa_s->num_last_scan_freqs * 8;
-	str = os_zalloc(len);
+	str = os_zalloc(len * 8);
 	if (!str)
 		return NULL;
 	end = str + len;
 	pos = str;
 
-	for (i = 0; i < wpa_s->num_last_scan_freqs; i++) {
+	for (i = 0; wpa_s->last_scan_freqs[i]; i++) {
 		enum hostapd_hw_mode mode;
 		u8 op_class, channel;
 
@@ -1071,8 +1071,8 @@ static int wpas_dpp_listen_start(struct wpa_supplicant *wpa_s,
 		return -1;
 	lwork->freq = freq;
 
-	if (radio_add_work(wpa_s, freq, "dpp-listen", 0, dpp_start_listen_cb,
-			   lwork) < 0) {
+	if (!radio_add_work(wpa_s, freq, "dpp-listen", 0, dpp_start_listen_cb,
+			    lwork)) {
 		wpas_dpp_listen_work_free(lwork);
 		return -1;
 	}
@@ -1423,6 +1423,21 @@ static struct wpa_ssid * wpas_dpp_add_network(struct wpa_supplicant *wpa_s,
 		return NULL;
 	wpas_notify_network_added(wpa_s, ssid);
 	wpa_config_set_network_defaults(ssid);
+	if (wpa_s->drv_capa_known &&
+	    (wpa_s->drv_enc & WPA_DRIVER_CAPA_ENC_GCMP)) {
+		ssid->pairwise_cipher |= WPA_CIPHER_GCMP;
+		ssid->group_cipher |= WPA_CIPHER_GCMP;
+	}
+	if (wpa_s->drv_capa_known &&
+	    (wpa_s->drv_enc & WPA_DRIVER_CAPA_ENC_GCMP_256)) {
+		ssid->pairwise_cipher |= WPA_CIPHER_GCMP_256;
+		ssid->group_cipher |= WPA_CIPHER_GCMP_256;
+	}
+	if (wpa_s->drv_capa_known &&
+	    (wpa_s->drv_enc & WPA_DRIVER_CAPA_ENC_CCMP_256)) {
+		ssid->pairwise_cipher |= WPA_CIPHER_CCMP_256;
+		ssid->group_cipher |= WPA_CIPHER_CCMP_256;
+	}
 	ssid->disabled = 1;
 
 	ssid->ssid = os_malloc(conf->ssid_len);
@@ -1807,6 +1822,7 @@ static int wpas_dpp_handle_config_obj(struct wpa_supplicant *wpa_s,
 	if (!wpa_s->dpp_pb_result_indicated) {
 		wpa_msg(wpa_s, MSG_INFO, DPP_EVENT_PB_RESULT "success");
 		wpa_s->dpp_pb_result_indicated = true;
+		wpas_dpp_push_button_stop(wpa_s);
 	}
 
 #endif /* CONFIG_DPP3 */
@@ -5767,6 +5783,8 @@ int wpas_dpp_push_button(struct wpa_supplicant *wpa_s, const char *cmd)
 		   "DPP: Scan to create channel list for PB discovery");
 	wpa_s->scan_req = MANUAL_SCAN_REQ;
 	wpa_s->scan_res_handler = wpas_dpp_pb_scan_res_handler;
+	wpa_supplicant_cancel_sched_scan(wpa_s);
+	wpa_drv_dpp_listen(wpa_s, true);
 	wpa_supplicant_req_scan(wpa_s, 0, 0);
 	wpa_msg(wpa_s, MSG_INFO, DPP_EVENT_PB_STATUS "started");
 	return 0;
@@ -5783,6 +5801,8 @@ void wpas_dpp_push_button_stop(struct wpa_supplicant *wpa_s)
 	wpa_s->dpp_pb_announcement = NULL;
 	if (wpa_s->dpp_pb_bi) {
 		char id[20];
+
+		wpa_drv_dpp_listen(wpa_s, false);
 
 		if (wpa_s->dpp_pb_bi == wpa_s->dpp_pkex_bi)
 			wpa_s->dpp_pkex_bi = NULL;

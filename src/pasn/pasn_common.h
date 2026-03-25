@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2019, Intel Corporation
  * Copyright (c) 2022, Jouni Malinen <j@w1.fi>
- * Copyright (C) 2022, Qualcomm Innovation Center, Inc.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * This software may be distributed under the terms of the BSD license.
  * See README for more details.
@@ -11,6 +11,11 @@
 
 #ifndef PASN_COMMON_H
 #define PASN_COMMON_H
+
+#include "common/wpa_common.h"
+#ifdef CONFIG_SAE
+#include "common/sae.h"
+#endif /* CONFIG_SAE */
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,8 +29,8 @@ enum pasn_fils_state {
 
 struct pasn_fils {
 	u8 state;
-	u8 nonce[FILS_NONCE_LEN];
-	u8 anonce[FILS_NONCE_LEN];
+	u8 nonce[NONCE_LEN];
+	u8 anonce[NONCE_LEN];
 	u8 session[FILS_SESSION_LEN];
 	u8 erp_pmkid[PMKID_LEN];
 	bool completed;
@@ -44,6 +49,9 @@ struct pasn_data {
 	bool derive_kdk;
 	size_t kdk_len;
 	void *cb_ctx;
+	unsigned int auth_alg;
+	u8 mld_addr[ETH_ALEN];
+	bool is_ml_peer;
 
 #ifdef CONFIG_SAE
 	struct sae_pt *pt;
@@ -53,7 +61,7 @@ struct pasn_data {
 	const char *password;
 	int wpa_key_mgmt;
 	int rsn_pairwise;
-	u16 rsnxe_capab;
+	u32 rsnxe_capab;
 	u8 *rsnxe_ie;
 	bool custom_pmkid_valid;
 	u8 custom_pmkid[PMKID_LEN];
@@ -78,8 +86,9 @@ struct pasn_data {
 	size_t pmk_len;
 	u8 pmk[PMK_LEN_MAX];
 	bool using_pmksa;
+	enum rsn_hash_alg hash_alg;
 
-	u8 hash[SHA384_MAC_LEN];
+	struct wpabuf *auth1;
 
 	struct wpabuf *beacon_rsne_rsnxe;
 	struct wpa_ptk ptk;
@@ -122,9 +131,8 @@ struct pasn_data {
 	bool noauth; /* Whether PASN without mutual authentication is enabled */
 	int disable_pmksa_caching;
 	int *pasn_groups;
-	struct wpabuf *wrapped_data;
 	int use_anti_clogging;
-	const u8 *rsn_ie;
+	u8 *rsn_ie;
 	size_t rsn_ie_len;
 
 	u8 *comeback_key;
@@ -132,6 +140,14 @@ struct pasn_data {
 	u16 comeback_idx;
 	u16 *comeback_pending_idx;
 	struct wpabuf *frame;
+#ifdef CONFIG_ENC_ASSOC
+	bool authorized;
+	bool tk_configured;
+#endif /* CONFIG_ENC_ASSOC */
+#ifdef CONFIG_PMKSA_PRIVACY
+	bool pmksa_caching_privacy;
+	u8 epp_pmkid_cur[PMKID_LEN];
+#endif /* CONFIG_PMKSA_PRIVACY */
 
 	/**
 	 * send_mgmt - Function handler to transmit a Management frame
@@ -157,6 +173,13 @@ struct pasn_data {
 	int (*prepare_data_element)(void *ctx, const u8 *peer_addr);
 
 	int (*parse_data_element)(void *ctx, const u8 *data, size_t len);
+#ifdef CONFIG_ENC_ASSOC
+	int (*eppke_set_key)(void *ctx, enum wpa_alg alg, const u8 *addr,
+			     int vlan_id, const u8 *key, size_t key_len);
+#endif /* CONFIG_ENC_ASSOC */
+	struct rsn_pmksa_cache_entry *
+	(*pmksa_cache_search)(void *ctx, const u8 *spa, const u8 *pmkid,
+			      bool is_ml);
 };
 
 /* Initiator */
@@ -167,6 +190,10 @@ int wpas_pasn_start(struct pasn_data *pasn, const u8 *own_addr,
 		    int freq, const u8 *beacon_rsne, u8 beacon_rsne_len,
 		    const u8 *beacon_rsnxe, u8 beacon_rsnxe_len,
 		    const struct wpabuf *comeback);
+struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
+				       const struct wpabuf *comeback,
+				       bool verify, bool full_hdr);
+struct wpabuf * wpas_pasn_build_auth_3(struct pasn_data *pasn, bool full_hdr);
 int wpa_pasn_verify(struct pasn_data *pasn, const u8 *own_addr,
 		    const u8 *peer_addr, const u8 *bssid,
 		    int akmp, int cipher, u16 group,
@@ -177,6 +204,10 @@ int wpa_pasn_auth_rx(struct pasn_data *pasn, const u8 *data, size_t len,
 		     struct wpa_pasn_params_data *pasn_params);
 int wpa_pasn_auth_tx_status(struct pasn_data *pasn,
 			    const u8 *data, size_t data_len, u8 acked);
+int wpas_parse_pasn_frame(struct pasn_data *pasn, u16 auth_type,
+			  u16 auth_transaction, u16 status_code,
+			  const u8 *frame_data, size_t frame_data_len,
+			  struct wpa_pasn_params_data *pasn_params);
 
 /* Responder */
 int handle_auth_pasn_1(struct pasn_data *pasn,
@@ -199,13 +230,23 @@ void pasn_register_callbacks(struct pasn_data *pasn, void *cb_ctx,
 					      unsigned int wait),
 			     int (*validate_custom_pmkid)(void *ctx,
 							  const u8 *addr,
-							  const u8 *pmkid));
+							  const u8 *pmkid),
+			     int (*eppke_set_key)(void *ctx, enum wpa_alg alg,
+						  const u8 *addr, int vlan_id,
+						  const u8 *key,
+						  size_t key_len),
+			     struct rsn_pmksa_cache_entry *
+			     (*pmksa_cache_search)(void *ctx, const u8 *spa,
+						   const u8 *pmkid,
+						   bool is_ml));
+
 void pasn_enable_kdk_derivation(struct pasn_data *pasn);
 void pasn_disable_kdk_derivation(struct pasn_data *pasn);
 
 void pasn_set_akmp(struct pasn_data *pasn, int akmp);
 void pasn_set_cipher(struct pasn_data *pasn, int cipher);
 void pasn_set_own_addr(struct pasn_data *pasn, const u8 *addr);
+void pasn_set_own_mld_addr(struct pasn_data *pasn, const u8 *addr);
 void pasn_set_peer_addr(struct pasn_data *pasn, const u8 *addr);
 void pasn_set_bssid(struct pasn_data *pasn, const u8 *addr);
 void pasn_set_initiator_pmksa(struct pasn_data *pasn,
@@ -231,7 +272,8 @@ void pasn_set_noauth(struct pasn_data *pasn, bool noauth);
 void pasn_set_password(struct pasn_data *pasn, const char *password);
 void pasn_set_wpa_key_mgmt(struct pasn_data *pasn, int key_mgmt);
 void pasn_set_rsn_pairwise(struct pasn_data *pasn, int rsn_pairwise);
-void pasn_set_rsnxe_caps(struct pasn_data *pasn, u16 rsnxe_capab);
+void pasn_set_rsne(struct pasn_data *pasn, const u8 *rsne);
+void pasn_set_rsnxe_caps(struct pasn_data *pasn, u32 rsnxe_capab);
 void pasn_set_rsnxe_ie(struct pasn_data *pasn, const u8 *rsnxe_ie);
 void pasn_set_custom_pmkid(struct pasn_data *pasn, const u8 *pmkid);
 int pasn_set_extra_ies(struct pasn_data *pasn, const u8 *extra_ies,

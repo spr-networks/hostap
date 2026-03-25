@@ -1159,6 +1159,29 @@ void wpas_dbus_signal_psk_mismatch(struct wpa_supplicant *wpa_s)
 }
 
 
+void wpas_dbus_signal_sae_password_mismatch(struct wpa_supplicant *wpa_s)
+{
+	struct wpas_dbus_priv *iface;
+	DBusMessage *msg;
+
+	iface = wpa_s->global->dbus;
+
+	/* Do nothing if the control interface is not turned on */
+	if (!iface || !wpa_s->dbus_new_path)
+		return;
+
+	msg = dbus_message_new_signal(wpa_s->dbus_new_path,
+				      WPAS_DBUS_NEW_IFACE_INTERFACE,
+				      "SaePasswordMismatch");
+	if (!msg)
+		return;
+
+	dbus_connection_send(iface->con, msg, NULL);
+
+	dbus_message_unref(msg);
+}
+
+
 /**
  * wpas_dbus_signal_sta - Send a station related event signal
  * @wpa_s: %wpa_supplicant network interface data
@@ -2390,7 +2413,7 @@ void wpas_dbus_signal_p2p_bootstrap_req(struct wpa_supplicant *wpa_s,
  * @wpa_s: %wpa_supplicant network interface data
  * @src: Source address of the peer with which bootstrapping is done
  * @status: Status of Bootstrapping handshake
- * @bootstrap_method: Peer's bootstrap method if status is success
+ * @bootstrap_method: Local device requested bootstrap method
  *
  * Sends a signal to notify that a peer P2P Device is requesting bootstrapping
  * negotiation with us.
@@ -3869,6 +3892,13 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 		  END_ARGS
 	  }
 	},
+	{ "NANPublishStopListen", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) wpas_dbus_handler_nan_publish_stop_listen,
+	  {
+		  { "publish_id", "u", ARG_IN },
+		  END_ARGS
+	  }
+	},
 	{ "NANSubscribe", WPAS_DBUS_NEW_IFACE_INTERFACE,
 	  (WPADBusMethodHandler) wpas_dbus_handler_nan_subscribe,
 	  {
@@ -3879,6 +3909,13 @@ static const struct wpa_dbus_method_desc wpas_dbus_interface_methods[] = {
 	},
 	{ "NANCancelSubscribe", WPAS_DBUS_NEW_IFACE_INTERFACE,
 	  (WPADBusMethodHandler) wpas_dbus_handler_nan_cancel_subscribe,
+	  {
+		  { "subscribe_id", "u", ARG_IN },
+		  END_ARGS
+	  }
+	},
+	{ "NANSubscribeStopListen", WPAS_DBUS_NEW_IFACE_INTERFACE,
+	  (WPADBusMethodHandler) wpas_dbus_handler_nan_subscribe_stop_listen,
 	  {
 		  { "subscribe_id", "u", ARG_IN },
 		  END_ARGS
@@ -4053,6 +4090,11 @@ static const struct wpa_dbus_property_desc wpas_dbus_interface_properties[] = {
 	{ "P2PDeviceConfig", WPAS_DBUS_NEW_IFACE_P2PDEVICE, "a{sv}",
 	  wpas_dbus_getter_p2p_device_config,
 	  wpas_dbus_setter_p2p_device_config,
+	  NULL
+	},
+	{ "DeviceAddress", WPAS_DBUS_NEW_IFACE_P2PDEVICE, "ay",
+	  wpas_dbus_getter_p2p_device_address,
+	  NULL,
 	  NULL
 	},
 	{ "Peers", WPAS_DBUS_NEW_IFACE_P2PDEVICE, "ao",
@@ -5117,6 +5159,11 @@ static const struct wpa_dbus_property_desc wpas_dbus_p2p_group_properties[] = {
 	{ "WPSVendorExtensions", WPAS_DBUS_NEW_IFACE_P2P_GROUP, "aay",
 	  wpas_dbus_getter_p2p_group_vendor_ext,
 	  wpas_dbus_setter_p2p_group_vendor_ext,
+	  NULL
+	},
+	{ "GODeviceAddress", WPAS_DBUS_NEW_IFACE_P2P_GROUP, "o",
+	  wpas_dbus_getter_p2p_group_go_device_address,
+	  NULL,
 	  NULL
 	},
 	{ NULL, NULL, NULL, NULL, NULL, NULL }

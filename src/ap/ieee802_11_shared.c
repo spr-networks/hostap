@@ -381,6 +381,10 @@ static void hostapd_ext_capab_byte(struct hostapd_data *hapd, u8 *pos, int idx,
 			/* Bit 13 - Collocated Interference Reporting */
 			*pos |= 0x20;
 		}
+		if (hapd->iface->conf->civic)
+			*pos |= 0x40; /* Bit 14 - Civic Location */
+		if (hapd->iface->conf->lci)
+			*pos |= 0x80; /* Bit 15 - Geospatial Location */
 		break;
 	case 2: /* Bits 16-23 */
 		if (hapd->conf->wnm_sleep_mode)
@@ -477,6 +481,8 @@ static void hostapd_ext_capab_byte(struct hostapd_data *hapd, u8 *pos, int idx,
 #endif /* CONFIG_SAE_PK */
 		break;
 	case 12: /* Bits 96-103 */
+		if (hapd->iconf->i2r_lmr_policy)
+			*pos |= 0x02; /* Bit 97 - I2R LMR Feedback Policy */
 		if (hapd->iconf->peer_to_peer_twt)
 			*pos |= 0x10; /* Bit 100 - Peer to Peer TWT */
 		if (hapd->conf->known_sta_identification)
@@ -1136,13 +1142,35 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 		capab |= BIT(WLAN_RSNX_CAPAB_SECURE_LTF);
 	if (hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_RTT_AP)
 		capab |= BIT(WLAN_RSNX_CAPAB_SECURE_RTT);
-	if (hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_PROT_RANGE_NEG_AP)
-		capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR);
+	if (hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_PROT_RANGE_NEG_AP) {
+		if (hapd->conf->urnm_mfpr != 0)
+			capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR);
+		if (hapd->conf->urnm_mfpr_x20 == 1)
+			capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR_X20);
+	}
 	if (hapd->conf->ssid_protection)
 		capab |= BIT(WLAN_RSNX_CAPAB_SSID_PROTECTION);
 	if ((hapd->iface->drv_flags2 & WPA_DRIVER_FLAGS2_SPP_AMSDU) &&
 	    hapd->conf->spp_amsdu)
 		capab |= BIT(WLAN_RSNX_CAPAB_SPP_A_MSDU);
+#ifdef CONFIG_ENC_ASSOC
+	/* Per IEEE 802.11bi/D4.0, 12.16.7 (PMKSA caching privacy)
+	 * a STA that sets the PMKSA Caching Privacy Support
+	 * field in the RSNXE to 1 shall set the (Re)Association
+	 * Frame Encryption Support field in the RSNXE to 1.
+	 */
+	if ((hapd->iface->drv_flags2 &
+	     WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION) &&
+	    (hapd->conf->assoc_frame_encryption ||
+	    hapd->conf->pmksa_caching_privacy)) {
+		capab |= BIT(WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION);
+		capab |= BIT(WLAN_RSNX_CAPAB_KEK_IN_PASN);
+	}
+	if (hapd->conf->pmksa_caching_privacy)
+		capab |= BIT(WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
+	if (hapd->conf->eap_using_authentication_frames)
+		capab |= BIT(WLAN_RSNX_CAPAB_802_1X_IN_AUTH_FRAMES);
+#endif /* CONFIG_ENC_ASSOC */
 
 	if (!capab)
 		return eid; /* no supported extended RSN capabilities */
@@ -1236,8 +1264,8 @@ struct sta_info * hostapd_ml_get_assoc_sta(struct hostapd_data *hapd,
 bool hostapd_get_ht_vht_twt_responder(struct hostapd_data *hapd)
 {
 	return hapd->iconf->ht_vht_twt_responder &&
-		((hapd->iconf->ieee80211n && !hapd->conf->disable_11n) ||
-		 (hapd->iconf->ieee80211ac && !hapd->conf->disable_11ac)) &&
+		(hostapd_is_ht_enabled(hapd) ||
+		 hostapd_is_vht_enabled(hapd)) &&
 		(hapd->iface->drv_flags2 &
 		 WPA_DRIVER_FLAGS2_HT_VHT_TWT_RESPONDER);
 }

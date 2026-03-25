@@ -1,5 +1,5 @@
 # EHT tests
-# Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc.
+# Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
 #
 # This software may be distributed under the terms of the BSD license.
 # See README for more details.
@@ -19,6 +19,8 @@ from tshark import run_tshark
 from test_gas import hs20_ap_params
 from test_dpp import check_dpp_capab, wait_auth_success
 from test_rrm import build_beacon_request, run_req_beacon, BeaconReport
+from p2p_utils import *
+import utils
 
 def eht_verify_wifi_version(dev):
     status = dev.get_status()
@@ -159,7 +161,7 @@ def test_prefer_eht_20(dev, apdev):
       raise Exception("Unexpected BSS1 est_throughput: " + est)
 
 def start_eht_sae_ap(apdev, ml=False, transition_mode=False,
-                     anti_clogging_token=False):
+                     anti_clogging_token=False, require_eht=False):
     params = hostapd.wpa2_params(ssid="eht", passphrase="12345678")
     params["ieee80211ax"] = "1"
     params["ieee80211be"] = "1"
@@ -176,6 +178,8 @@ def start_eht_sae_ap(apdev, ml=False, transition_mode=False,
     if ml:
         ml_elem = "ff0d6b" + "3001" + "0a" + "021122334455" + "01" + "00" + "00"
         params['vendor_elements'] = ml_elem
+    if require_eht:
+        params['require_eht'] = '1'
     try:
         hapd = hostapd.add_ap(apdev, params)
     except Exception as e:
@@ -196,6 +200,36 @@ def test_eht_sae(dev, apdev):
                        ieee80211w="2", beacon_prot="1",
                        pairwise="GCMP-256", group="GCMP-256",
                        group_mgmt="BIP-GMAC-256", scan_freq="2412")
+    finally:
+        dev[0].set("sae_groups", "")
+        dev[0].set("sae_pwe", "0")
+
+def test_eht_sae_require_eht(dev, apdev):
+    """EHT AP requiring EHT for association"""
+    check_sae_capab(dev[0])
+
+    hapd = start_eht_sae_ap(apdev[0], require_eht=True)
+    try:
+        dev[0].set("sae_groups", "20")
+        dev[0].set("sae_pwe", "2")
+        dev[0].connect("eht", key_mgmt="SAE-EXT-KEY", psk="12345678",
+                       ieee80211w="2", beacon_prot="1",
+                       pairwise="GCMP-256", group="GCMP-256",
+                       group_mgmt="BIP-GMAC-256", scan_freq="2412")
+        dev[0].request("REMOVE_NETWORK all")
+        dev[0].wait_disconnected()
+
+        dev[0].connect("eht", key_mgmt="SAE-EXT-KEY", psk="12345678",
+                       ieee80211w="2", beacon_prot="1",
+                       pairwise="GCMP-256", group="GCMP-256",
+                       group_mgmt="BIP-GMAC-256", scan_freq="2412",
+                       disable_eht="1", wait_connect=False)
+        ev = dev[0].wait_event(['CTRL-EVENT-ASSOC-REJECT'])
+        dev[0].request("DISCONNECT")
+        if not ev:
+            raise Exception('Rejection not found')
+        if "status_code=135" not in ev:
+            raise Exception("Unexpected association rejection status: " + ev)
     finally:
         dev[0].set("sae_groups", "")
         dev[0].set("sae_pwe", "0")
@@ -330,9 +364,13 @@ def test_eht_mld_discovery(dev, apdev):
         link1_params = {"ssid": ssid,
                         "hw_mode": "g",
                         "channel": "2"}
+        link2_params = {"ssid": ssid,
+                        "hw_mode": "g",
+                        "channel": "3"}
 
         hapd0 = eht_mld_enable_ap(hapd_iface, 0, link0_params)
         hapd1 = eht_mld_enable_ap(hapd_iface, 1, link1_params)
+        hapd2 = eht_mld_enable_ap(hapd_iface, 2, link2_params)
 
         # Only scan link 0
         res = wpas.request("SCAN freq=2412")
@@ -349,15 +387,16 @@ def test_eht_mld_discovery(dev, apdev):
 
         logger.info("Scan done")
 
-        rnr_pattern = re.compile(".*ap_info.*, mld ID=0, link ID=",
+        rnr_pattern = re.compile("^.*ap_info.*, bssid=(.*?),.*mld ID=0, link ID=([0-9]*).*$",
                                  re.MULTILINE)
         ml_pattern = re.compile(".*multi-link:.*, MLD addr=.*", re.MULTILINE)
 
         bss = wpas.request("BSS " + hapd0.own_addr())
         logger.info("BSS 0: " + str(bss))
 
-        if rnr_pattern.search(bss) is None:
-            raise Exception("RNR element not found for first link")
+        rnr_entries = rnr_pattern.findall(bss)
+        if (hapd1.own_addr(), '1') not in rnr_entries or (hapd2.own_addr(), '2') not in rnr_entries:
+            raise Exception("RNR entries for other links not found on first link, found: " + str(rnr_pattern.findall(bss)))
 
         if ml_pattern.search(bss) is None:
             raise Exception("ML element not found for first link")
@@ -379,8 +418,9 @@ def test_eht_mld_discovery(dev, apdev):
         bss = wpas.request("BSS " + hapd1.own_addr())
         logger.info("BSS 1: " + str(bss))
 
-        if rnr_pattern.search(bss) is None:
-            raise Exception("RNR element not found for second link")
+        rnr_entries = rnr_pattern.findall(bss)
+        if (hapd0.own_addr(), '0') not in rnr_entries or (hapd2.own_addr(), '2') not in rnr_entries:
+            raise Exception("RNR entries for other links not found on second link, found: " + str(rnr_entries))
 
         if ml_pattern.search(bss) is None:
             raise Exception("ML element not found for second link")
@@ -431,10 +471,14 @@ def test_eht_mld_owe_two_links_reconf_mle_ext_only_second(dev, apdev):
     _eht_mld_owe_two_links(dev, apdev, reconf_mle=reconf_mle,
                            only_second=True, scan_only_second_link=True)
 
+def test_eht_mld_owe_two_links_frag_subelem(dev, apdev):
+    """AP MLD and fragmented MLE subelements"""
+    _eht_mld_owe_two_links(dev, apdev, frag_subelem=True)
+
 def _eht_mld_owe_two_links(dev, apdev, second_link_disabled=False,
                            only_one_link=False, scan_only_second_link=False,
                            wait_for_timeout=False, reconf_mle=None,
-                           only_second=False):
+                           only_second=False, frag_subelem=False):
     with HWSimRadio(use_mlo=True) as (hapd0_radio, hapd0_iface), \
         HWSimRadio(use_mlo=True) as (hapd1_radio, hapd1_iface), \
         HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
@@ -458,6 +502,8 @@ def _eht_mld_owe_two_links(dev, apdev, second_link_disabled=False,
         # Check legacy client connection
         dev[0].connect(ssid, scan_freq="2437", key_mgmt="OWE", ieee80211w="2")
 
+        if frag_subelem:
+            wpas.set("link_ies", "1:DDFF" + 255*"EE")
         if only_one_link:
             link0 = hapd0.get_status_field("link_addr")
             wpas.set("bssid_filter", link0)
@@ -934,7 +980,7 @@ def test_eht_ml_probe_req(dev, apdev):
         if ev is None:
             raise Exception("ML_PROBE_REQ did not result in scan results")
 
-def test_eht_mld_connect_probes(dev, apdev, params):
+def _eht_mld_connect_probes(params, hidden=False):
     """MLD client sends ML probe to connect to not discovered links"""
     with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
         HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
@@ -949,15 +995,22 @@ def test_eht_mld_connect_probes(dev, apdev, params):
                                              key_mgmt="SAE", pwe='2')
         link_params['channel'] = '1'
         link_params['bssid'] = '00:11:22:33:44:01'
+        if hidden:
+            link_params['ignore_broadcast_ssid'] = '1'
+
         hapd0 = eht_mld_enable_ap(hapd_iface, 0, link_params)
 
         link_params['channel'] = '6'
         link_params['bssid'] = '00:11:22:33:44:02'
         hapd1 = eht_mld_enable_ap(hapd_iface, 1, link_params)
 
+        # In the hidden test, scan passively to have the BSSs without SSID
+        if hidden:
+            wpas.scan(freq="2412,2437", passive=True)
+
         wpas.set("sae_pwe", "1")
         wpas.connect(ssid, sae_password= passphrase, ieee80211w="2",
-                     key_mgmt="SAE", scan_freq="2412")
+                     key_mgmt="SAE", scan_freq="2412", scan_ssid="1")
 
         filters = ['wlan.fc.type_subtype == 0x0004 && wlan.ext_tag.length == 8 && wlan.ext_tag.number == 107 && wlan.eht.multi_link.control == 0x0011 && wlan.eht.multi_link.common_info.length == 2 && wlan.eht.multi_link.common_info.mld_id == 0 && wlan.eht.multi_link.sta_profile.subelt_id == 0 && wlan.eht.multi_link.sta_profile.subelt_len == 2 && wlan.eht.multi_link.type_1.sta_profile_count == 1 && wlan.eht.multi_link.sta_profile_id_list == \'1\'',
                    'wlan.fc.type_subtype == 0x0004 && wlan.ext_tag.length == 8 && wlan.ext_tag.number == 107 && wlan.eht.multi_link_control == 0x0011 && wlan.eht.multi_link.common_info.length == 2 && wlan.eht.multi_link.common_info.mld_id == 0 && wlan.eht.multi_link.sta_profile.subelt_id == 0 && wlan.eht.multi_link.sta_profile.subelt_len == 2 && wlan.eht.multi_link.type_1.sta_profile_count == 1 && wlan.eht.multi_link.sta_profile_id_list == 1',
@@ -981,6 +1034,14 @@ def test_eht_mld_connect_probes(dev, apdev, params):
                           valid_links=3, active_links=3)
         traffic_test(wpas, hapd0)
         traffic_test(wpas, hapd1)
+
+def test_eht_mld_connect_probes(dev, apdev, params):
+    """MLD client sends ML probe to connect to not discovered links"""
+    _eht_mld_connect_probes(params)
+
+def test_eht_mld_connect_probes_hidden(dev, apdev, params):
+    """MLD client sends ML probe with SSID to connect to not discovered links"""
+    _eht_mld_connect_probes(params, hidden=True)
 
 def test_eht_tx_link_rejected_connect_other(dev, apdev, params):
     """EHT MLD AP with MLD client being rejected on TX link, but then connecting on second link"""
@@ -1054,6 +1115,77 @@ def test_eht_all_links_rejected(dev, apdev, params):
             # After this message, a new scan clears the ignore and the STA
             # connects.
             wpas.wait_connected(timeout=15)
+
+def test_eht_assoc_failure(dev, apdev, params):
+    """EHT MLD AP with MLD client that fails the association the first time"""
+    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(wpas_iface)
+        check_sae_capab(wpas)
+
+        ssid = "mld_ap"
+        passphrase = 'qwertyuiop'
+        link_params = eht_mld_ap_wpa2_params(ssid, passphrase, mfp="2",
+                                             key_mgmt="SAE", pwe='2')
+        link_params['channel'] = '1'
+        link_params['bssid'] = '00:11:22:33:44:01'
+        hapd0 = eht_mld_enable_ap(hapd_iface, 0, link_params)
+
+        link_params['channel'] = '6'
+        link_params['bssid'] = '00:11:22:33:44:02'
+        hapd1 = eht_mld_enable_ap(hapd_iface, 1, link_params)
+
+        wpas.set("sae_pwe", "2")
+        with fail_test(wpas, 1, "denied-unspec;mlme_event_assoc"):
+            wpas.connect(ssid, sae_password=passphrase, ieee80211w="2",
+                         key_mgmt="SAE", scan_freq="2412")
+
+        # connection succeeds on the second attempt which uses an open
+        # authentication
+        eht_verify_status(wpas, hapd1, 2437, 20, is_ht=True, mld=True,
+                          valid_links=3, active_links=3)
+        traffic_test(wpas, hapd0)
+        traffic_test(wpas, hapd1)
+
+def test_eht_non_assoc_links_rejected(dev, apdev, params):
+    """EHT MLD AP with all non assoc links rejected in association"""
+    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(wpas_iface)
+        check_sae_capab(wpas)
+
+        ssid = "mld_ap"
+        passphrase = 'qwertyuiop'
+        link_params = eht_mld_ap_wpa2_params(ssid, passphrase, mfp="2",
+                                             key_mgmt="SAE", pwe='2')
+        link_params['channel'] = '1'
+        link_params['bssid'] = '00:11:22:33:44:01'
+        hapd0 = eht_mld_enable_ap(hapd_iface, 0, link_params)
+        link_params['channel'] = '6'
+        link_params['bssid'] = '00:11:22:33:44:02'
+        hapd1 = eht_mld_enable_ap(hapd_iface, 1, link_params)
+        wpas.set("mld_connect_bssid_pref", "00:11:22:33:44:01")
+        wpas.set("sae_pwe", "1")
+
+        connected = False
+        with fail_test(hapd0, 1, "ieee80211_ml_process_link"):
+            wpas.connect(ssid, sae_password=passphrase, ieee80211w="2",
+                         key_mgmt="SAE", scan_freq="2412", wait_connect=False)
+            ev = wpas.wait_event(['CTRL-EVENT-CONNECTED',
+                                  'CTRL-EVENT-DISCONNECTED'])
+            if ev and 'CTRL-EVENT-CONNECTED' in ev:
+                connected = True
+        if not connected:
+            raise Exception('Connection failure')
+
+        eht_verify_wifi_version(wpas)
+        eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
+                          valid_links=1, active_links=1)
+        traffic_test(wpas, hapd0)
 
 def test_eht_connect_invalid_link(dev, apdev, params):
     """EHT MLD AP where one link is incorrectly configured and rejected by mac80211"""
@@ -1351,6 +1483,43 @@ def _5ghz_chanwidth_to_bw(op):
         3: "80+80",
     }.get(op, "20")
 
+def eht_5ghz_params(channel, chanwidth, ccfs1, ccfs2=0,
+                    he_ccfs1=None, he_oper_chanwidth=None):
+    if he_ccfs1 is None:
+        he_ccfs1 = ccfs1
+    if he_oper_chanwidth is None:
+        he_oper_chanwidth = chanwidth
+
+    params = {"country_code": "US",
+              "hw_mode": "a",
+              "channel": str(channel),
+              "ieee80211n": "1",
+              "ieee80211ac": "1",
+              "ieee80211ax": "1",
+              "ieee80211be": "1",
+              "vht_oper_chwidth": str(he_oper_chanwidth),
+              "vht_oper_centr_freq_seg0_idx": str(he_ccfs1),
+              "vht_oper_centr_freq_seg1_idx": str(ccfs2),
+              "he_oper_chwidth": str(he_oper_chanwidth),
+              "he_oper_centr_freq_seg0_idx": str(he_ccfs1),
+              "he_oper_centr_freq_seg1_idx": str(ccfs2),
+              "eht_oper_centr_freq_seg0_idx": str(ccfs1),
+              "eht_oper_chwidth": str(chanwidth)}
+
+    if he_oper_chanwidth == 0:
+        if channel < he_ccfs1:
+                params["ht_capab"] = "[HT40+]"
+        elif channel > he_ccfs1:
+                params["ht_capab"] = "[HT40-]"
+    else:
+        params["ht_capab"] = "[HT40+]"
+        if he_oper_chanwidth == 2:
+            params["vht_capab"] = "[VHT160]"
+        elif he_oper_chanwidth == 3:
+            params["vht_capab"] = "[VHT160-80PLUS80]"
+
+    return params
+
 def _test_eht_5ghz(dev, apdev, channel, chanwidth, ccfs1, ccfs2=0,
                    eht_oper_puncturing_override=None,
                    he_ccfs1=None, he_oper_chanwidth=None):
@@ -1360,34 +1529,10 @@ def _test_eht_5ghz(dev, apdev, channel, chanwidth, ccfs1, ccfs2=0,
         he_oper_chanwidth = chanwidth
 
     try:
-        params = {"ssid": "eht",
-                  "country_code": "US",
-                  "hw_mode": "a",
-                  "channel": str(channel),
-                  "ieee80211n": "1",
-                  "ieee80211ac": "1",
-                  "ieee80211ax": "1",
-                  "ieee80211be": "1",
-                  "vht_oper_chwidth": str(he_oper_chanwidth),
-                  "vht_oper_centr_freq_seg0_idx": str(he_ccfs1),
-                  "vht_oper_centr_freq_seg1_idx": str(ccfs2),
-                  "he_oper_chwidth": str(he_oper_chanwidth),
-                  "he_oper_centr_freq_seg0_idx": str(he_ccfs1),
-                  "he_oper_centr_freq_seg1_idx": str(ccfs2),
-                  "eht_oper_centr_freq_seg0_idx": str(ccfs1),
-                  "eht_oper_chwidth": str(chanwidth)}
+        params = eht_5ghz_params(channel, chanwidth, ccfs1, ccfs2,
+                                 he_ccfs1, he_oper_chanwidth)
+        params['ssid'] = 'eht'
 
-        if he_oper_chanwidth == 0:
-            if channel < he_ccfs1:
-                  params["ht_capab"] = "[HT40+]"
-            elif channel > he_ccfs1:
-                  params["ht_capab"] = "[HT40-]"
-        else:
-            params["ht_capab"] = "[HT40+]"
-            if he_oper_chanwidth == 2:
-                params["vht_capab"] = "[VHT160]"
-            elif he_oper_chanwidth == 3:
-                params["vht_capab"] = "[VHT160-80PLUS80]"
 
         if eht_oper_puncturing_override:
             params['eht_oper_puncturing_override'] = eht_oper_puncturing_override
@@ -1486,7 +1631,16 @@ def _test_eht_6ghz(dev, apdev, channel, op_class, ccfs1):
         params["ieee80211be"] = "1"
         params["channel"] = str(channel)
         params["op_class"] = str(op_class)
-        params["he_oper_centr_freq_seg0_idx"] = str(ccfs1)
+
+        if op_class == 137:
+            if ccfs1 > channel:
+                he_ccfs1 = ccfs1 - 16
+            else:
+                he_ccfs1 = ccfs1 + 16
+            params["he_oper_centr_freq_seg0_idx"] = str(he_ccfs1)
+        else:
+            params["he_oper_centr_freq_seg0_idx"] = str(ccfs1)
+
         params["eht_oper_centr_freq_seg0_idx"] = str(ccfs1)
         params["country_code"] = "CA"
 
@@ -2159,8 +2313,9 @@ def get_mld_devs(hapd_iface, count, prefix, rnr=False):
 
     return [hapd_mld1_link0, hapd_mld1_link1, hapd_mld2_link0, hapd_mld2_link1]
 
-def stop_mld_devs(hapds, pid):
-    pid = pid + ".hostapd.pid"
+def stop_mld_devs(hapds, prefix):
+    pid = prefix + ".hostapd.pid"
+    log = prefix + ".hostapd-log"
 
     if "OK" not in hapds[0].request("TERMINATE"):
         raise Exception("Failed to terminate hostapd process")
@@ -2177,6 +2332,11 @@ def stop_mld_devs(hapds, pid):
             break
     if os.path.exists(pid):
         raise Exception("PID file exits after process termination")
+
+    with open(log, 'rb') as f:
+        log_data = f.read()
+        if b'WPA_TRACE:' in log_data:
+            raise Exception(f'WPA_TRACE messages found in {log}')
 
 def eht_parse_rnr(bss, rnr=False, exp_bssid=None):
         partner_rnr_pattern = re.compile(".*ap_info.*, mld ID=0, link ID=",
@@ -2367,6 +2527,74 @@ def test_eht_mlo_color_change(dev, apdev):
         hapd0.dump_monitor()
         hapd1.dump_monitor()
 
+def _test_eht_mld_invalid_link(hapd_iface, wpas_iface, test_params,
+                               key_mgmt="SAE", pwe="1", rsn_pairwise=None):
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    wpas.interface_add(wpas_iface)
+
+    passphrase = 'asdf-qwer-tzui-ghjk'
+    ssid = "mld_ap_two_links"
+
+    params = eht_mld_ap_wpa2_params(ssid, passphrase, key_mgmt=key_mgmt,
+                                    mfp="2", pwe=pwe)
+    if rsn_pairwise is not None:
+        params['rsn_pairwise'] = rsn_pairwise
+    hapd0 = eht_mld_enable_ap(hapd_iface, 0, params)
+
+    params = eht_mld_ap_wpa2_params(ssid, passphrase, key_mgmt="SAE", mfp="2",
+                                    pwe="1")
+    params['channel'] = '6'
+    hapd1 = eht_mld_enable_ap(hapd_iface, 1, params)
+
+    wpas.set("sae_pwe", "1")
+    wpas.set("sae_groups", "19 20 21")
+    wpas.connect(ssid, psk=passphrase, scan_freq="2437",
+                 key_mgmt="WPA-PSK SAE SAE-EXT-KEY",
+                 pairwise="CCMP GCMP-256", group="CCMP GCMP-256",
+                 ieee80211w="2")
+
+    filters = [
+        'wlan.fc.type_subtype == 0x0000 && wlan.ext_tag.number == 107 && wlan.eht.multi_link.type_0.sta_profile_count == 0',
+        f'wlan.fc.type_subtype == 0x0000 && wlan.ext_tag.number == 107 && wlan.ext_tag.data == 00:01:09:{wpas.own_addr()}:00:00'
+    ]
+    out = run_tshark(os.path.join(test_params['logdir'], 'hwsim0.pcapng'),
+                     filters, display=['frame.number'])
+    logger.debug("tshark output: " + str(out))
+    if not out.splitlines():
+        raise Exception('No ML association found or wrong number of STA profiles')
+
+    eht_verify_status(wpas, hapd1, 2437, 20, is_ht=True, mld=True,
+                      valid_links=2, active_links=2)
+    eht_verify_wifi_version(wpas)
+    traffic_test(wpas, hapd0)
+
+def test_eht_mld_invalid_link(dev, apdev, params):
+    """EHT AP MLD where one AP advertises only WPA-PSK and the other SAE"""
+
+    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+
+        _test_eht_mld_invalid_link(hapd_iface, wpas_iface, params,
+                                   key_mgmt="WPA-PSK", pwe=None)
+
+def test_eht_mld_invalid_link_akm(dev, apdev, params):
+    """EHT AP MLD where one AP uses a different AKM cipher"""
+
+    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+
+        _test_eht_mld_invalid_link(hapd_iface, wpas_iface, params,
+                                   key_mgmt="SAE-EXT-KEY", pwe="1")
+
+def test_eht_mld_invalid_link_pairwise(dev, apdev, params):
+    """EHT AP MLD where one AP uses a different pairwise cipher"""
+
+    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+
+        _test_eht_mld_invalid_link(hapd_iface, wpas_iface, params,
+                                   rsn_pairwise="GCMP-256")
+
 def test_eht_mld_control_socket_connectivity(dev, apdev):
     """AP MLD control socket connectivity"""
     with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
@@ -2505,3 +2733,184 @@ def test_eht_mlo_single_drv(dev, apdev, params):
         traffic_test(wpas1, hapds[2])
 
         stop_mld_devs(hapds, params['prefix'])
+
+def test_eht_mld_no_common_key_mgmt(dev, apdev):
+    """EHT MLD 2-link AP of different AKM with mixed client connectivity"""
+    with HWSimRadio(use_mlo=True, n_channels=2) as (hapd_radio, hapd_iface), \
+        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+        BIT = lambda n: 1 << n
+
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(wpas_iface)
+
+        check_sae_capab(wpas)
+
+        ssid = "mld_ap_no_cmn_key_mgmt"
+        passphrase = "1234567890"
+
+        params = eht_mld_ap_wpa2_params(ssid, key_mgmt="SAE", mfp='2',
+                                        passphrase=passphrase)
+        params['sae_pwe'] = '1'
+        params['sae_groups'] = '19'
+
+        hapd0 = eht_mld_enable_ap(hapd_iface, 0, params)
+
+        params['wpa_key_mgmt'] = 'SAE-EXT-KEY'
+        params['channel'] = '6'
+        hapd1 = eht_mld_enable_ap(hapd_iface, 1, params)
+
+        scan_freq = "2412 2437"
+        wpas.set("sae_groups", "")
+        wpas.connect(ssid, psk=passphrase, scan_freq=scan_freq,
+                     key_mgmt="SAE SAE-EXT-KEY", sae_pwe='1', ieee80211w='2')
+
+        hapd_selected = None
+        valid_links = 0
+
+        try:
+            hapd0.wait_sta()
+            hapd_selected = hapd0
+            valid_links |= BIT(0)
+        except Exception:
+            pass
+
+        try:
+            hapd1.wait_sta()
+            hapd_selected = hapd1
+            valid_links |= BIT(1)
+        except Exception:
+            pass
+
+        if valid_links == 3:
+            raise Exception("Connected to both links")
+
+        eht_verify_status(wpas, hapd_selected, None, None, is_ht=True, mld=True,
+                          valid_links=valid_links, active_links=valid_links)
+
+        eht_verify_wifi_version(wpas)
+        traffic_test(wpas, hapd_selected)
+
+def test_eht_ml_setup_reconfig_AB_A_AB(dev, apdev, params):
+        """EHT MLD with two links. ML Setup reconfig link removal and addition"""
+        with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+            HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+
+            wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+            wpas.interface_add(wpas_iface)
+            check_sae_capab(wpas)
+
+            # Associate AP and STA in two links
+            ssid = "eht_ml_reconf"
+            passphrase = 'qwertyuiop'
+
+            ap_params = eht_mld_ap_wpa2_params(ssid, passphrase,
+                                            key_mgmt="SAE", mfp="2", pwe='1')
+            hapd0 = eht_mld_enable_ap(hapd_iface, 0, ap_params)
+
+            ap_params['channel'] = '6'
+            hapd1 = eht_mld_enable_ap(hapd_iface, 1, ap_params)
+
+            wpas.set("sae_pwe", "1")
+            wpas.connect(ssid, sae_password=passphrase, scan_freq="2412 2437",
+                         key_mgmt="SAE", ieee80211w="2")
+
+            eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
+                              valid_links=3, active_links=3)
+            eht_verify_wifi_version(wpas)
+            traffic_test(wpas, hapd0)
+
+            # Prepare and send ML Setup reconfig link removal for link id=1
+            link_id = '1'
+            sta = hapd0.get_sta(wpas.own_addr())
+
+            if "OK" not in wpas.request("SETUP_LINK_RECONFIG delete={}".format(link_id)):
+                raise Exception("Failed to request link reconfig removal for link={}".format(link_id))
+
+            filters = ["wlan.fc.type_subtype == 0x000d && " +
+                       "(wlan.sa == {} && wlan.da == {})".format(hapd0.own_addr(), sta['peer_addr[0]'])]
+            out = run_tshark(os.path.join(params['logdir'], 'hwsim0.pcapng'),
+                             filters, display=['frame.number'])
+            if not out.splitlines():
+                raise Exception('No Link Reconfig response frame found for removal')
+
+            ev = hapd0.wait_event(["CTRL-EVENT-LINK-STA-REMOVED"], timeout=10)
+            if ev is None:
+                raise Exception("Link STA removal event not seen")
+
+            if "sta={} link_id={}".format(wpas.own_addr(), link_id) not in ev:
+                raise Exception("Unexpected sta/link id for ML Setup reconfig link removal")
+
+            # Prepare and send ML Setup reconfig link add for link id=1
+            sta = hapd0.get_sta(wpas.own_addr())
+
+            if "OK" not in wpas.request("SETUP_LINK_RECONFIG add={}".format(link_id)):
+                raise Exception("Failed to request link reconfig add for link={}".format(link_id))
+
+            filters = ["wlan.fc.type_subtype == 0x000d && " +
+                       "(wlan.sa == {} && (wlan.da == {}))".format(hapd0.own_addr(), sta['peer_addr[0]'])]
+            out = run_tshark(os.path.join(params['logdir'], 'hwsim0.pcapng'),
+                             filters, display=['frame.number'])
+            if len(out.splitlines()) < 2:
+                raise Exception('No Link Reconfig response frame found for addition')
+
+            ev = hapd0.wait_event(["CTRL-EVENT-LINK-STA-ADDED"], timeout=10)
+            if ev is None:
+                raise Exception("Link STA addition event not seen")
+
+            if "sta={} link_id={}".format(wpas.own_addr(), link_id) not in ev:
+                raise Exception("Unexpected sta/link id for ML Setup reconfig link addition")
+
+            sta = hapd0.get_sta(wpas.own_addr())
+            try:
+                sta['peer_addr[1]']
+            except KeyError:
+                raise Exception('Link failed to add using ML Setup reconfig')
+
+            if "OK" not in hapd0.request("REKEY_GTK"):
+                raise Exception("REKEY_GTK failed")
+
+            ev = wpas.wait_event(["MLO RSN: Group rekeying completed"],
+                                 timeout=2)
+            if ev is None:
+                raise Exception("GTK rekey timed out after link addition")
+
+def test_eht_mld_and_autogo(dev, apdev):
+    """EHT MLD connection and autonomous P2P GO on the station device"""
+    with HWSimRadio(use_mlo=True, n_channels=2) as (hapd0_radio, hapd0_iface), \
+        HWSimRadio(use_mlo=True, n_channels=2) as (wpas_radio, wpas_iface):
+
+        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+        wpas.interface_add(wpas_iface)
+
+        ssid = "ap_mld"
+        params = eht_mld_ap_wpa2_params(ssid, key_mgmt="OWE", mfp="2")
+
+        hapds = []
+        freqs = ""
+        for i in range(1, 3):
+            params['channel'] = str(i)
+            freqs += str(2407 + 5 * i) + " "
+            hapds.append(eht_mld_enable_ap(hapd0_iface, i - 1, params))
+
+        wpas.connect(ssid, scan_freq=freqs, key_mgmt="OWE", ieee80211w="2")
+        eht_verify_status(wpas, hapds[0], 2412, 20, is_ht=True, mld=True,
+                          valid_links=0x03, active_links=0x03)
+        eht_verify_wifi_version(wpas)
+        hwsim_utils.test_connectivity(wpas, hapds[0])
+
+        res = autogo(wpas)
+        if "p2p-wlan" not in res['ifname']:
+            raise Exception("Unexpected group interface name on GO")
+
+        if res['ifname'] not in utils.get_ifnames():
+            raise Exception("Could not find group interface netdev")
+
+        if res['freq'] != "2412" and res['freq'] != "2417":
+            raise Exception("Unexpected group interface frequency")
+
+        connect_cli(wpas, dev[0])
+        wpas.remove_group()
+
+        dev[0].wait_go_ending_session()
+        if res['ifname'] in utils.get_ifnames():
+            raise Exception("Group interface netdev was not removed")

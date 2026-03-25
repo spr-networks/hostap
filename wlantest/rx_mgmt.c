@@ -156,14 +156,13 @@ static void parse_basic_ml(const u8 *ie, size_t len, bool ap,
 		eml = WPA_GET_LE16(pos);
 		pos += 2;
 		wpa_printf(MSG_DEBUG,
-			   "EML Capabilities: 0x%x (EMLSR=%u EMLSR_Padding_Delay=%u EMLSR_Transition_Delay=%u EMLMR=%u EMLMR_Delay=%u Transition_Timeout=%u Reserved=%u)",
+			   "EML Capabilities: 0x%x (EMLSR=%u EMLSR_Padding_Delay=%u EMLSR_Transition_Delay=%u EMLMR=%u Transition_Timeout=%u Reserved=%u)",
 			   eml,
 			   !!(eml & EHT_ML_EML_CAPA_EMLSR_SUPP),
 			   (eml & EHT_ML_EML_CAPA_EMLSR_PADDING_DELAY_MASK) >>
 			   1,
 			   (eml & EHT_ML_EML_CAPA_EMLSR_TRANS_DELAY_MASK) >> 4,
 			   !!(eml & EHT_ML_EML_CAPA_EMLMR_SUPP),
-			   (eml & EHT_ML_EML_CAPA_EMLMR_DELAY_MASK) >> 8,
 			   (eml & EHT_ML_EML_CAPA_TRANSITION_TIMEOUT_MASK) >>
 			   11,
 			   !!(eml & BIT(15)));
@@ -225,10 +224,10 @@ static void parse_basic_ml(const u8 *ie, size_t len, bool ap,
 		const u8 *fpos;
 		u8 flen;
 
-		if (elem->id == EHT_ML_SUB_ELEM_FRAGMENT)
+		if (elem->id == MULTI_LINK_SUB_ELEM_ID_FRAGMENT)
 			continue;
 
-		if (elem->id != EHT_ML_SUB_ELEM_PER_STA_PROFILE) {
+		if (elem->id != MULTI_LINK_SUB_ELEM_ID_PER_STA_PROFILE) {
 			wpa_printf(MSG_DEBUG, "Link Info subelement id=%u",
 				   elem->id);
 			wpa_hexdump(MSG_DEBUG, "Link Info subelement data",
@@ -243,7 +242,7 @@ static void parse_basic_ml(const u8 *ie, size_t len, bool ap,
 		flen = elem->datalen;
 		fpos = elem->data + flen;
 		while (flen == 255 && li_end - fpos >= 2 &&
-		       *fpos == EHT_ML_SUB_ELEM_FRAGMENT &&
+		       *fpos == MULTI_LINK_SUB_ELEM_ID_FRAGMENT &&
 		       li_end - fpos >= 2 + fpos[1]) {
 			/* Reassemble truncated subelement */
 			fpos++;
@@ -481,14 +480,13 @@ static void parse_reconfig_ml(const u8 *ie, size_t len,
 		eml = WPA_GET_LE16(pos);
 		pos += 2;
 		wpa_printf(MSG_DEBUG,
-			   "EML Capabilities: 0x%x (EMLSR=%u EMLSR_Padding_Delay=%u EMLSR_Transition_Delay=%u EMLMR=%u EMLMR_Delay=%u Transition_Timeout=%u Reserved=%u)",
+			   "EML Capabilities: 0x%x (EMLSR=%u EMLSR_Padding_Delay=%u EMLSR_Transition_Delay=%u EMLMR=%u Transition_Timeout=%u Reserved=%u)",
 			   eml,
 			   !!(eml & EHT_ML_EML_CAPA_EMLSR_SUPP),
 			   (eml & EHT_ML_EML_CAPA_EMLSR_PADDING_DELAY_MASK) >>
 			   1,
 			   (eml & EHT_ML_EML_CAPA_EMLSR_TRANS_DELAY_MASK) >> 4,
 			   !!(eml & EHT_ML_EML_CAPA_EMLMR_SUPP),
-			   (eml & EHT_ML_EML_CAPA_EMLMR_DELAY_MASK) >> 8,
 			   (eml & EHT_ML_EML_CAPA_TRANSITION_TIMEOUT_MASK) >>
 			   11,
 			   !!(eml & BIT(15)));
@@ -543,10 +541,10 @@ static void parse_reconfig_ml(const u8 *ie, size_t len,
 		const u8 *fpos;
 		u8 flen;
 
-		if (elem->id == EHT_ML_SUB_ELEM_FRAGMENT)
+		if (elem->id == MULTI_LINK_SUB_ELEM_ID_FRAGMENT)
 			continue;
 
-		if (elem->id != EHT_ML_SUB_ELEM_PER_STA_PROFILE) {
+		if (elem->id != MULTI_LINK_SUB_ELEM_ID_PER_STA_PROFILE) {
 			wpa_printf(MSG_DEBUG, "Link Info subelement id=%u",
 				   elem->id);
 			wpa_hexdump(MSG_DEBUG, "Link Info subelement data",
@@ -561,7 +559,7 @@ static void parse_reconfig_ml(const u8 *ie, size_t len,
 		flen = elem->datalen;
 		fpos = elem->data + flen;
 		while (flen == 255 && li_end - fpos >= 2 &&
-		       *fpos == EHT_ML_SUB_ELEM_FRAGMENT &&
+		       *fpos == MULTI_LINK_SUB_ELEM_ID_FRAGMENT &&
 		       li_end - fpos >= 2 + fpos[1]) {
 			/* Reassemble truncated subelement */
 			fpos++;
@@ -989,16 +987,16 @@ static void process_fils_auth(struct wlantest *wt, struct wlantest_bss *bss,
 		sta->pairwise_cipher = data.pairwise_cipher;
 	}
 
-	if (!elems.fils_nonce) {
+	if (!elems.nonce) {
 		add_note(wt, MSG_INFO,
 			 "FILS Authentication frame missing nonce");
 		return;
 	}
 
 	if (ether_addr_equal(mgmt->sa, mgmt->bssid))
-		os_memcpy(sta->anonce, elems.fils_nonce, FILS_NONCE_LEN);
+		os_memcpy(sta->anonce, elems.nonce, NONCE_LEN);
 	else
-		os_memcpy(sta->snonce, elems.fils_nonce, FILS_NONCE_LEN);
+		os_memcpy(sta->snonce, elems.nonce, NONCE_LEN);
 }
 
 
@@ -1138,7 +1136,7 @@ static void process_sae_auth(struct wlantest *wt, struct wlantest_bss *bss,
 		return;
 
 	trans = le_to_host16(mgmt->u.auth.auth_transaction);
-	if (trans != 1)
+	if (trans != WLAN_AUTH_TR_SEQ_SAE_COMMIT)
 		return;
 
 	status = le_to_host16(mgmt->u.auth.status_code);
@@ -1190,7 +1188,8 @@ static void rx_mgmt_auth(struct wlantest *wt, const u8 *data, size_t len)
 
 	if (status == WLAN_STATUS_SUCCESS &&
 	    ((alg == WLAN_AUTH_OPEN && trans == 2) ||
-	     (alg == WLAN_AUTH_SAE && trans == 2 && from_ap))) {
+	     (alg == WLAN_AUTH_SAE && trans == WLAN_AUTH_TR_SEQ_SAE_CONFIRM &&
+	      from_ap))) {
 		if (sta->state == STATE1) {
 			add_note(wt, MSG_DEBUG, "STA " MACSTR
 				 " moved to State 2 with " MACSTR,
@@ -1284,9 +1283,9 @@ static void rx_mgmt_deauth(struct wlantest *wt, const u8 *data, size_t len,
 			sta->counters[WLANTEST_STA_COUNTER_DEAUTH_RX_AWAKE]++;
 
 		fc = le_to_host16(mgmt->frame_control);
-		if (!(fc & WLAN_FC_ISWEP) && reason == 6)
+		if (!(fc & WLAN_FC_PROTECTED) && reason == 6)
 			sta->counters[WLANTEST_STA_COUNTER_DEAUTH_RX_RC6]++;
-		else if (!(fc & WLAN_FC_ISWEP) && reason == 7)
+		else if (!(fc & WLAN_FC_PROTECTED) && reason == 7)
 			sta->counters[WLANTEST_STA_COUNTER_DEAUTH_RX_RC7]++;
 	} else
 		sta->counters[valid ? WLANTEST_STA_COUNTER_VALID_DEAUTH_TX :
@@ -1366,10 +1365,10 @@ static int try_rmsk(struct wlantest *wt, struct wlantest_bss *bss,
 	aad_len[1] = ETH_ALEN;
 	/* The STA's nonce */
 	aad[2] = sta->snonce;
-	aad_len[2] = FILS_NONCE_LEN;
+	aad_len[2] = NONCE_LEN;
 	/* The AP's nonce */
 	aad[3] = sta->anonce;
-	aad_len[3] = FILS_NONCE_LEN;
+	aad_len[3] = NONCE_LEN;
 	/*
 	 * The (Re)Association Request frame from the Capability Information
 	 * field to the FILS Session element (both inclusive).
@@ -1587,10 +1586,10 @@ static void decrypt_fils_assoc_resp(struct wlantest *wt,
 	aad_len[1] = ETH_ALEN;
 	/* The AP's nonce */
 	aad[2] = sta->anonce;
-	aad_len[2] = FILS_NONCE_LEN;
+	aad_len[2] = NONCE_LEN;
 	/* The STA's nonce */
 	aad[3] = sta->snonce;
-	aad_len[3] = FILS_NONCE_LEN;
+	aad_len[3] = NONCE_LEN;
 	/*
 	 * The (Re)Association Response frame from the Capability Information
 	 * field to the FILS Session element (both inclusive).
@@ -2857,9 +2856,9 @@ static void rx_mgmt_disassoc(struct wlantest *wt, const u8 *data, size_t len,
 				WLANTEST_STA_COUNTER_DISASSOC_RX_AWAKE]++;
 
 		fc = le_to_host16(mgmt->frame_control);
-		if (!(fc & WLAN_FC_ISWEP) && reason == 6)
+		if (!(fc & WLAN_FC_PROTECTED) && reason == 6)
 			sta->counters[WLANTEST_STA_COUNTER_DISASSOC_RX_RC6]++;
-		else if (!(fc & WLAN_FC_ISWEP) && reason == 7)
+		else if (!(fc & WLAN_FC_PROTECTED) && reason == 7)
 			sta->counters[WLANTEST_STA_COUNTER_DISASSOC_RX_RC7]++;
 	} else
 		sta->counters[valid ? WLANTEST_STA_COUNTER_VALID_DISASSOC_TX :
@@ -3950,17 +3949,22 @@ void rx_mgmt(struct wlantest *wt, const u8 *data, size_t len)
 		    stype == WLAN_FC_STYPE_PROBE_RESP ||
 		    stype == WLAN_FC_STYPE_PROBE_REQ) ?
 		   MSG_EXCESSIVE : MSG_MSGDUMP,
-		   "MGMT %s%s%s DA=" MACSTR " SA=" MACSTR " BSSID=" MACSTR,
+		   "MGMT %s%s%s DA=" MACSTR " SA=" MACSTR " BSSID=" MACSTR
+		   " #%u",
 		   mgmt_stype(stype),
 		   fc & WLAN_FC_PWRMGT ? " PwrMgt" : "",
-		   fc & WLAN_FC_ISWEP ? " Prot" : "",
+		   fc & WLAN_FC_PROTECTED ? " Prot" : "",
 		   MAC2STR(hdr->addr1), MAC2STR(hdr->addr2),
-		   MAC2STR(hdr->addr3));
+		   MAC2STR(hdr->addr3), wt->frame_num);
 
-	if ((fc & WLAN_FC_ISWEP) &&
+	if ((fc & WLAN_FC_PROTECTED) &&
 	    !(hdr->addr1[0] & 0x01) &&
 	    (stype == WLAN_FC_STYPE_DEAUTH ||
 	     stype == WLAN_FC_STYPE_DISASSOC ||
+	     stype == WLAN_FC_STYPE_ASSOC_REQ ||
+	     stype == WLAN_FC_STYPE_ASSOC_RESP ||
+	     stype == WLAN_FC_STYPE_REASSOC_REQ ||
+	     stype == WLAN_FC_STYPE_REASSOC_RESP ||
 	     stype == WLAN_FC_STYPE_ACTION ||
 	     stype == WLAN_FC_STYPE_ACTION_NO_ACK)) {
 		decrypted = mgmt_decrypt(wt, data, len, &dlen);
@@ -3972,10 +3976,14 @@ void rx_mgmt(struct wlantest *wt, const u8 *data, size_t len)
 			valid = 0;
 	}
 
-	if (!(fc & WLAN_FC_ISWEP) &&
+	if (!(fc & WLAN_FC_PROTECTED) &&
 	    !(hdr->addr1[0] & 0x01) &&
 	    (stype == WLAN_FC_STYPE_DEAUTH ||
 	     stype == WLAN_FC_STYPE_DISASSOC ||
+	     stype == WLAN_FC_STYPE_ASSOC_REQ ||
+	     stype == WLAN_FC_STYPE_ASSOC_RESP ||
+	     stype == WLAN_FC_STYPE_REASSOC_REQ ||
+	     stype == WLAN_FC_STYPE_REASSOC_RESP ||
 	     stype == WLAN_FC_STYPE_ACTION ||
 	     stype == WLAN_FC_STYPE_ACTION_NO_ACK)) {
 		if (check_mgmt_ccmp_gcmp(wt, data, len) < 0)

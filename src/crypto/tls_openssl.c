@@ -359,6 +359,7 @@ static X509_STORE * tls_crl_cert_reload(const char *ca_cert, int check_crl)
 }
 
 
+#ifndef ANDROID
 #ifdef OPENSSL_NO_ENGINE
 
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
@@ -500,6 +501,7 @@ err_cert:
 }
 
 #endif /* OPENSSL_NO_ENGINE */
+#endif /* !ANDROID */
 
 
 #ifdef CONFIG_NATIVE_WINDOWS
@@ -1165,9 +1167,9 @@ void * tls_init(const struct tls_config *conf)
 		void openssl_load_legacy_provider(void);
 
 		openssl_load_legacy_provider();
-#ifdef OPENSSL_NO_ENGINE
+#if !defined(ANDROID) && defined(OPENSSL_NO_ENGINE)
 		openssl_load_pkcs11_provider();
-#endif /* OPENSSL_NO_ENGINE */
+#endif /* !ANDROID && OPENSSL_NO_ENGINE */
 
 		tls_global = context = tls_context_new(conf);
 		if (context == NULL)
@@ -1341,7 +1343,13 @@ void tls_deinit(void *ssl_ctx)
 
 	if (data->tls_session_lifetime > 0) {
 		wpa_printf(MSG_DEBUG, "OpenSSL: Flush sessions");
+#if OPENSSL_VERSION_NUMBER >= 0x30400000L && \
+	!defined(LIBRESSL_VERSION_NUMBER) && \
+	!defined(OPENSSL_IS_BORINGSSL)
+		SSL_CTX_flush_sessions_ex(ssl, 0);
+#else /* OpenSSL version >= 3.4 */
 		SSL_CTX_flush_sessions(ssl, 0);
+#endif /* OpenSSL version >= 3.4 */
 		wpa_printf(MSG_DEBUG, "OpenSSL: Flush sessions - done");
 	}
 	while ((sess_data = dl_list_first(&context->sessions,
@@ -1360,9 +1368,9 @@ void tls_deinit(void *ssl_ctx)
 
 	tls_openssl_ref_count--;
 	if (tls_openssl_ref_count == 0) {
-#ifdef OPENSSL_NO_ENGINE
+#if !defined(ANDROID) && defined(OPENSSL_NO_ENGINE)
 		openssl_unload_pkcs11_provider();
-#endif /* OPENSSL_NO_ENGINE */
+#endif /* !ANDROID && OPENSSL_NO_ENGINE */
 #if OPENSSL_VERSION_NUMBER < 0x10100000L
 #ifndef OPENSSL_NO_ENGINE
 		ENGINE_cleanup();
@@ -1521,9 +1529,11 @@ err:
 
 	return ret;
 #else /* OPENSSL_NO_ENGINE */
+#ifndef ANDROID
 	conn->private_key = provider_load_key(key_id);
 	if (!conn->private_key)
 		return -1;
+#endif /* !ANDROID */
 
 	return 0;
 #endif /* OPENSSL_NO_ENGINE */
@@ -2690,7 +2700,27 @@ static int tls_verify_cb(int preverify_ok, X509_STORE_CTX *x509_ctx)
 	suffix_match = conn->suffix_match;
 	domain_match = conn->domain_match;
 
-	if (!preverify_ok && !conn->ca_cert_verify)
+	if (!conn->ca_cert_verify && depth == 0 &&
+	    !(conn->flags & TLS_CONN_DISABLE_TIME_CHECKS)) {
+		if (X509_cmp_current_time(X509_get_notBefore(err_cert)) > 0) {
+			wpa_printf(MSG_INFO,
+				   "OpenSSL: Server certificate is not valid at the current time");
+			err = X509_V_ERR_CERT_NOT_YET_VALID;
+			X509_STORE_CTX_set_error(x509_ctx, err);
+			preverify_ok = 0;
+		} else if (X509_cmp_current_time(X509_get_notAfter(err_cert)) <
+			   0) {
+			wpa_printf(MSG_INFO,
+				   "TLS: Server certificate has expired");
+			err = X509_V_ERR_CERT_HAS_EXPIRED;
+			X509_STORE_CTX_set_error(x509_ctx, err);
+			preverify_ok = 0;
+		}
+	}
+
+	if (!preverify_ok && !conn->ca_cert_verify &&
+	    !(err == X509_V_ERR_CERT_HAS_EXPIRED ||
+	      err == X509_V_ERR_CERT_NOT_YET_VALID))
 		preverify_ok = 1;
 	if (!preverify_ok && depth > 0 && conn->server_cert_only)
 		preverify_ok = 1;
@@ -2734,7 +2764,9 @@ static int tls_verify_cb(int preverify_ok, X509_STORE_CTX *x509_ctx)
 				err_str = "Server certificate mismatch";
 				err = X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN;
 				preverify_ok = 0;
-			} else if (!preverify_ok) {
+			} else if (!preverify_ok &&
+				   err != X509_V_ERR_CERT_HAS_EXPIRED &&
+				   err != X509_V_ERR_CERT_NOT_YET_VALID) {
 				/*
 				 * Certificate matches pinned certificate, allow
 				 * regardless of other problems.
@@ -2936,6 +2968,31 @@ static int tls_load_ca_der(struct tls_data *data, const char *ca_cert)
 #endif /* OPENSSL_NO_STDIO */
 
 
+static int tls_add_ca_cert(SSL_CTX *ssl_ctx, X509 *cert)
+{
+	unsigned long err;
+
+	if (X509_STORE_add_cert(SSL_CTX_get_cert_store(ssl_ctx), cert) == 1)
+		return 0;
+
+	err = ERR_peek_error();
+
+	if (ERR_GET_LIB(err) == ERR_LIB_X509 &&
+	    ERR_GET_REASON(err) == X509_R_CERT_ALREADY_IN_HASH_TABLE) {
+		ERR_get_error();
+		wpa_printf(MSG_DEBUG,
+			   "OpenSSL: %s - ignoring cert already in hash table error",
+			   __func__);
+		return 0;
+	}
+
+	tls_show_errors(MSG_WARNING, __func__,
+			"Failed to add ca_cert_blob to certificate store");
+
+	return -1;
+}
+
+
 static int tls_connection_ca_cert(struct tls_data *data,
 				  struct tls_connection *conn,
 				  const char *ca_cert, const u8 *ca_cert_blob,
@@ -2998,49 +3055,69 @@ static int tls_connection_ca_cert(struct tls_data *data,
 	}
 
 	if (ca_cert_blob) {
-		X509 *cert = d2i_X509(NULL,
-				      (const unsigned char **) &ca_cert_blob,
-				      ca_cert_blob_len);
-		if (cert == NULL) {
-			BIO *bio = BIO_new_mem_buf(ca_cert_blob,
-						   ca_cert_blob_len);
+		unsigned long err;
+		X509 *cert;
+		int count;
+		BIO *bio;
 
-			if (bio) {
-				cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-				BIO_free(bio);
-			}
-
-			if (!cert) {
-				tls_show_errors(MSG_WARNING, __func__,
-						"Failed to parse ca_cert_blob");
-				return -1;
-			}
-
-			while (ERR_get_error()) {
-				/* Ignore errors from DER conversion. */
-			}
-		}
-
-		if (!X509_STORE_add_cert(SSL_CTX_get_cert_store(ssl_ctx),
-					 cert)) {
-			unsigned long err = ERR_peek_error();
-			tls_show_errors(MSG_WARNING, __func__,
-					"Failed to add ca_cert_blob to "
-					"certificate store");
-			if (ERR_GET_LIB(err) == ERR_LIB_X509 &&
-			    ERR_GET_REASON(err) ==
-			    X509_R_CERT_ALREADY_IN_HASH_TABLE) {
-				wpa_printf(MSG_DEBUG, "OpenSSL: %s - ignoring "
-					   "cert already in hash table error",
-					   __func__);
-			} else {
+		cert = d2i_X509(NULL,
+				(const unsigned char **) &ca_cert_blob,
+				ca_cert_blob_len);
+		if (cert) {
+			if (tls_add_ca_cert(ssl_ctx, cert) < 0) {
 				X509_free(cert);
 				return -1;
 			}
+
+			wpa_printf(MSG_DEBUG,
+				   "OpenSSL: %s - added ca_cert_blob to certificate store",
+				   __func__);
+			X509_free(cert);
+			return 0;
 		}
-		X509_free(cert);
-		wpa_printf(MSG_DEBUG, "OpenSSL: %s - added ca_cert_blob "
-			   "to certificate store", __func__);
+
+		count = 0;
+		bio = BIO_new_mem_buf(ca_cert_blob, ca_cert_blob_len);
+		if (bio) {
+			while ((cert = PEM_read_bio_X509(bio, NULL, NULL,
+							 NULL))) {
+				if (count == 0) {
+					/* Ignore errors from DER conversion
+					 * if we detect a certificate in PEM
+					 * format. */
+					ERR_clear_error();
+				}
+				count++;
+				if (tls_add_ca_cert(ssl_ctx, cert) < 0) {
+					X509_free(cert);
+					BIO_free(bio);
+					return -1;
+				}
+				X509_free(cert);
+			}
+			BIO_free(bio);
+		}
+
+		if (count == 0) {
+			tls_show_errors(MSG_WARNING, __func__,
+					"Failed to parse ca_cert_blob");
+			return -1;
+		}
+
+		/* When the loop ends successfully, it's because of EOF */
+		err = ERR_peek_last_error();
+		if (ERR_GET_LIB(err) != ERR_LIB_PEM ||
+		    ERR_GET_REASON(err) != PEM_R_NO_START_LINE) {
+			tls_show_errors(MSG_WARNING, __func__,
+					"Failed to parse ca_cert_blob bundle");
+			return -1;
+		}
+
+		ERR_clear_error();
+
+		wpa_printf(MSG_DEBUG,
+			   "OpenSSL: %s - added %d ca_cert_blob certificates to certificate store",
+			   __func__, count);
 		return 0;
 	}
 
@@ -3957,6 +4034,7 @@ static int tls_engine_get_cert(struct tls_connection *conn,
 static int tls_connection_engine_client_cert(struct tls_connection *conn,
 					     const char *cert_id)
 {
+#ifndef ANDROID
 	X509 *cert;
 
 #ifndef OPENSSL_NO_ENGINE
@@ -3978,6 +4056,9 @@ static int tls_connection_engine_client_cert(struct tls_connection *conn,
 	wpa_printf(MSG_DEBUG, "ENGINE/provider: SSL_use_certificate --> "
 		   "OK");
 	return 0;
+#else /* ANDROID */
+	return -1;
+#endif /* ANDROID */
 }
 
 
@@ -3985,6 +4066,7 @@ static int tls_connection_engine_ca_cert(struct tls_data *data,
 					 struct tls_connection *conn,
 					 const char *ca_cert_id)
 {
+#ifndef ANDROID
 	X509 *cert;
 	SSL_CTX *ssl_ctx = data->ssl;
 	X509_STORE *store;
@@ -4030,6 +4112,9 @@ static int tls_connection_engine_ca_cert(struct tls_data *data,
 	conn->ca_cert_verify = 1;
 
 	return 0;
+#else /* ANDROID */
+	return -1;
+#endif /* ANDROID */
 }
 
 
@@ -5592,10 +5677,10 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
 		return -1;
 
 	if (engine_id && ca_cert_id) {
-#ifdef OPENSSL_NO_ENGINE
+#if !defined(ANDROID) && defined(OPENSSL_NO_ENGINE)
 		if (!openssl_can_use_provider(engine_id, ca_cert_id))
 			return TLS_SET_PARAMS_ENGINE_PRV_INIT_FAILED;
-#endif /* OPENSSL_NO_ENGINE */
+#endif /* !ANDROID && OPENSSL_NO_ENGINE */
 		if (tls_connection_engine_ca_cert(data, conn, ca_cert_id))
 			return TLS_SET_PARAMS_ENGINE_PRV_VERIFY_FAILED;
 	} else if (tls_connection_ca_cert(data, conn, params->ca_cert,
@@ -5605,10 +5690,10 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
 		return -1;
 
 	if (engine_id && cert_id) {
-#ifdef OPENSSL_NO_ENGINE
+#if !defined(ANDROID) && defined(OPENSSL_NO_ENGINE)
 		if (!openssl_can_use_provider(engine_id, cert_id))
 			return TLS_SET_PARAMS_ENGINE_PRV_INIT_FAILED;
-#endif /* OPENSSL_NO_ENGINE */
+#endif /* !ANDROID && OPENSSL_NO_ENGINE */
 		if (tls_connection_engine_client_cert(conn, cert_id))
 			return TLS_SET_PARAMS_ENGINE_PRV_VERIFY_FAILED;
 	} else if (tls_connection_client_cert(conn, params->client_cert,
@@ -5617,10 +5702,10 @@ int tls_connection_set_params(void *tls_ctx, struct tls_connection *conn,
 		return -1;
 
 	if (engine_id && key_id) {
-#ifdef OPENSSL_NO_ENGINE
+#if !defined(ANDROID) && defined(OPENSSL_NO_ENGINE)
 		if (!openssl_can_use_provider(engine_id, key_id))
 			return TLS_SET_PARAMS_ENGINE_PRV_INIT_FAILED;
-#endif /* OPENSSL_NO_ENGINE */
+#endif /* !ANDROID && OPENSSL_NO_ENGINE */
 		wpa_printf(MSG_DEBUG,
 			   "TLS: Using private key from engine/provider");
 		if (tls_connection_engine_private_key(conn))
@@ -5946,7 +6031,9 @@ int tls_global_set_params(void *tls_ctx,
  * commented out unless explicitly needed for EAP-FAST in order to be able to
  * build this file with unmodified openssl. */
 
-#if (defined(OPENSSL_IS_BORINGSSL) || OPENSSL_VERSION_NUMBER >= 0x10100000L) && !defined(LIBRESSL_VERSION_NUMBER)
+#if (defined(OPENSSL_IS_BORINGSSL) || \
+     (OPENSSL_VERSION_NUMBER >= 0x10100000L && !defined(LIBRESSL_VERSION_NUMBER)) || \
+     LIBRESSL_VERSION_NUMBER >= 0x4020000fL)
 static int tls_sess_sec_cb(SSL *s, void *secret, int *secret_len,
 			   STACK_OF(SSL_CIPHER) *peer_ciphers,
 			   const SSL_CIPHER **cipher, void *arg)

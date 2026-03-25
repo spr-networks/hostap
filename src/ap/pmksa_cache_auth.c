@@ -141,8 +141,8 @@ static void pmksa_cache_set_expiration(struct rsn_pmksa_cache *pmksa)
 }
 
 
-static void pmksa_cache_from_eapol_data(struct rsn_pmksa_cache_entry *entry,
-					struct eapol_state_machine *eapol)
+void pmksa_cache_from_eapol_data(struct rsn_pmksa_cache_entry *entry,
+				 struct eapol_state_machine *eapol)
 {
 	struct vlan_description *vlan_desc;
 
@@ -467,6 +467,17 @@ void pmksa_cache_auth_deinit(struct rsn_pmksa_cache *pmksa)
 	for (i = 0; i < PMKID_HASH_SIZE; i++)
 		pmksa->pmkid[i] = NULL;
 	os_free(pmksa);
+}
+
+
+/**
+ * pmksa_cache_auth_set_ctx - Set the context for PMKSA cache
+ * @cache: Pointer to the PMKSA cache structure
+ * @ctx: Context pointer to be stored in the cache
+ */
+void pmksa_cache_auth_set_ctx(struct rsn_pmksa_cache *cache, void *ctx)
+{
+	cache->ctx = ctx;
 }
 
 

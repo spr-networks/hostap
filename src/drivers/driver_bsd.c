@@ -987,7 +987,7 @@ bsd_sta_deauth(void *priv, const u8 *own_addr, const u8 *addr, u16 reason_code,
 
 static int
 bsd_sta_disassoc(void *priv, const u8 *own_addr, const u8 *addr,
-		 u16 reason_code)
+		 u16 reason_code, int link_id)
 {
 	return bsd_send_mlme_param(priv, IEEE80211_MLME_DISASSOC, reason_code,
 				   addr);
@@ -1684,9 +1684,22 @@ bsd_global_init(void *ctx)
 
 	global->sock = socket(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (global->sock < 0) {
-		wpa_printf(MSG_ERROR, "socket[PF_INET,SOCK_DGRAM]: %s",
-			   strerror(errno));
-		goto fail1;
+		if (errno == EAFNOSUPPORT) {
+			wpa_printf(MSG_DEBUG,
+				   "INET not supported, trying INET6...");
+			global->sock = socket(PF_INET6,
+					      SOCK_DGRAM | SOCK_CLOEXEC, 0);
+			if (global->sock < 0) {
+				wpa_printf(MSG_ERROR,
+					   "socket[PF_INET6,SOCK_DGRAM]: %s",
+					   strerror(errno));
+				goto fail1;
+			}
+		} else {
+			wpa_printf(MSG_ERROR, "socket[PF_INET,SOCK_DGRAM]: %s",
+				   strerror(errno));
+			goto fail1;
+		}
 	}
 
 	global->route = socket(PF_ROUTE,

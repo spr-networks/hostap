@@ -734,12 +734,12 @@ void p2p_check_pref_chan(struct p2p_data *p2p, int go,
 		return;
 
 	/* Obtain our preferred frequency list from driver based on P2P role. */
-	size = P2P_MAX_PREF_CHANNELS;
+	size = ARRAY_SIZE(p2p->pref_freq_list);
 	if (p2p->cfg->get_pref_freq_list(p2p->cfg->cb_ctx, go,
-					 &p2p->num_pref_freq,
+					 &size,
 					 p2p->pref_freq_list))
 		return;
-	size = p2p->num_pref_freq;
+	p2p->num_pref_freq = size;
 	if (!size)
 		return;
 	/* Filter out frequencies that are not acceptable for P2P use */
@@ -747,6 +747,10 @@ void p2p_check_pref_chan(struct p2p_data *p2p, int go,
 		p2p_is_peer_6ghz_capab(p2p, dev->info.p2p_device_addr);
 	i = 0;
 	while (i < size) {
+		bool is_dfs_freq;
+
+		is_dfs_freq = p2p->cfg->is_p2p_dfs_chan(
+			p2p->cfg->cb_ctx, p2p->pref_freq_list[i].freq, 0, 0);
 		if (p2p_freq_to_channel(p2p->pref_freq_list[i].freq,
 					&op_class, &op_channel) < 0 ||
 		    (!p2p_channels_includes(&p2p->cfg->channels,
@@ -754,7 +758,10 @@ void p2p_check_pref_chan(struct p2p_data *p2p, int go,
 		     (go || !p2p_channels_includes(&p2p->cfg->cli_channels,
 						   op_class, op_channel))) ||
 		    (is_6ghz_freq(p2p->pref_freq_list[i].freq) &&
-		     !is_6ghz_capab)) {
+		     !is_6ghz_capab) ||
+		    (is_dfs_freq &&
+		     !is_dfs_freq_allowed(p2p, go,
+					  p2p->pref_freq_list[i].freq))) {
 			p2p_dbg(p2p,
 				"Ignore local driver frequency preference %u MHz since it is not acceptable for P2P use (go=%d)",
 				p2p->pref_freq_list[i].freq, go);

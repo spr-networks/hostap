@@ -44,7 +44,7 @@ struct weighted_pcl;
 /**
  * P2P_MAX_REG_CLASSES - Maximum number of regulatory classes
  */
-#define P2P_MAX_REG_CLASSES 15
+#define P2P_MAX_REG_CLASSES 20
 
 /**
  * P2P_MAX_REG_CLASS_CHANNELS - Maximum number of channels per regulatory class
@@ -741,7 +741,6 @@ struct p2p_config {
 	 */
 	bool chan_switch_req_enable;
 
-#ifdef CONFIG_TESTING_OPTIONS
 	/**
 	 * Operating class for own operational channel in Invitation Response
 	 */
@@ -751,7 +750,6 @@ struct p2p_config {
 	 * inv_op_channel - Own operational channel in Invitation Response
 	 */
 	u8 inv_op_channel;
-#endif /* CONFIG_TESTING_OPTIONS */
 
 	/**
 	 * cb_ctx - Context to use with callback functions
@@ -1380,13 +1378,23 @@ struct p2p_config {
 	 * @dira_tag: DIRA Tag
 	 * Returns: Identity block ID on success, 0 on failure
 	 *
-	 * This function can be used to validate DIRA and configure PMK of a
-	 * paired/persistent peer from configuration. The handler function is
-	 * expected to call p2p_pasn_pmksa_set_pmk() to set the PMK/PMKID in
-	 * case a matching entry is found.
+	 * This function can be used to validate DIRA.
 	 */
 	int (*validate_dira)(void *ctx, const u8 *peer_addr,
 			     const u8 *dira_nonce, const u8 *dira_tag);
+
+	/**
+	 * set_pmksa - Configure PMK of a paired/persistent peer from
+	 *	configuration
+	 * @ctx: Callback context from cb_ctx
+	 * @peer_addr: P2P Device address of the peer
+	 * @dik_id: Identity block ID
+	 * Returns: 0 on success
+	 *
+	 * It is expected to call p2p_pasn_pmksa_set_pmk() to set the PMK/PMKID
+	 * for given dik_id.
+	 */
+	int (*set_pmksa)(void *ctx, const u8 *peer_addr, int dik_id);
 
 	/**
 	 * pasn_send_mgmt - Function handler to transmit a Management frame
@@ -1427,6 +1435,14 @@ struct p2p_config {
 	 * Returns: 0 on success, -1 on failure
 	 */
 	int (*pasn_validate_pmkid)(void *ctx, const u8 *addr, const u8 *pmkid);
+
+	/**
+	 *
+	 * is_p2p_dfs_chan - DFS channel check
+	 *
+	 * To check if a channel is a DFS channel.
+	 */
+	bool (*is_p2p_dfs_chan)(void *ctx, int freq, u8 op_class, u8 chan);
 };
 
 
@@ -2776,8 +2792,6 @@ void p2p_process_usd_elems(struct p2p_data *p2p, const u8 *ies, u16 ies_len,
 			   const u8 *peer_addr, unsigned int freq);
 int p2p_get_dik_id(struct p2p_data *p2p, const u8 *peer);
 
-void p2p_set_pairing_setup(struct p2p_data *p2p, int pairing_setup);
-void p2p_set_pairing_cache(struct p2p_data *p2p, int pairing_cache);
 void p2p_set_bootstrapmethods(struct p2p_data *p2p, int bootstrap_methods);
 void p2p_set_pasn_type(struct p2p_data *p2p, u8 pasn_type);
 void p2p_set_comeback_after(struct p2p_data *p2p, int comeback_after);
@@ -2810,5 +2824,8 @@ void p2p_pasn_store_ptk(struct p2p_data *p2p, struct wpa_ptk *ptk);
 int p2p_pasn_get_ptk(struct p2p_data *p2p, const u8 **buf, size_t *buf_len);
 void p2p_usd_service_hash(struct p2p_data *p2p, const char *service_name);
 int p2p_get_dira_info(struct p2p_data *p2p, char *buf, size_t buflen);
+
+void p2p_update_dfs_ap_info(struct p2p_data *p2p, int freq,
+			    enum chan_width ap_ch_width, bool disconnect_evt);
 
 #endif /* P2P_H */

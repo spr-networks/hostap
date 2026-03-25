@@ -112,7 +112,8 @@ void mlme_associate_indication(struct hostapd_data *hapd, struct sta_info *sta)
 	if (sta->auth_alg != WLAN_AUTH_FT &&
 	    sta->auth_alg != WLAN_AUTH_FILS_SK &&
 	    sta->auth_alg != WLAN_AUTH_FILS_SK_PFS &&
-	    sta->auth_alg != WLAN_AUTH_FILS_PK)
+	    sta->auth_alg != WLAN_AUTH_FILS_PK &&
+	    sta->auth_alg != WLAN_AUTH_EPPKE)
 		mlme_deletekeys_request(hapd, sta);
 	ap_sta_clear_disconnect_timeouts(hapd, sta);
 }
@@ -140,7 +141,8 @@ void mlme_reassociate_indication(struct hostapd_data *hapd,
 	if (sta->auth_alg != WLAN_AUTH_FT &&
 	    sta->auth_alg != WLAN_AUTH_FILS_SK &&
 	    sta->auth_alg != WLAN_AUTH_FILS_SK_PFS &&
-	    sta->auth_alg != WLAN_AUTH_FILS_PK)
+	    sta->auth_alg != WLAN_AUTH_FILS_PK &&
+	    sta->auth_alg != WLAN_AUTH_EPPKE)
 		mlme_deletekeys_request(hapd, sta);
 	ap_sta_clear_disconnect_timeouts(hapd, sta);
 }

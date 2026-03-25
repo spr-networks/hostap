@@ -269,6 +269,10 @@ struct wpa_ssid {
 	 */
 	char *sae_password_id;
 
+	struct wpabuf_array *alt_sae_password_ids;
+	unsigned int alt_sae_passwords_ids_idx;
+	bool alt_sae_passwords_ids_used;
+
 	struct sae_pt *pt;
 
 	/**
@@ -1336,6 +1340,36 @@ struct wpa_ssid {
 	 */
 	int go_dik_id;
 
+	/**
+	 * sae_password_id_change - Whether to use changing SAE password IDs
+	 */
+	bool sae_password_id_change;
+
+	/**
+	 * pmksa_privacy - Enable/disable PMKSA caching privacy
+	 * 0 = PMKSA caching privacy enabled
+	 * 1 = PMKSA caching privacy disabled
+	 *
+	 * When enabled, a unique PMKID will be generated for each subsequent
+	 * connection even if the same cached PMKSA is reused.
+	 */
+	int pmksa_privacy;
+
+	/**
+	 * drop_unicast_ip_in_l2_multicast - Drop unicast IP packets in L2
+	 *	multicast frames in all networks, not just Passpoint non-DGAF
+	 *	networks
+	 */
+	bool drop_unicast_ip_in_l2_multicast;
+
+	/**
+	 * always_use_proxy_arp - Always rely on proxy ARP even in non-Passpoint
+	 *	networks
+	 * 0 = disabled
+	 * 1 = check AP's extended capabilities
+	 * 2 = always enable
+	 */
+	u8 always_use_proxy_arp;
 };
 
 #endif /* CONFIG_SSID_H */

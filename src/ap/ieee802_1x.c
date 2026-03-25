@@ -151,7 +151,7 @@ static void ieee802_1x_ml_set_sta_authorized(struct hostapd_data *hapd,
 #ifdef CONFIG_IEEE80211BE
 	unsigned int i;
 
-	if (!hostapd_is_mld_ap(hapd))
+	if (!hostapd_is_multiple_link_mld(hapd))
 		return;
 
 	/*
@@ -180,6 +180,11 @@ static void ieee802_1x_ml_set_sta_authorized(struct hostapd_data *hapd,
 			    tmp_sta->mld_assoc_link_id !=
 			    sta->mld_assoc_link_id ||
 			    tmp_sta->aid != sta->aid)
+				continue;
+
+			if (!ether_addr_equal(
+				    tmp_sta->mld_info.common_info.mld_addr,
+				    sta->mld_info.common_info.mld_addr))
 				continue;
 
 			ieee802_1x_set_authorized(tmp_hapd, tmp_sta,

@@ -57,7 +57,8 @@ int wpas_p2p_group_add_persistent(struct wpa_supplicant *wpa_s,
 				  bool allow_6ghz, int retry_limit,
 				  const u8 *go_bssid, const u8 *dev_addr,
 				  const u8 *pmkid, const u8 *pmk,
-				  size_t pmk_len);
+				  size_t pmk_len, bool join,
+				  bool is_invitation);
 struct p2p_group * wpas_p2p_group_init(struct wpa_supplicant *wpa_s,
 				       struct wpa_ssid *ssid);
 enum wpas_p2p_prov_disc_use {
@@ -247,6 +248,7 @@ int wpas_p2p_get_pasn_ptk(struct wpa_supplicant *wpa_s, const u8 **ptk,
 int wpas_p2p_get_dira(struct wpa_supplicant *wpa_s, char *buf, size_t buf_len);
 int wpas_p2p_validate_dira(struct wpa_supplicant *wpa_s, const u8 *addr,
 			   u8 cipher, const u8 *nonce, const u8 *tag);
+void wpas_p2p_disabled_changed(struct wpa_supplicant *wpa_s);
 
 #else /* CONFIG_P2P */
 
@@ -373,7 +375,8 @@ static inline int wpas_p2p_group_remove(struct wpa_supplicant *wpa_s,
 	return 0;
 }
 
-static inline struct wpabuf * wpas_p2p_usd_elems(struct wpa_supplicant *wpa_s)
+static inline struct wpabuf * wpas_p2p_usd_elems(struct wpa_supplicant *wpa_s,
+						 const char *service_name)
 {
 	return NULL;
 }

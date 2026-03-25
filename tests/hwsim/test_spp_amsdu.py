@@ -6,7 +6,7 @@
 
 import logging
 import hostapd
-from utils import HwsimSkip, parse_ie
+from utils import HwsimSkip, parse_ie, check_sae_capab
 import hwsim_utils
 import time
 import os
@@ -31,6 +31,9 @@ def setup_ap(apdev, ssid, spp_amsdu, cipher):
                        'wpa_key_mgmt': 'WPA-PSK',
                        'rsn_pairwise': cipher,
                        'group_cipher': cipher})
+        if cipher != 'TKIP':
+            params.update({'wpa_key_mgmt': 'SAE',
+                           'ieee80211w': '2'})
 
     params['spp_amsdu'] = spp_amsdu
 
@@ -110,13 +113,20 @@ def _run(dev, apdev, logdir, spp_amsdu, cipher=''):
     if cipher != '' and cipher not in dev.get_capability('pairwise'):
         raise HwsimSkip('%s not supported' % cipher)
 
+    check_sae_capab(dev)
+
     ssid='test-spp-amsdu-%s' % cipher if cipher != '' else 'open'
     hapd, wpa_passphrase = setup_ap(apdev, ssid, spp_amsdu=spp_amsdu,
                                     cipher=cipher)
     skip_unsupported_spp_amsdu(dev, hapd)
 
-    dev.connect(ssid, key_mgmt='NONE' if cipher == '' else '',
-                psk=wpa_passphrase, pairwise=cipher, group=cipher)
+    if cipher == '':
+        dev.connect(ssid, key_mgmt='NONE')
+    elif cipher == 'TKIP':
+        dev.connect(ssid, psk=wpa_passphrase, pairwise=cipher, group=cipher)
+    else:
+        dev.connect(ssid, key_mgmt='SAE', psk=wpa_passphrase, pairwise=cipher,
+                    group=cipher, ieee80211w='1')
     hapd.wait_sta()
     time.sleep(0.1)
     hwsim_utils.test_connectivity(dev, hapd)

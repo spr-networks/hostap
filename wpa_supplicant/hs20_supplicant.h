@@ -8,7 +8,6 @@
 #ifndef HS20_SUPPLICANT_H
 #define HS20_SUPPLICANT_H
 
-void hs20_configure_frame_filters(struct wpa_supplicant *wpa_s);
 void wpas_hs20_add_indication(struct wpabuf *buf, int pps_mo_id,
 			      int ap_release);
 void wpas_hs20_add_roam_cons_sel(struct wpabuf *buf,

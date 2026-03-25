@@ -521,9 +521,9 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 			list[0] = 60;
 			list[1] = 120;
 			list[2] = 240;
-			list[3] = -1;
+			list[3] = 0;
 		}
-		conf->basic_rates = list;
+		bss->basic_rates = list;
 
 		list = os_malloc(9 * sizeof(int));
 		if (list) {
@@ -535,9 +535,9 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 			list[5] = 360;
 			list[6] = 480;
 			list[7] = 540;
-			list[8] = -1;
+			list[8] = 0;
 		}
-		conf->supported_rates = list;
+		bss->supported_rates = list;
 	}
 
 	bss->isolate = !wpa_s->conf->p2p_intra_bss;
@@ -585,6 +585,7 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 		bss->wpa_pairwise = WPA_CIPHER_CCMP;
 		bss->rsn_override_pairwise = WPA_CIPHER_CCMP;
 		bss->rsn_override_mfp = 2;
+		bss->rsn_override_omit_rsnxe = 1;
 	}
 #endif /* CONFIG_P2P */
 
@@ -1039,8 +1040,10 @@ int wpa_supplicant_create_ap(struct wpa_supplicant *wpa_s,
 
 #ifdef CONFIG_P2P
 	if (ssid->mode == WPAS_MODE_P2P_GO ||
-	    ssid->mode == WPAS_MODE_P2P_GROUP_FORMATION)
+	    ssid->mode == WPAS_MODE_P2P_GROUP_FORMATION) {
 		params.p2p = 1;
+		params.p2p_mode = wpa_s->p2p_mode;
+	}
 #endif /* CONFIG_P2P */
 
 	if (wpa_s->p2pdev->set_ap_uapsd)
@@ -1075,6 +1078,7 @@ int wpa_supplicant_create_ap(struct wpa_supplicant *wpa_s,
 	hapd_iface->extended_capa_mask = wpa_s->extended_capa_mask;
 	hapd_iface->extended_capa_len = wpa_s->extended_capa_len;
 	hapd_iface->drv_max_acl_mac_addrs = wpa_s->drv_max_acl_mac_addrs;
+	hapd_iface->assisted_dfs = wpa_s->assisted_dfs;
 
 	wpa_s->ap_iface->conf = conf = hostapd_config_defaults();
 	if (conf == NULL) {
@@ -1152,6 +1156,14 @@ int wpa_supplicant_create_ap(struct wpa_supplicant *wpa_s,
 		hapd_iface->bss[i]->ext_eapol_frame_io =
 			wpa_s->ext_eapol_frame_io;
 #endif /* CONFIG_TESTING_OPTIONS */
+
+#ifdef CONFIG_NAN_USD
+		/*
+		 * Copy NAN DE pointer from wpa_supplicant to hostapd for AP
+		 * to continue processing NAN USD frames.
+		 */
+		hapd_iface->bss[i]->nan_de = wpa_s->nan_de;
+#endif /* CONFIG_NAN_USD */
 
 #ifdef CONFIG_WNM_AP
 		if (ssid->mode == WPAS_MODE_AP)
@@ -1841,6 +1853,8 @@ int ap_switch_channel(struct wpa_supplicant *wpa_s,
 	if (!iface || !iface->bss[0])
 		return -1;
 
+	hostapd_chan_switch_config(iface->bss[0], &settings->freq_params);
+
 	return hostapd_switch_channel(iface->bss[0], settings);
 #else /* NEED_AP_MLME */
 	return -1;
@@ -1852,8 +1866,22 @@ int ap_switch_channel(struct wpa_supplicant *wpa_s,
 int ap_ctrl_iface_chanswitch(struct wpa_supplicant *wpa_s, const char *pos)
 {
 	struct csa_settings settings;
-	int ret = hostapd_parse_csa_settings(pos, &settings);
+	struct hostapd_iface *iface = NULL;
+	int ret;
 
+#ifdef CONFIG_AP
+	if (wpa_s->ap_iface)
+		iface = wpa_s->ap_iface;
+#endif /* CONFIG_AP */
+#ifdef CONFIG_MESH
+	if (!iface && wpa_s->ifmsh)
+		iface = wpa_s->ifmsh;
+#endif /* CONFIG_MESH */
+
+	if (!iface)
+		return -1;
+
+	ret = hostapd_parse_csa_settings(iface, pos, &settings);
 	if (ret)
 		return ret;
 

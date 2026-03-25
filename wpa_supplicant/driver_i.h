@@ -532,6 +532,16 @@ static inline int wpa_drv_mlo_signal_poll(struct wpa_supplicant *wpa_s,
 	return -1;
 }
 
+static inline int
+wpa_drv_setup_link_reconfig(struct wpa_supplicant *wpa_s,
+			    struct wpa_mlo_reconfig_info *info)
+{
+	if (wpa_s->driver->setup_link_reconfig)
+		return wpa_s->driver->setup_link_reconfig(wpa_s->drv_priv,
+							  info);
+	return -1;
+}
+
 static inline int wpa_drv_channel_info(struct wpa_supplicant *wpa_s,
 				       struct wpa_channel_info *ci)
 {
@@ -1031,6 +1041,16 @@ static inline int wpa_drv_get_ext_capa(struct wpa_supplicant *wpa_s,
 					    &wpa_s->extended_capa_len);
 }
 
+static inline int wpa_drv_get_mld_capa(struct wpa_supplicant *wpa_s,
+				       enum wpa_driver_if_type type,
+				       u16 *mld_eml_capa, u16 *mld_mld_capa)
+{
+	if (!wpa_s->driver->get_mld_capab)
+		return -1;
+	return wpa_s->driver->get_mld_capab(wpa_s->drv_priv, type,
+					    mld_eml_capa, mld_mld_capa);
+}
+
 static inline int wpa_drv_p2p_lo_start(struct wpa_supplicant *wpa_s,
 				       unsigned int channel,
 				       unsigned int period,
@@ -1256,5 +1276,34 @@ wpas_drv_nan_cancel_subscribe(struct wpa_supplicant *wpa_s, int subscribe_id)
 	return wpa_s->driver->nan_cancel_subscribe(wpa_s->drv_priv,
 						   subscribe_id);
 }
+
+
+#ifdef CONFIG_NAN
+
+static inline int wpa_drv_nan_start(struct wpa_supplicant *wpa_s,
+				    const struct nan_cluster_config *conf)
+{
+	if (!wpa_s->driver->nan_start)
+		return -1;
+	return wpa_s->driver->nan_start(wpa_s->drv_priv, conf);
+}
+
+static inline void wpa_drv_nan_stop(struct wpa_supplicant *wpa_s)
+{
+	if (!wpa_s->driver->nan_stop)
+		return;
+	wpa_s->driver->nan_stop(wpa_s->drv_priv);
+}
+
+static inline int
+wpa_drv_nan_update_config(struct wpa_supplicant *wpa_s,
+			  const struct nan_cluster_config *conf)
+{
+	if (!wpa_s->driver->nan_change_config)
+		return -1;
+	return wpa_s->driver->nan_change_config(wpa_s->drv_priv, conf);
+}
+
+#endif /* CONFIG_NAN */
 
 #endif /* DRIVER_I_H */

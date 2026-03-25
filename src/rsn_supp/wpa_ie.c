@@ -301,7 +301,7 @@ int wpa_gen_wpa_ie(struct wpa_sm *sm, u8 *wpa_ie, size_t wpa_ie_len)
 int wpa_gen_rsnxe(struct wpa_sm *sm, u8 *rsnxe, size_t rsnxe_len)
 {
 	u8 *pos = rsnxe;
-	u32 capab = 0, tmp;
+	u64 capab = 0, tmp;
 	size_t flen;
 
 	if (wpa_key_mgmt_sae(sm->key_mgmt) &&
@@ -320,10 +320,23 @@ int wpa_gen_rsnxe(struct wpa_sm *sm, u8 *rsnxe, size_t rsnxe_len)
 		capab |= BIT(WLAN_RSNX_CAPAB_SECURE_RTT);
 	if (sm->prot_range_neg)
 		capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR);
+	if (sm->prot_range_neg_x20)
+		capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR_X20);
 	if (sm->ssid_protection)
 		capab |= BIT(WLAN_RSNX_CAPAB_SSID_PROTECTION);
 	if (sm->spp_amsdu)
 		capab |= BIT(WLAN_RSNX_CAPAB_SPP_A_MSDU);
+	if (sm->sae_pw_id_change)
+		capab |= BIT_ULL(WLAN_RSNX_CAPAB_SAE_PW_ID_CHANGE);
+#ifdef CONFIG_ENC_ASSOC
+	if (sm->assoc_encryption)
+		capab |= BIT(WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION) |
+			BIT(WLAN_RSNX_CAPAB_KEK_IN_PASN);
+#endif /* CONFIG_ENC_ASSOC */
+#ifdef CONFIG_PMKSA_PRIVACY
+	if (sm->pmksa_privacy)
+		capab |= BIT(WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
+#endif /* CONFIG_PMKSA_PRIVACY */
 
 	if (!capab)
 		return 0; /* no supported extended RSN capabilities */

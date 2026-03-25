@@ -30,6 +30,7 @@
 #include "utils/common.h"
 #include "utils/eloop.h"
 #include "utils/module_tests.h"
+#include "utils/trace.h"
 #include "common/version.h"
 #include "common/ieee802_11_defs.h"
 #include "common/ctrl_iface_common.h"
@@ -38,8 +39,8 @@
 #endif /* CONFIG_DPP */
 #include "common/wpa_ctrl.h"
 #include "common/ptksa_cache.h"
-#include "common/hw_features_common.h"
 #include "common/nan_de.h"
+#include "common/proc_coord.h"
 #include "crypto/tls.h"
 #include "drivers/driver.h"
 #include "eapol_auth/eapol_auth_sm.h"
@@ -2455,223 +2456,6 @@ static int hostapd_ctrl_register_frame(struct hostapd_data *hapd,
 #endif /* CONFIG_TESTING_OPTIONS */
 
 
-#ifdef NEED_AP_MLME
-
-static bool
-hostapd_ctrl_is_freq_in_cmode(struct hostapd_hw_modes *mode,
-			      struct hostapd_multi_hw_info *current_hw_info,
-			      int freq)
-{
-	struct hostapd_channel_data *chan;
-	int i;
-
-	for (i = 0; i < mode->num_channels; i++) {
-		chan = &mode->channels[i];
-
-		if (chan->flag & HOSTAPD_CHAN_DISABLED)
-			continue;
-
-		if (!chan_in_current_hw_info(current_hw_info, chan))
-			continue;
-
-		if (chan->freq == freq)
-			return true;
-	}
-	return false;
-}
-
-
-static int hostapd_ctrl_check_freq_params(struct hostapd_freq_params *params,
-					  u16 punct_bitmap)
-{
-	u32 start_freq;
-
-	if (is_6ghz_freq(params->freq)) {
-		const int bw_idx[] = { 20, 40, 80, 160, 320 };
-		int idx, bw;
-
-		/* The 6 GHz band requires HE to be enabled. */
-		params->he_enabled = 1;
-
-		if (params->center_freq1) {
-			if (params->freq == 5935)
-				idx = (params->center_freq1 - 5925) / 5;
-			else
-				idx = (params->center_freq1 - 5950) / 5;
-
-			bw = center_idx_to_bw_6ghz(idx);
-			if (bw < 0 || bw > (int) ARRAY_SIZE(bw_idx) ||
-			    bw_idx[bw] != params->bandwidth)
-				return -1;
-		}
-	} else { /* Non-6 GHz channel */
-		/* An EHT STA is also an HE STA as defined in
-		 * IEEE P802.11be/D5.0, 4.3.16a. */
-		if (params->he_enabled || params->eht_enabled) {
-			params->he_enabled = 1;
-			/* An HE STA is also a VHT STA if operating in the 5 GHz
-			 * band and an HE STA is also an HT STA in the 2.4 GHz
-			 * band as defined in IEEE Std 802.11ax-2021, 4.3.15a.
-			 * A VHT STA is an HT STA as defined in IEEE
-			 * Std 802.11, 4.3.15. */
-			if (IS_5GHZ(params->freq))
-				params->vht_enabled = 1;
-
-			params->ht_enabled = 1;
-		}
-	}
-
-	switch (params->bandwidth) {
-	case 0:
-		/* bandwidth not specified: use 20 MHz by default */
-		/* fall-through */
-	case 20:
-		if (params->center_freq1 &&
-		    params->center_freq1 != params->freq)
-			return -1;
-
-		if (params->center_freq2 || params->sec_channel_offset)
-			return -1;
-
-		if (punct_bitmap)
-			return -1;
-		break;
-	case 40:
-		if (params->center_freq2 || !params->sec_channel_offset)
-			return -1;
-
-		if (punct_bitmap)
-			return -1;
-
-		if (!params->center_freq1)
-			break;
-		switch (params->sec_channel_offset) {
-		case 1:
-			if (params->freq + 10 != params->center_freq1)
-				return -1;
-			break;
-		case -1:
-			if (params->freq - 10 != params->center_freq1)
-				return -1;
-			break;
-		default:
-			return -1;
-		}
-		break;
-	case 80:
-		if (!params->center_freq1 || !params->sec_channel_offset)
-			return 1;
-
-		switch (params->sec_channel_offset) {
-		case 1:
-			if (params->freq - 10 != params->center_freq1 &&
-			    params->freq + 30 != params->center_freq1)
-				return 1;
-			break;
-		case -1:
-			if (params->freq + 10 != params->center_freq1 &&
-			    params->freq - 30 != params->center_freq1)
-				return -1;
-			break;
-		default:
-			return -1;
-		}
-
-		if (params->center_freq2 && punct_bitmap)
-			return -1;
-
-		/* Adjacent and overlapped are not allowed for 80+80 */
-		if (params->center_freq2 &&
-		    params->center_freq1 - params->center_freq2 <= 80 &&
-		    params->center_freq2 - params->center_freq1 <= 80)
-			return 1;
-		break;
-	case 160:
-		if (!params->center_freq1 || params->center_freq2 ||
-		    !params->sec_channel_offset)
-			return -1;
-
-		switch (params->sec_channel_offset) {
-		case 1:
-			if (params->freq + 70 != params->center_freq1 &&
-			    params->freq + 30 != params->center_freq1 &&
-			    params->freq - 10 != params->center_freq1 &&
-			    params->freq - 50 != params->center_freq1)
-				return -1;
-			break;
-		case -1:
-			if (params->freq + 50 != params->center_freq1 &&
-			    params->freq + 10 != params->center_freq1 &&
-			    params->freq - 30 != params->center_freq1 &&
-			    params->freq - 70 != params->center_freq1)
-				return -1;
-			break;
-		default:
-			return -1;
-		}
-		break;
-	case 320:
-		if (!params->center_freq1 || params->center_freq2 ||
-		    !params->sec_channel_offset)
-			return -1;
-
-		switch (params->sec_channel_offset) {
-		case 1:
-			if (params->freq + 150 != params->center_freq1 &&
-			    params->freq + 110 != params->center_freq1 &&
-			    params->freq + 70 != params->center_freq1 &&
-			    params->freq + 30 != params->center_freq1 &&
-			    params->freq - 10 != params->center_freq1 &&
-			    params->freq - 50 != params->center_freq1 &&
-			    params->freq - 90 != params->center_freq1 &&
-			    params->freq - 130 != params->center_freq1)
-				return -1;
-			break;
-		case -1:
-			if (params->freq + 130 != params->center_freq1 &&
-			    params->freq + 90 != params->center_freq1 &&
-			    params->freq + 50 != params->center_freq1 &&
-			    params->freq + 10 != params->center_freq1 &&
-			    params->freq - 30 != params->center_freq1 &&
-			    params->freq - 70 != params->center_freq1 &&
-			    params->freq - 110 != params->center_freq1 &&
-			    params->freq - 150 != params->center_freq1)
-				return -1;
-			break;
-		}
-		break;
-	default:
-		return -1;
-	}
-
-	if (!punct_bitmap)
-		return 0;
-
-	if (!params->eht_enabled) {
-		wpa_printf(MSG_ERROR,
-			   "Preamble puncturing supported only in EHT");
-		return -1;
-	}
-
-	if (params->freq >= 2412 && params->freq <= 2484) {
-		wpa_printf(MSG_ERROR,
-			   "Preamble puncturing is not supported in 2.4 GHz");
-		return -1;
-	}
-
-	start_freq = params->center_freq1 - (params->bandwidth / 2);
-	if (!is_punct_bitmap_valid(params->bandwidth,
-				   (params->freq - start_freq) / 20,
-				   punct_bitmap)) {
-		wpa_printf(MSG_ERROR, "Invalid preamble puncturing bitmap");
-		return -1;
-	}
-
-	return 0;
-}
-#endif /* NEED_AP_MLME */
-
-
 static int hostapd_ctrl_iface_chan_switch(struct hostapd_iface *iface,
 					  char *pos)
 {
@@ -2685,32 +2469,28 @@ static int hostapd_ctrl_iface_chan_switch(struct hostapd_iface *iface,
 	unsigned int num_err = 0;
 	int err = 0;
 
-	ret = hostapd_parse_csa_settings(pos, &settings);
+	ret = hostapd_parse_csa_settings(iface, pos, &settings);
 	if (ret)
 		return ret;
 
 	settings.link_id = -1;
 #ifdef CONFIG_IEEE80211BE
+	/* Reject if EHT is disabled in channel switch settings but the
+	 * interface has a BSS affiliated with an AP MLD where EHT is mandatory
+	 * to be enabled. */
+	if (!settings.freq_params.eht_enabled) {
+		for (i = 0; i < iface->num_bss; i++) {
+			if (iface->bss[i]->conf->mld_ap) {
+				wpa_printf(MSG_INFO,
+					   "Do not allow EHT to be disabled when the interface has an ML BSS");
+				return -1;
+			}
+		}
+	}
+
 	if (iface->num_bss && iface->bss[0]->conf->mld_ap)
 		settings.link_id = iface->bss[0]->mld_link_id;
 #endif /* CONFIG_IEEE80211BE */
-
-	if (iface->num_hw_features > 1 &&
-	    !hostapd_ctrl_is_freq_in_cmode(iface->current_mode,
-					   iface->current_hw_info,
-					   settings.freq_params.freq)) {
-		wpa_printf(MSG_INFO,
-			   "chanswitch: Invalid frequency settings provided for multi band phy");
-		return -1;
-	}
-
-	ret = hostapd_ctrl_check_freq_params(&settings.freq_params,
-					     settings.freq_params.punct_bitmap);
-	if (ret) {
-		wpa_printf(MSG_INFO,
-			   "chanswitch: invalid frequency settings provided");
-		return ret;
-	}
 
 	switch (settings.freq_params.bandwidth) {
 	case 40:
@@ -2803,7 +2583,6 @@ static int hostapd_ctrl_iface_color_change(struct hostapd_iface *iface,
 {
 #ifdef NEED_AP_MLME
 	struct cca_settings settings;
-	struct hostapd_data *hapd = iface->bss[0];
 	int ret, color;
 	unsigned int i;
 	char *end;
@@ -2849,7 +2628,7 @@ static int hostapd_ctrl_iface_color_change(struct hostapd_iface *iface,
 		return 0;
 	}
 
-	if (hapd->cca_in_progress) {
+	if (hostapd_is_cca_in_progress(iface)) {
 		wpa_printf(MSG_ERROR,
 			   "color_change: CCA is already in progress");
 		return -1;
@@ -2872,6 +2651,8 @@ static int hostapd_ctrl_iface_color_change(struct hostapd_iface *iface,
 			hostapd_cleanup_cca_params(bss);
 			continue;
 		}
+		eloop_cancel_timeout(hostapd_switch_color_timeout_handler,
+				     bss, NULL);
 
 		wpa_printf(MSG_DEBUG, "Setting user selected color: %d", color);
 		ret = hostapd_drv_switch_color(bss, &settings);
@@ -3037,6 +2818,57 @@ static char hostapd_ctrl_iface_notify_cw_change(struct hostapd_data *hapd,
 
 	return 0;
 }
+
+
+#ifdef CONFIG_TESTING_OPTIONS
+static int hostapd_ctrl_iface_set_bw(struct hostapd_iface *iface, char *pos)
+{
+#ifdef NEED_AP_MLME
+	struct hostapd_freq_params freq_params;
+	int ret;
+	enum oper_chan_width chanwidth;
+	u8 chan, oper_class;
+
+	if (!(iface->drv_flags2 & WPA_DRIVER_FLAGS2_AP_CHANWIDTH_CHANGE))
+		return -1;
+
+	ret = hostapd_parse_freq_params(pos, &freq_params, iface->freq);
+	if (ret)
+		return ret;
+
+	chanwidth = hostapd_chan_width_from_freq_params(&freq_params);
+
+	if (ieee80211_freq_to_channel_ext(
+		    freq_params.freq,
+		    freq_params.sec_channel_offset,
+		    chanwidth, &oper_class,
+		    &chan) == NUM_HOSTAPD_MODES) {
+		wpa_printf(MSG_DEBUG,
+			   "invalid channel: (freq=%d, sec_channel_offset=%d, vht_enabled=%d, he_enabled=%d)",
+			   freq_params.freq,
+			   freq_params.sec_channel_offset,
+			   freq_params.vht_enabled,
+			   freq_params.he_enabled);
+		return -1;
+	}
+
+	freq_params.channel = chan;
+
+	/* FIXME: What if the newly extended channel overlaps radar ranges? */
+
+	ret = hostapd_change_config_freq(iface->bss[0], iface->conf,
+					 &freq_params, NULL);
+	if (ret)
+		return ret;
+
+	ieee802_11_set_beacons(iface);
+	return 0;
+
+#else /* NEED_AP_MLME */
+	return -1;
+#endif /* NEED_AP_MLME */
+}
+#endif /* CONFIG_TESTING_OPTIONS */
 
 
 static int hostapd_ctrl_iface_mib(struct hostapd_data *hapd, char *reply,
@@ -4063,6 +3895,88 @@ fail:
 #endif /* CONFIG_NAN_USD */
 
 
+#ifdef CONFIG_SAE
+static int hostapd_ctrl_iface_sae_password_bind(struct hostapd_data *hapd,
+						const char *cmd)
+{
+	u8 addr[ETH_ALEN];
+	const char *password;
+
+	if (hwaddr_aton(cmd, addr))
+		return -1;
+	password = os_strchr(cmd, ' ');
+	if (!password)
+		return -1;
+	password++;
+
+	return sae_password_bind(hapd, addr, password);
+}
+#endif /* CONFIG_SAE */
+
+
+#ifdef CONFIG_TESTING_OPTIONS
+#ifdef CONFIG_PROCESS_COORDINATION
+
+static bool hapd_ctrl_proc_coord_cb(void *ctx, int src,
+				    enum proc_coord_message_types msg_type,
+				    enum proc_coord_commands cmd,
+				    u32 seq, const struct wpabuf *msg)
+{
+	struct hostapd_data *hapd = ctx;
+
+	if (cmd != PROC_COORD_CMD_TEST)
+		return false;
+
+	wpa_msg(hapd->msg_ctx, MSG_INFO,
+		"PROC-COORD-TEST RX src=%u msg_type=%d seq=%u msg_len=%zu",
+		src, msg_type, seq, wpabuf_len(msg));
+
+	if (msg_type == PROC_COORD_MSG_REQUEST)
+		proc_coord_send_response(hapd->iface->interfaces->pc,
+					 src, cmd, seq, msg);
+	return false;
+}
+
+
+static void hapd_ctrl_proc_coord_test_cb(void *ctx, int pid,
+					 const struct wpabuf *msg)
+{
+	struct hostapd_data *hapd = ctx;
+
+	wpa_msg(hapd->msg_ctx, MSG_INFO,
+		"PROC-COORD-TEST RX-RESP src=%u msg_len=%d",
+		pid, msg ? (int) wpabuf_len(msg) : -1);
+
+}
+
+
+static int hostapd_ctrl_iface_proc_coord_test(struct hostapd_data *hapd,
+					      const char *cmd)
+{
+	int res, dst;
+	struct wpabuf *msg;
+
+	if (!hapd->iface->interfaces->pc)
+		return -1;
+
+	dst = atoi(cmd);
+
+	msg = wpabuf_alloc(1);
+	if (!msg)
+		return -1;
+	wpabuf_put_u8(msg, 123);
+
+	res = proc_coord_send_request(hapd->iface->interfaces->pc,
+				      dst, PROC_COORD_CMD_TEST, msg, 1000,
+				      hapd_ctrl_proc_coord_test_cb, hapd);
+	wpabuf_free(msg);
+	return res < 0 ? -1 : 0;
+}
+
+#endif /* CONFIG_PROCESS_COORDINATION */
+#endif /* CONFIG_TESTING_OPTIONS */
+
+
 static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 					      char *buf, char *reply,
 					      int reply_size,
@@ -4084,6 +3998,7 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 		wpa_debug_stop_log();
 	} else if (os_strncmp(buf, "NOTE ", 5) == 0) {
 		wpa_printf(MSG_INFO, "NOTE: %s", buf + 5);
+		wpa_trace_set_context(buf + 5);
 	} else if (os_strcmp(buf, "STATUS") == 0) {
 		reply_len = hostapd_ctrl_iface_status(hapd, reply,
 						      reply_size);
@@ -4338,6 +4253,10 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 						 reply_size);
 	} else if (os_strncmp(buf, "REGISTER_FRAME ", 15) == 0) {
 		if (hostapd_ctrl_register_frame(hapd, buf + 16) < 0)
+			reply_len = -1;
+	} else if (os_strncmp(buf, "SET_BW ", 7) == 0) {
+		/* note: preserve the space for hostapd_parse_freq_params() */
+		if (hostapd_ctrl_iface_set_bw(hapd->iface, buf + 6))
 			reply_len = -1;
 #endif /* CONFIG_TESTING_OPTIONS */
 	} else if (os_strncmp(buf, "CHAN_SWITCH ", 12) == 0) {
@@ -4666,6 +4585,18 @@ static int hostapd_ctrl_iface_receive_process(struct hostapd_data *hapd,
 			reply_len = -1;
 #endif /* CONFIG_TESTING_OPTIONS */
 #endif /* CONFIG_IEEE80211BE */
+#ifdef CONFIG_SAE
+	} else if (os_strncmp(buf, "SAE_PASSWORD_BIND ", 18) == 0) {
+		if (hostapd_ctrl_iface_sae_password_bind(hapd, buf + 18))
+			reply_len = -1;
+#endif /* CONFIG_SAE */
+#ifdef CONFIG_TESTING_OPTIONS
+#ifdef CONFIG_PROCESS_COORDINATION
+	} else if (os_strncmp(buf, "PROC_COORD_TEST ", 16) == 0) {
+		if (hostapd_ctrl_iface_proc_coord_test(hapd, buf + 16))
+			reply_len = -1;
+#endif /* CONFIG_PROCESS_COORDINATION */
+#endif /* CONFIG_TESTING_OPTIONS */
 	} else {
 		os_memcpy(reply, "UNKNOWN COMMAND\n", 16);
 		reply_len = 16;
@@ -5378,6 +5309,14 @@ fail:
 	hapd->msg_ctx = hapd;
 	wpa_msg_register_cb(hostapd_ctrl_iface_msg_cb);
 
+#ifdef CONFIG_TESTING_OPTIONS
+#ifdef CONFIG_PROCESS_COORDINATION
+	if (hapd->iface->interfaces->pc)
+		proc_coord_register_handler(hapd->iface->interfaces->pc,
+					    hapd_ctrl_proc_coord_cb, hapd);
+#endif /* CONFIG_PROCESS_COORDINATION */
+#endif /* CONFIG_TESTING_OPTIONS */
+
 	return 0;
 
 fail:
@@ -5433,6 +5372,14 @@ void hostapd_ctrl_iface_deinit(struct hostapd_data *hapd)
 #ifdef CONFIG_TESTING_OPTIONS
 	l2_packet_deinit(hapd->l2_test);
 	hapd->l2_test = NULL;
+#ifdef CONFIG_PROCESS_COORDINATION
+	if (hapd->iface->interfaces->pc) {
+		proc_coord_unregister_handler(hapd->iface->interfaces->pc,
+					      hapd_ctrl_proc_coord_cb, hapd);
+		proc_coord_cancel_wait(hapd->iface->interfaces->pc,
+				       hapd_ctrl_proc_coord_test_cb, hapd);
+	}
+#endif /* CONFIG_PROCESS_COORDINATION */
 #endif /* CONFIG_TESTING_OPTIONS */
 }
 
@@ -6249,7 +6196,7 @@ static void hostapd_ctrl_iface_send_internal(int sock, struct dl_list *ctrl_dst,
 				       &dst->addr, dst->addrlen);
 			msg.msg_name = &dst->addr;
 			msg.msg_namelen = dst->addrlen;
-			if (sendmsg(sock, &msg, 0) < 0) {
+			if (sendmsg(sock, &msg, MSG_DONTWAIT) < 0) {
 				int _errno = errno;
 				wpa_printf(MSG_INFO, "CTRL_IFACE monitor[%d]: "
 					   "%d - %s",

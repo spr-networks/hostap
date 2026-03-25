@@ -765,19 +765,6 @@ wpa_ft_get_session_timeout(struct wpa_authenticator *wpa_auth,
 }
 
 
-static int wpa_ft_add_tspec(struct wpa_authenticator *wpa_auth,
-			    const u8 *sta_addr,
-			    u8 *tspec_ie, size_t tspec_ielen)
-{
-	if (wpa_auth->cb->add_tspec == NULL) {
-		wpa_printf(MSG_DEBUG, "FT: add_tspec is not initialized");
-		return -1;
-	}
-	return wpa_auth->cb->add_tspec(wpa_auth->cb_ctx, sta_addr, tspec_ie,
-				       tspec_ielen);
-}
-
-
 #ifdef CONFIG_OCV
 static int wpa_channel_info(struct wpa_authenticator *wpa_auth,
 			       struct wpa_channel_info *ci)
@@ -2212,7 +2199,8 @@ static inline int wpa_auth_get_seqnum(struct wpa_authenticator *wpa_auth,
 }
 
 
-static u8 * wpa_ft_gtk_subelem(struct wpa_state_machine *sm, size_t *len)
+static u8 * wpa_ft_gtk_subelem(struct wpa_state_machine *sm, size_t *len,
+			       bool reassoc, int vlan_id)
 {
 	u8 *subelem;
 	struct wpa_auth_config *conf = &sm->wpa_auth->conf;
@@ -2223,6 +2211,11 @@ static u8 * wpa_ft_gtk_subelem(struct wpa_state_machine *sm, size_t *len)
 	u8 keybuf[WPA_GTK_MAX_LEN];
 	const u8 *kek;
 	size_t kek_len;
+
+#ifdef CONFIG_IEEE80211BE
+	if (reassoc && vlan_id)
+		gsm = wpa_select_vlan_wpa_group(gsm, vlan_id);
+#endif /* CONFIG_IEEE80211BE */
 
 	if (wpa_key_mgmt_fils(sm->wpa_key_mgmt)) {
 		kek = sm->PTK.kek2;
@@ -2486,24 +2479,6 @@ static u8 * wpa_ft_process_rdie(struct wpa_state_machine *sm,
 	}
 #endif /* NEED_AP_MLME */
 
-	if (parse.wmm_tspec && !sm->wpa_auth->conf.ap_mlme) {
-		int res;
-
-		res = wpa_ft_add_tspec(sm->wpa_auth, sm->addr, pos,
-				       sizeof(struct wmm_tspec_element));
-		if (res >= 0) {
-			if (res)
-				rdie->status_code = host_to_le16(res);
-			else {
-				/* TSPEC accepted; include updated TSPEC in
-				 * response */
-				rdie->descr_count = 1;
-				pos += sizeof(struct wmm_tspec_element);
-			}
-			return pos;
-		}
-	}
-
 	wpa_printf(MSG_DEBUG, "FT: No supported resource requested");
 	rdie->status_code = host_to_le16(WLAN_STATUS_UNSPECIFIED_FAILURE);
 	return pos;
@@ -2545,7 +2520,7 @@ static u8 * wpa_ft_process_ric(struct wpa_state_machine *sm, u8 *pos, u8 *end,
 u8 * wpa_sm_write_assoc_resp_ies(struct wpa_state_machine *sm, u8 *pos,
 				 size_t max_len, int auth_alg,
 				 const u8 *req_ies, size_t req_ies_len,
-				 int omit_rsnxe)
+				 int omit_rsnxe, bool reassoc, int vlan_id)
 {
 	u8 *end, *mdie, *ftie, *rsnie = NULL, *r0kh_id, *subelem = NULL;
 	u8 *fte_mic, *elem_count;
@@ -2635,7 +2610,8 @@ u8 * wpa_sm_write_assoc_resp_ies(struct wpa_state_machine *sm, u8 *pos,
 
 	/* Fast BSS Transition Information */
 	if (auth_alg == WLAN_AUTH_FT) {
-		subelem = wpa_ft_gtk_subelem(sm, &subelem_len);
+		subelem = wpa_ft_gtk_subelem(sm, &subelem_len, reassoc,
+					     vlan_id);
 		if (!subelem) {
 			wpa_printf(MSG_DEBUG,
 				   "FT: Failed to add GTK subelement");

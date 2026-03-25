@@ -491,6 +491,63 @@ def test_pasn_sae(dev, apdev):
         dev[0].set("sae_pwe", "0")
 
 @remote_compatible
+def test_pasn_sae_ext_key(dev, apdev):
+    """PASN authentication with SAE-EXT-KEY AP with PMK derivation + PMKSA caching"""
+    run_pasn_sae_ext_key(dev, apdev, None)
+
+@remote_compatible
+def test_pasn_sae_ext_key_19(dev, apdev):
+    """PASN Authentication with SAE-EXT-KEY AKM (group 19)"""
+    run_pasn_sae_ext_key(dev, apdev, 19)
+
+@remote_compatible
+def test_pasn_sae_ext_key_20(dev, apdev):
+    """PASN Authentication with SAE-EXT-KEY AKM (group 20)"""
+    run_pasn_sae_ext_key(dev, apdev, 20)
+
+@remote_compatible
+def test_pasn_sae_ext_key_21(dev, apdev):
+    """PASN Authentication with SAE-EXT-KEY AKM (group 21)"""
+    run_pasn_sae_ext_key(dev, apdev, 21)
+
+def run_pasn_sae_ext_key(dev, apdev, group):
+    check_pasn_capab(dev[0])
+    check_sae_capab(dev[0])
+
+    params = hostapd.wpa2_params(ssid="test-pasn-sae",
+                                 passphrase="12345678")
+    params['wpa_key_mgmt'] = 'SAE SAE-EXT-KEY PASN'
+    params['sae_pwe'] = "2"
+    if group:
+        params['pasn_groups'] = "19 20 21"
+        params['sae_groups'] = "19 20 21"
+    else:
+        group = "19"
+    hapd = start_pasn_ap(apdev[0], params)
+
+    try:
+        dev[0].set("sae_pwe", "2")
+        dev[0].connect("test-pasn-sae", psk="12345678", key_mgmt="SAE-EXT-KEY",
+                       scan_freq="2412", only_add_network=True)
+
+        # first test with a valid PSK
+        check_pasn_akmp_cipher(dev[0], hapd, "SAE-EXT-KEY", "CCMP", group=group,
+                               nid="0")
+
+        # And now with PMKSA caching
+        check_pasn_akmp_cipher(dev[0], hapd, "SAE-EXT-KEY", "CCMP", group=group)
+
+        # And now with a wrong passphrase
+        if "FAIL" in dev[0].request("PMKSA_FLUSH"):
+            raise Exception("PMKSA_FLUSH failed")
+
+        dev[0].set_network_quoted(0, "psk", "12345678787")
+        check_pasn_akmp_cipher(dev[0], hapd, "SAE-EXT-KEY", "CCMP", group=group,
+                               status=1, nid="0")
+    finally:
+        dev[0].set("sae_pwe", "0")
+
+@remote_compatible
 def test_pasn_sae_while_connected_same_channel(dev, apdev):
     """PASN SAE authentication while connected same channel"""
     check_pasn_capab(dev[0])
@@ -930,15 +987,30 @@ def test_pasn_kdk_derivation(dev, apdev):
 
 def test_pasn_sae_kdk_secure_ltf(dev, apdev):
     """Station authentication with SAE AP with KDK derivation during connection based on Secure LTF support"""
+    run_pasn_sae_kdk_secure_ltf(dev, apdev, True, True)
+
+def test_pasn_sae_kdk_secure_ltf_ap(dev, apdev):
+    """Station authentication with SAE AP with Secure LTF support only on AP"""
+    run_pasn_sae_kdk_secure_ltf(dev, apdev, True, False)
+
+def test_pasn_sae_kdk_secure_ltf_sta(dev, apdev):
+    """Station authentication with SAE AP with Secure LTF support only on STA"""
+    run_pasn_sae_kdk_secure_ltf(dev, apdev, False, True)
+
+def run_pasn_sae_kdk_secure_ltf(dev, apdev, ap_secure_ltf, sta_secure_ltf):
     params = hostapd.wpa2_params(ssid="test-sae",
                                  passphrase="12345678")
     params['wpa_key_mgmt'] = 'SAE'
     params['sae_pwe'] = "2"
-    params['driver_params'] = "secure_ltf=1"
+    if ap_secure_ltf:
+        params['driver_params'] = "secure_ltf=1"
     hapd = start_pasn_ap(apdev[0], params)
 
     wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
-    wpas.interface_add("wlan5", drv_params="secure_ltf=1")
+    if sta_secure_ltf:
+        wpas.interface_add("wlan5", drv_params="secure_ltf=1")
+    else:
+        wpas.interface_add("wlan5")
     check_pasn_capab(wpas)
     check_sae_capab(wpas)
 
@@ -948,7 +1020,8 @@ def test_pasn_sae_kdk_secure_ltf(dev, apdev):
         wpas.connect("test-sae", psk="12345678", key_mgmt="SAE",
                      scan_freq="2412")
 
-        check_pasn_ptk(wpas, hapd, "CCMP", clear_keys=False, require_kdk=True)
+        check_pasn_ptk(wpas, hapd, "CCMP", clear_keys=False,
+                       require_kdk=ap_secure_ltf and sta_secure_ltf)
     finally:
         wpas.set("sae_pwe", "0")
 
@@ -1048,7 +1121,7 @@ def test_pasn_sae_driver(dev, apdev):
 
     try:
         dev[0].set("sae_pwe", "2")
-        cmd = f"PASN_DRIVER auth {bssid} 02:11:22:33:44:55 {bssid2}"
+        cmd = f"PASN_DRIVER auth bssid={bssid} bssid=02:11:22:33:44:55 bssid={bssid2}"
         if "OK" not in dev[0].request(cmd):
             raise Exception("PASN_DRIVER failed")
 
@@ -1068,6 +1141,10 @@ def test_pasn_sae_driver(dev, apdev):
         time.sleep(1)
         dev[0].dump_monitor()
 
+        cmd2 = f"PASN_DRIVER del bssid={bssid} bssid={bssid2}"
+        if "OK" not in dev[0].request(cmd2):
+            raise Exception("PASN_DRIVER failed")
+
         if "OK" not in dev[0].request(cmd):
             raise Exception("PASN_DRIVER failed")
 
@@ -1082,5 +1159,155 @@ def test_pasn_sae_driver(dev, apdev):
             raise Exception("No PASN-AUTH-STATUS event (2b)")
         if f"{bssid2} akmp=PASN, status=1" not in ev:
             raise Exception("Unexpected event 2b contents: " + ev)
+    finally:
+        dev[0].set("sae_pwe", "0")
+
+def test_pasn_sae_driver_params(dev, apdev):
+    """PASN authentication using driver event as trigger"""
+    check_pasn_capab(dev[0])
+    check_sae_capab(dev[0])
+
+    params = hostapd.wpa2_params(ssid="test-pasn-sae",
+                                 passphrase="12345678")
+    params['ieee80211w'] = "2"
+    params['wpa_key_mgmt'] = 'SAE SAE-EXT-KEY PASN'
+    params['sae_pwe'] = "2"
+    hapd = start_pasn_ap(apdev[0], params)
+    bssid = hapd.own_addr()
+
+    params = hostapd.wpa2_params(ssid="test-pasn-sae-2",
+                                 passphrase="12345678")
+    params['wpa_key_mgmt'] = 'SAE PASN'
+    params['sae_pwe'] = "2"
+    hapd2 = start_pasn_ap(apdev[1], params)
+    bssid2 = hapd2.own_addr()
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+    dev[0].scan_for_bss(bssid2, freq=2412)
+
+
+    try:
+        dev[0].set("sae_pwe", "2")
+        cmd = f"PASN_DRIVER auth bssid={bssid} akmp=SAE cipher=CCMP password=12345678"
+
+        cmd += " " + f"bssid={bssid2} akmp=SAE cipher=CCMP password=12345678"
+
+        if "OK" not in dev[0].request(cmd):
+            raise Exception("PASN_DRIVER failed")
+
+        ev = dev[0].wait_event(["PASN-AUTH-STATUS"], timeout=10)
+        if ev is None:
+            raise Exception("No PASN-AUTH-STATUS event (1)")
+        if f"{bssid} akmp=SAE, status=0" not in ev:
+            raise Exception("Unexpected event 1 contents: " + ev)
+
+        ev = dev[0].wait_event(["PASN-AUTH-STATUS"], timeout=10)
+        if ev is None:
+            raise Exception("No PASN-AUTH-STATUS event (2)")
+        if f"{bssid2} akmp=SAE, status=0" not in ev:
+            raise Exception("Unexpected event 2 contents: " + ev)
+
+        hapd2.disable()
+        time.sleep(1)
+        dev[0].dump_monitor()
+
+        cmd2 = f"PASN_DRIVER del bssid={bssid} bssid={bssid2}"
+        if "OK" not in dev[0].request(cmd2):
+            raise Exception("PASN_DRIVER failed")
+
+        if "OK" not in dev[0].request(cmd):
+            raise Exception("PASN_DRIVER failed")
+
+        ev = dev[0].wait_event(["PASN-AUTH-STATUS"], timeout=10)
+        if ev is None:
+            raise Exception("No PASN-AUTH-STATUS event (1b)")
+        if f"{bssid} akmp=SAE, status=0" not in ev:
+            raise Exception("Unexpected event 1b contents: " + ev)
+
+        ev = dev[0].wait_event(["PASN-AUTH-STATUS"], timeout=10)
+        if ev is None:
+            raise Exception("No PASN-AUTH-STATUS event (2b)")
+        if f"{bssid2} akmp=SAE, status=1" not in ev:
+            raise Exception("Unexpected event 2b contents: " + ev)
+
+    finally:
+        dev[0].set("sae_pwe", "0")
+
+@remote_compatible
+def test_pasn_driver_comeback(dev, apdev, params):
+    """PASN authentication with comeback flow"""
+    check_pasn_capab(dev[0])
+
+    params = pasn_ap_params("PASN", "CCMP", "19")
+    params['sae_anti_clogging_threshold'] = '0'
+    hapd = hostapd.add_ap(apdev[0], params)
+    bssid = hapd.own_addr()
+
+    dev[0].scan(type="ONLY", freq=2412)
+    cmd = "PASN_DRIVER auth bssid=%s akmp=PASN cipher=CCMP group=19" % bssid
+
+    resp = dev[0].request(cmd)
+    if "OK" not in resp:
+        raise Exception("Failed to start PASN authentication")
+
+    ev = dev[0].wait_event(["PASN-AUTH-STATUS"], 3)
+    if not ev:
+        raise Exception("PASN: PASN-AUTH-STATUS not seen")
+
+    if bssid + " akmp=PASN, status=30 comeback_after=" not in ev:
+        raise Exception("PASN: unexpected status")
+
+    comeback = re.split("comeback=", ev)[1]
+
+    cmd = "PASN_DRIVER auth bssid=%s akmp=PASN cipher=CCMP group=19 comeback=%s" % \
+            (bssid, comeback)
+
+    resp = dev[0].request(cmd)
+    if "OK" not in resp:
+        raise Exception("Failed to start PASN authentication")
+
+    ev = dev[0].wait_event(["PASN-AUTH-STATUS"], 3)
+    if not ev:
+        raise Exception("PASN: PASN-AUTH-STATUS not seen")
+
+    if bssid + " akmp=PASN, status=0" not in ev:
+        raise Exception("PASN: unexpected status with comeback token")
+
+    check_pasn_ptk(dev[0], hapd, "CCMP")
+
+def test_pasn_sae_driver_comeback_0(dev, apdev):
+    """PASN authentication using driver event as trigger"""
+    check_pasn_capab(dev[0])
+    check_sae_capab(dev[0])
+
+    params = hostapd.wpa2_params(ssid="test-pasn-sae",
+                                 passphrase="12345678")
+    params['wpa_key_mgmt'] = 'SAE SAE-EXT-KEY PASN'
+    params['sae_pwe'] = "2"
+    params['anti_clogging_threshold'] = '0'
+    params['pasn_comeback_after'] = '0'
+
+    hapd = start_pasn_ap(apdev[0], params)
+    bssid = hapd.own_addr()
+
+
+    dev[0].scan_for_bss(bssid, freq=2412)
+
+
+    try:
+        dev[0].set("sae_groups", "19")
+        dev[0].set("sae_pwe", "2")
+
+        cmd = f"PASN_DRIVER auth bssid={bssid} akmp=SAE cipher=CCMP password=12345678"
+
+        if "OK" not in dev[0].request(cmd):
+            raise Exception("PASN_DRIVER failed")
+
+        ev = dev[0].wait_event(["PASN-AUTH-STATUS"], timeout=10)
+        if ev is None:
+            raise Exception("No PASN-AUTH-STATUS event (1)")
+        if f"{bssid} akmp=SAE, status=0" not in ev:
+            raise Exception("Unexpected event 1 contents: " + ev)
+
     finally:
         dev[0].set("sae_pwe", "0")

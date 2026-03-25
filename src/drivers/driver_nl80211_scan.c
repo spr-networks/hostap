@@ -270,6 +270,12 @@ nl80211_scan_common(struct i802_bss *bss, u8 cmd,
 	if (!drv->hostapd && is_ap_interface(drv->nlmode)) {
 		wpa_printf(MSG_DEBUG, "nl80211: Add NL80211_SCAN_FLAG_AP");
 		scan_flags |= NL80211_SCAN_FLAG_AP;
+	} else if (drv->support_ap_scan && is_ap_interface(drv->nlmode) &&
+		   !nl80211_get_link(bss, params->link_id)->beacon_set) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Add NL80211_SCAN_FLAG_AP for scan for link %d that is not beaconing",
+			   params->link_id);
+		scan_flags |= NL80211_SCAN_FLAG_AP;
 	}
 
 	if (params->only_new_results) {
@@ -420,45 +426,20 @@ int wpa_driver_nl80211_scan(struct i802_bss *bss,
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "nl80211: Scan trigger failed: ret=%d "
 			   "(%s)", ret, strerror(-ret));
-		if (drv->hostapd && is_ap_interface(drv->nlmode)) {
-#ifdef CONFIG_IEEE80211BE
-			/* For multi link BSS, retry scan if any other links
-			 * are busy scanning. */
-			if (ret == -EBUSY &&
-			    nl80211_link_valid(bss->valid_links,
-					       params->link_id)) {
-				struct i802_bss *link_bss;
-				u8 link_id;
-
-				wpa_printf(MSG_DEBUG,
-					   "nl80211: Scan trigger on multi link BSS failed (requested link=%d on interface %s)",
-					   params->link_id, bss->ifname);
-
-				for (link_bss = drv->first_bss; link_bss;
-				     link_bss = link_bss->next) {
-					if (link_bss->scan_link)
-						break;
-				}
-
-				if (!link_bss) {
-					wpa_printf(MSG_DEBUG,
-						   "nl80211: BSS information already running scan not available");
-					goto fail;
-				}
-
-				link_id = nl80211_get_link_id_from_link(
-					link_bss, link_bss->scan_link);
-				wpa_printf(MSG_DEBUG,
-					   "nl80211: Scan already running on interface %s link %d",
-					   link_bss->ifname, link_id);
-				goto fail;
-			}
-#endif /* CONFIG_IEEE80211BE */
-
+		if (ret == -EOPNOTSUPP &&
+		    drv->hostapd && is_ap_interface(drv->nlmode)) {
 			/*
-			 * mac80211 does not allow scan requests in AP mode, so
-			 * try to do this in station mode.
+			 * mac80211 may not allow scan requests in AP mode, so
+			 * try to do this in station mode. Do so only if there
+			 * are not active links in the AP MLD.
 			 */
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: AP scan failed on %s. Links=0x%x",
+				   bss->ifname, bss->valid_links);
+
+			if (bss->valid_links)
+				goto fail;
+
 			drv->ap_scan_as_station = drv->nlmode;
 			if (wpa_driver_nl80211_set_mode(
 				    bss, NL80211_IFTYPE_STATION) ||

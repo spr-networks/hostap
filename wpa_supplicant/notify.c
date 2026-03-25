@@ -108,7 +108,7 @@ void wpas_notify_state_changed(struct wpa_supplicant *wpa_s,
 
 	if (new_state == WPA_COMPLETED) {
 		wpas_p2p_notif_connected(wpa_s);
-		if (ssid)
+		if (ssid && !wpa_s->sta_roaming_disabled)
 			wpa_drv_roaming(wpa_s, !ssid->bssid_set,
 					ssid->bssid_set ? ssid->bssid : NULL);
 	} else if (old_state >= WPA_ASSOCIATED && new_state < WPA_ASSOCIATED) {
@@ -943,6 +943,12 @@ void wpas_notify_psk_mismatch(struct wpa_supplicant *wpa_s)
 }
 
 
+void wpas_notify_sae_password_mismatch(struct wpa_supplicant *wpa_s)
+{
+	wpas_dbus_signal_sae_password_mismatch(wpa_s);
+}
+
+
 void wpas_notify_network_bssid_set_changed(struct wpa_supplicant *wpa_s,
 					   struct wpa_ssid *ssid)
 {
@@ -1091,7 +1097,7 @@ void wpas_notify_hs20_t_c_acceptance(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_HS20 */
 
 
-#ifdef CONFIG_NAN_USD
+#if defined(CONFIG_NAN) || defined(CONFIG_NAN_USD)
 
 void wpas_notify_nan_discovery_result(struct wpa_supplicant *wpa_s,
 				      enum nan_service_protocol_type
@@ -1207,4 +1213,32 @@ void wpas_notify_nan_subscribe_terminated(struct wpa_supplicant *wpa_s,
 						  nan_reason_txt(reason));
 }
 
-#endif /* CONFIG_NAN_USD */
+#endif /* CONFIG_NAN || CONFIG_NAN_USD */
+
+
+#ifdef CONFIG_PR
+
+void wpas_notify_pr_pasn_result(struct wpa_supplicant *wpa_s, u8 role,
+				u8 protocol_type, u8 op_class, u8 op_channel,
+				const char *country)
+{
+	wpa_msg_global(wpa_s, MSG_INFO, PR_PASN_RESULT
+		       "SUCCESS role=%u protocol=%u opclass=%u channel=%u cc=%c%c",
+		       role, protocol_type, op_class, op_channel,
+		       country[0], country[1]);
+}
+
+
+void wpas_notify_pr_ranging_params(struct wpa_supplicant *wpa_s,
+				   const u8 *dev_addr, const u8 *peer_addr,
+				   u8 ranging_role, u8 protocol_type, int freq,
+				   int channel, int bw, int format_bw)
+{
+	wpa_msg_global(wpa_s, MSG_INFO, PR_RANGING_PARAMS
+		       "dev_addr=" MACSTR " peer_addr=" MACSTR
+		       " role=%u protocol=%u freq=%d channel=%d bw=%d format_bw=%d",
+		       MAC2STR(dev_addr), MAC2STR(peer_addr), ranging_role,
+		       protocol_type, freq, channel, bw, format_bw);
+}
+
+#endif /* CONFIG_PR */

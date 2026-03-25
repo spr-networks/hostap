@@ -695,6 +695,25 @@ struct p2p_data {
 
 	bool usd_service;
 	u8 p2p_service_hash[P2PS_HASH_LEN];
+
+	/**
+	 * dfs_ap_connected - Whether STA is connected to a DFS AP
+	 */
+	bool dfs_ap_connected;
+
+	/**
+	 * sta_connected_freq - STA connection frequency
+	 *
+	 * Valid only when dfs_ap_connected is true.
+	 */
+	int sta_connected_freq;
+
+	/**
+	 * sta_connected_chan_width - STA connection channel width
+	 *
+	 * Valid only when dfs_ap_connected is true.
+	 */
+	enum chan_width sta_connected_chan_width;
 };
 
 /**
@@ -1088,6 +1107,10 @@ void p2p_pasn_initialize(struct p2p_data *p2p, struct p2p_device *dev,
 			 const u8 *addr, int freq, bool verify,
 			 bool derive_kek);
 void p2p_buf_add_usd_service_hash(struct wpabuf *buf, struct p2p_data *p2p);
+void p2p_dfs_channel_filter(struct p2p_data *p2p,
+			    const struct p2p_channels *p2p_chan,
+			    struct p2p_channels *res, bool go);
+bool is_dfs_freq_allowed(struct p2p_data *p2p, bool go, int freq);
 
 void p2p_dbg(struct p2p_data *p2p, const char *fmt, ...)
 PRINTF_FORMAT(2, 3);

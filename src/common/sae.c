@@ -115,6 +115,7 @@ void sae_clear_temp_data(struct sae_data *sae)
 	wpabuf_free(tmp->peer_rejected_groups);
 	os_free(tmp->pw_id);
 	os_free(tmp->parsed_pw_id);
+	os_free(tmp->dec_pw_id);
 	bin_clear_free(tmp, sizeof(*tmp));
 	sae->tmp = NULL;
 }
@@ -831,7 +832,8 @@ fail:
 
 static int sae_pwd_seed(size_t hash_len, const u8 *ssid, size_t ssid_len,
 			const u8 *password, size_t password_len,
-			const char *identifier, u8 *pwd_seed)
+			const u8 *identifier, size_t identifier_len,
+			u8 *pwd_seed)
 {
 	const u8 *addr[2];
 	size_t len[2];
@@ -845,10 +847,10 @@ static int sae_pwd_seed(size_t hash_len, const u8 *ssid, size_t ssid_len,
 	wpa_hexdump_ascii_key(MSG_DEBUG, "SAE: password",
 			      password, password_len);
 	if (identifier) {
-		wpa_printf(MSG_DEBUG, "SAE: password identifier: %s",
-			   identifier);
+		wpa_hexdump_ascii(MSG_DEBUG, "SAE: password identifier",
+				  identifier, identifier_len);
 		addr[num_elem] = (const u8 *) identifier;
-		len[num_elem] = os_strlen(identifier);
+		len[num_elem] = identifier_len;
 		num_elem++;
 	}
 	if (hkdf_extract(hash_len, ssid, ssid_len, num_elem, addr, len,
@@ -873,7 +875,7 @@ static struct crypto_ec_point *
 sae_derive_pt_ecc(struct crypto_ec *ec, int group,
 		  const u8 *ssid, size_t ssid_len,
 		  const u8 *password, size_t password_len,
-		  const char *identifier)
+		  const u8 *identifier, size_t identifier_len)
 {
 	u8 pwd_seed[64];
 	u8 pwd_value[SAE_MAX_ECC_PRIME_LEN * 2];
@@ -892,7 +894,7 @@ sae_derive_pt_ecc(struct crypto_ec *ec, int group,
 	pwd_value_len = prime_len + (prime_len + 1) / 2;
 
 	if (sae_pwd_seed(hash_len, ssid, ssid_len, password, password_len,
-			 identifier, pwd_seed) < 0)
+			 identifier, identifier_len, pwd_seed) < 0)
 		goto fail;
 
 	/* pwd-value = HKDF-Expand(pwd-seed, "SAE Hash to Element u1 P1", len)
@@ -973,7 +975,7 @@ static struct crypto_bignum *
 sae_derive_pt_ffc(const struct dh_group *dh, int group,
 		  const u8 *ssid, size_t ssid_len,
 		  const u8 *password, size_t password_len,
-		  const char *identifier)
+		  const u8 *identifier, size_t identifier_len)
 {
 	size_t hash_len, prime_len, pwd_value_len;
 	struct crypto_bignum *prime, *order;
@@ -997,7 +999,7 @@ sae_derive_pt_ffc(const struct dh_group *dh, int group,
 		goto fail;
 
 	if (sae_pwd_seed(hash_len, ssid, ssid_len, password, password_len,
-			 identifier, pwd_seed) < 0)
+			 identifier, identifier_len, pwd_seed) < 0)
 		goto fail;
 
 	/* pwd-value = HKDF-Expand(pwd-seed, "SAE Hash to Element", len) */
@@ -1050,7 +1052,7 @@ fail:
 static struct sae_pt *
 sae_derive_pt_group(int group, const u8 *ssid, size_t ssid_len,
 		    const u8 *password, size_t password_len,
-		    const char *identifier)
+		    const u8 *identifier, size_t identifier_len)
 {
 	struct sae_pt *pt;
 
@@ -1063,6 +1065,12 @@ sae_derive_pt_group(int group, const u8 *ssid, size_t ssid_len,
 	if (!pt)
 		return NULL;
 
+	if (identifier) {
+		pt->password_id = wpabuf_alloc_copy(identifier, identifier_len);
+		if (!pt->password_id)
+			goto fail;
+	}
+
 #ifdef CONFIG_SAE_PK
 	os_memcpy(pt->ssid, ssid, ssid_len);
 	pt->ssid_len = ssid_len;
@@ -1072,7 +1080,7 @@ sae_derive_pt_group(int group, const u8 *ssid, size_t ssid_len,
 	if (pt->ec) {
 		pt->ecc_pt = sae_derive_pt_ecc(pt->ec, group, ssid, ssid_len,
 					       password, password_len,
-					       identifier);
+					       identifier, identifier_len);
 		if (!pt->ecc_pt) {
 			wpa_printf(MSG_DEBUG, "SAE: Failed to derive PT");
 			goto fail;
@@ -1088,7 +1096,8 @@ sae_derive_pt_group(int group, const u8 *ssid, size_t ssid_len,
 	}
 
 	pt->ffc_pt = sae_derive_pt_ffc(pt->dh, group, ssid, ssid_len,
-				       password, password_len, identifier);
+				       password, password_len, identifier,
+				       identifier_len);
 	if (!pt->ffc_pt) {
 		wpa_printf(MSG_DEBUG, "SAE: Failed to derive PT");
 		goto fail;
@@ -1104,7 +1113,7 @@ fail:
 struct sae_pt * sae_derive_pt(const int *groups,
 			      const u8 *ssid, size_t ssid_len,
 			      const u8 *password, size_t password_len,
-			      const char *identifier)
+			      const u8 *identifier, size_t identifier_len)
 {
 	struct sae_pt *pt = NULL, *last = NULL, *tmp;
 	const int default_groups[] = { 19, 0 };
@@ -1114,7 +1123,8 @@ struct sae_pt * sae_derive_pt(const int *groups,
 		groups = default_groups;
 	for (i = 0; groups[i] > 0; i++) {
 		tmp = sae_derive_pt_group(groups[i], ssid, ssid_len, password,
-					  password_len, identifier);
+					  password_len, identifier,
+					  identifier_len);
 		if (!tmp)
 			continue;
 
@@ -1277,6 +1287,7 @@ void sae_deinit_pt(struct sae_pt *pt)
 		crypto_ec_point_deinit(pt->ecc_pt, 1);
 		crypto_bignum_deinit(pt->ffc_pt, 1);
 		crypto_ec_deinit(pt->ec);
+		wpabuf_free(pt->password_id);
 		prev = pt;
 		pt = pt->next;
 		os_free(prev);
@@ -1670,17 +1681,23 @@ fail:
 int sae_process_commit(struct sae_data *sae)
 {
 	u8 k[SAE_MAX_PRIME_LEN];
+	int ret = 0;
+
 	if (sae->tmp == NULL ||
 	    (sae->tmp->ec && sae_derive_k_ecc(sae, k) < 0) ||
 	    (sae->tmp->dh && sae_derive_k_ffc(sae, k) < 0) ||
 	    sae_derive_keys(sae, k) < 0)
-		return -1;
-	return 0;
+		ret = -1;
+
+	forced_memzero(k, SAE_MAX_PRIME_LEN);
+
+	return ret;
 }
 
 
 int sae_write_commit(struct sae_data *sae, struct wpabuf *buf,
-		     const struct wpabuf *token, const char *identifier)
+		     const struct wpabuf *token, const u8 *identifier,
+		     size_t identifier_len)
 {
 	u8 *pos;
 
@@ -1722,11 +1739,11 @@ int sae_write_commit(struct sae_data *sae, struct wpabuf *buf,
 	if (identifier) {
 		/* Password Identifier element */
 		wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
-		wpabuf_put_u8(buf, 1 + os_strlen(identifier));
+		wpabuf_put_u8(buf, 1 + identifier_len);
 		wpabuf_put_u8(buf, WLAN_EID_EXT_PASSWORD_IDENTIFIER);
-		wpabuf_put_str(buf, identifier);
-		wpa_printf(MSG_DEBUG, "SAE: own Password Identifier: %s",
-			   identifier);
+		wpabuf_put_data(buf, identifier, identifier_len);
+		wpa_hexdump_ascii(MSG_DEBUG, "SAE: own Password Identifier",
+				  identifier, identifier_len);
 	}
 
 	if (sae->h2e && sae->tmp->own_rejected_groups) {
@@ -2067,6 +2084,7 @@ static int sae_parse_password_identifier(struct sae_data *sae, bool h2e,
 		}
 		os_free(sae->tmp->parsed_pw_id);
 		sae->tmp->parsed_pw_id = NULL;
+		sae->tmp->parsed_pw_id_len = 0;
 		return WLAN_STATUS_SUCCESS; /* No Password Identifier */
 	}
 
@@ -2091,7 +2109,7 @@ static int sae_parse_password_identifier(struct sae_data *sae, bool h2e,
 	}
 
 	if (sae->tmp->pw_id &&
-	    (len != os_strlen(sae->tmp->pw_id) ||
+	    (len != sae->tmp->pw_id_len ||
 	     os_memcmp(sae->tmp->pw_id, epos, len) != 0)) {
 		wpa_printf(MSG_DEBUG,
 			   "SAE: The included Password Identifier does not match the expected one (%s)",
@@ -2101,9 +2119,12 @@ static int sae_parse_password_identifier(struct sae_data *sae, bool h2e,
 
 	os_free(sae->tmp->parsed_pw_id);
 	sae->tmp->parsed_pw_id = os_malloc(len + 1);
-	if (!sae->tmp->parsed_pw_id)
+	if (!sae->tmp->parsed_pw_id) {
+		sae->tmp->parsed_pw_id_len = 0;
 		return WLAN_STATUS_UNSPECIFIED_FAILURE;
+	}
 	os_memcpy(sae->tmp->parsed_pw_id, epos, len);
+	sae->tmp->parsed_pw_id_len = len;
 	sae->tmp->parsed_pw_id[len] = '\0';
 	wpa_hexdump_ascii(MSG_DEBUG, "SAE: Received Password Identifier",
 			  sae->tmp->parsed_pw_id, len);
@@ -2233,11 +2254,9 @@ u16 sae_parse_commit(struct sae_data *sae, const u8 *data, size_t len,
 		sae_parse_token_container(sae, pos, end, token, token_len);
 
 	/* Conditional AKM Suite Selector element */
-	if (h2e) {
-		res = sae_parse_akm_suite_selector(sae, &pos, end);
-		if (res != WLAN_STATUS_SUCCESS)
-			return res;
-	}
+	res = sae_parse_akm_suite_selector(sae, &pos, end);
+	if (res != WLAN_STATUS_SUCCESS)
+		return res;
 
 	if (sae->own_akm_suite_selector &&
 	    sae->own_akm_suite_selector != sae->peer_akm_suite_selector) {
@@ -2255,6 +2274,12 @@ u16 sae_parse_commit(struct sae_data *sae, const u8 *data, size_t len,
 		else if (sae->peer_akm_suite_selector ==
 		    RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY)
 			sae->akmp = WPA_KEY_MGMT_FT_SAE_EXT_KEY;
+	}
+
+	if (wpa_key_mgmt_sae_ext_key(sae->akmp) && !h2e) {
+		wpa_printf(MSG_DEBUG,
+			   "SAE: Tried to use EXT-KEY AKM without H2E");
+		return WLAN_STATUS_UNSPECIFIED_FAILURE;
 	}
 
 	/*
