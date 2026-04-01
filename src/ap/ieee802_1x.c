@@ -202,6 +202,16 @@ void ieee802_1x_set_sta_authorized(struct hostapd_data *hapd,
 {
 	ieee802_1x_set_authorized(hapd, sta, authorized, false);
 	ieee802_1x_ml_set_sta_authorized(hapd, sta, !!authorized);
+
+#ifndef CONFIG_NO_VLAN
+       /* FullMAC per_sta_vif: trigger VLAN assignment on authorization */
+       if (authorized && hapd->conf->ssid.per_sta_vif && !sta->vlan_id) {
+               struct vlan_description vlan_desc = {};
+               ap_sta_set_vlan(hapd, sta, &vlan_desc);
+               ap_sta_bind_vlan(hapd, sta);
+       }
+#endif
+
 }
 
 
