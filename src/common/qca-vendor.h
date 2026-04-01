@@ -5963,6 +5963,35 @@ enum qca_wlan_vendor_attr_ll_stats_results {
 	 */
 	QCA_WLAN_VENDOR_ATTR_LL_STATS_RX_DRIVER_MPDU_CNT = 99,
 
+	/* Nested attribute for SNR distribution statistics. This attribute
+	 * contains a dynamic SNR distribution histogram and measurement
+	 * duration for the interface's operating channel.
+	 *
+	 * SNR is measured by the target hardware and reported as a distribution
+	 * across configurable bins. The bin range and step size are determined
+	 * by the firmware and reported via the nested attributes defined in
+	 * enum qca_wlan_vendor_attr_ll_stats_snr. Applications must read the
+	 * config attributes (SNR_LOWER_BOUND, SNR_UPPER_BOUND, SNR_STEP,
+	 * BIN_COUNT) to correctly interpret the BIN_DATA array.
+	 *
+	 * For non-MLO connection:
+	 * - This attribute appears at the interface level and represents the
+	 *   SNR distribution for the single operating channel.
+	 *
+	 * For MLO connection:
+	 * - This attribute ONLY appears inside
+	 *   %QCA_WLAN_VENDOR_ATTR_LL_STATS_MLO_LINK
+	 * - Each link reports its own SNR distribution for its specific
+	 *   operating channel.
+	 * - There is no aggregated SNR distribution at the interface level,
+	 *   as SNR distributions from different channels cannot be
+	 *   meaningfully combined.
+	 *
+	 * This is a nested attribute containing SNR distribution attributes
+	 * defined in enum qca_wlan_vendor_attr_ll_stats_snr.
+	 */
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_IFACE_SNR = 100,
+
 	/* keep last */
 	QCA_WLAN_VENDOR_ATTR_LL_STATS_AFTER_LAST,
 	QCA_WLAN_VENDOR_ATTR_LL_STATS_MAX =
@@ -5979,6 +6008,64 @@ enum qca_wlan_vendor_attr_ll_stats_type {
 	QCA_NL80211_VENDOR_SUBCMD_LL_STATS_TYPE_AFTER_LAST,
 	QCA_NL80211_VENDOR_SUBCMD_LL_STATS_TYPE_MAX =
 	QCA_NL80211_VENDOR_SUBCMD_LL_STATS_TYPE_AFTER_LAST - 1,
+};
+
+/**
+ * enum qca_wlan_vendor_attr_ll_stats_snr - SNR distribution attributes
+ *
+ * These attributes report the distribution of received SNR samples collected
+ * by the target hardware. The bin configuration (range and step) is dynamic and
+ * determined by the firmware. Applications must use the config attributes
+ * (SNR_LOWER_BOUND, SNR_UPPER_BOUND, SNR_STEP, BIN_COUNT) to correctly
+ * interpret the BIN_DATA array.
+ *
+ * Bin layout (num_bins = ((upper_bound - lower_bound) / step) + 2):
+ *   Bin[0]:          SNR < lower_bound dB
+ *   Bin[1]:          SNR in [lower_bound, lower_bound + step) dB
+ *   Bin[i]:          SNR in [lower_bound + (i-1)*step, lower_bound + i*step) dB
+ *   Bin[num_bins-1]: SNR >= upper_bound dB
+ *
+ * Example (lower=0, upper=100, step=10, num_bins=12):
+ *   Bin[0]=SNR<0, Bin[1]=SNR[0,10), ..., Bin[10]=SNR[90,100), Bin[11]=SNR>=100
+ *
+ * @QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_MEAS_DUR_US: u32
+ *     Total measurement duration in microseconds during which SNR samples
+ *     were collected on the operating channel.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_LOWER_BOUND: u32
+ *     Lower bound of the SNR measurement range in dB.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_UPPER_BOUND: u32
+ *     Upper bound of the SNR measurement range in dB.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_STEP: u32
+ *     Step size in dB for each SNR bin.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_BIN_COUNT: u32
+ *     Total number of bins = ((upper_bound - lower_bound) / step) + 2.
+ *     The +2 accounts for out-of-bound bins (below lower_bound and above
+ *     upper_bound). This is also the number of u32 elements in BIN_DATA.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_BIN_DATA: NLA_BINARY
+ *     Array of u32 values, BIN_COUNT elements total. Each element is the
+ *     count of SNR samples that fell in the corresponding bin during the
+ *     measurement period. See bin layout description above.
+ *     The u32 values are in host byte order; no byte-order conversion is
+ *     required by the application.
+ */
+enum qca_wlan_vendor_attr_ll_stats_snr {
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_INVALID = 0,
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_MEAS_DUR_US = 1,
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_LOWER_BOUND = 2,
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_UPPER_BOUND = 3,
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_STEP = 4,
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_BIN_COUNT = 5,
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_BIN_DATA = 6, /* NLA_BINARY: u32[] */
+
+	/* keep last */
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_AFTER_LAST,
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_MAX =
+	QCA_WLAN_VENDOR_ATTR_LL_STATS_SNR_AFTER_LAST - 1,
 };
 
 /**
@@ -13079,6 +13166,10 @@ enum qca_wlan_vendor_cfr_stop_reason {
  * and provides the corresponding reason code. The reason codes are defined
  * in enum qca_wlan_vendor_cfr_stop_reason.
  * Applicable for peer CFR events when CFR data format version is 3.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_PEER_CFR_FIXED_AGC: Optional (flag)
+ * This attribute indicates that the Wi-Fi firmware should fix RX antenna gain
+ * during CSI capturing. This is for CFR version 2 and version 3.
  */
 enum qca_wlan_vendor_peer_cfr_capture_attr {
 	QCA_WLAN_VENDOR_ATTR_PEER_CFR_CAPTURE_INVALID = 0,
@@ -13130,6 +13221,7 @@ enum qca_wlan_vendor_peer_cfr_capture_attr {
 	QCA_WLAN_VENDOR_ATTR_PEER_CFR_CSI_LTF_TYPE = 46,
 	QCA_WLAN_VENDOR_ATTR_PEER_CFR_NUM_SPATIAL_STREAMS = 47,
 	QCA_WLAN_VENDOR_ATTR_PEER_CFR_STOP_REASON = 48,
+	QCA_WLAN_VENDOR_ATTR_PEER_CFR_FIXED_AGC = 49,
 
 	/* Keep last */
 	QCA_WLAN_VENDOR_ATTR_PEER_CFR_AFTER_LAST,

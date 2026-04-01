@@ -219,6 +219,7 @@ static inline int wpa_key_mgmt_cross_akm(int akm)
 #define WPA_AUTH_ALG_FILS BIT(5)
 #define WPA_AUTH_ALG_FILS_SK_PFS BIT(6)
 #define WPA_AUTH_ALG_EPPKE BIT(7)
+#define WPA_AUTH_ALG_802_1X BIT(8)
 
 static inline int wpa_auth_alg_fils(int alg)
 {

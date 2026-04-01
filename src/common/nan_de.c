@@ -1352,6 +1352,8 @@ static bool nan_srf_match(struct nan_de *de, const u8 *srf, size_t srf_len)
 		NAN_SRF_CTRL_BF_IDX_MSK;
 
 	if (srf_type_bf) {
+		if (srf_len == 0)
+			return false;
 		if (nan_check_bloom_filter(de->nmi, srf, srf_len, srf_bf_idx))
 			return include;
 	} else {

@@ -694,6 +694,44 @@ struct last_scan_ssid {
 	size_t ssid_len;
 };
 
+#ifdef CONFIG_IEEE8021X_AUTH
+/**
+ * struct auth_802_1x_data - Data for IEEE 802.1X Authentication algorithm
+ * @auth_trans: Authentication transaction sequence number
+ * @status: Status code
+ * @derive_ptk: Whether to derive a PTK for association
+ * @pmksa_caching: Whether PMKSA caching is being used
+ * @pmkid_found: Whether PMKID is identified by AP
+ * @pmkid: PMKID for PMKSA caching
+ * @snonce: SNonce
+ * @anonce: ANonce
+ * @dh_group: DH group for key exchange
+ * @ecdh: ECDH context
+ * @dhss: DH shared secret
+ * @rsne: RSNE
+ * @rsne_len: Length of RSNE
+ * @rsnxe: RSNXE
+ * @rsnxe_len: Length of RSNXE
+ */
+struct auth_802_1x_data {
+	u16 auth_trans;
+	u16 status;
+	bool derive_ptk;
+	bool pmksa_caching;
+	bool pmkid_found;
+	u8 pmkid[PMKID_LEN];
+	u8 snonce[WPA_NONCE_LEN];
+	u8 anonce[WPA_NONCE_LEN];
+	u16 dh_group;
+	struct crypto_ecdh *ecdh;
+	struct wpabuf *dhss;
+	u8 rsne[257];
+	size_t rsne_len;
+	u8 rsnxe[257];
+	size_t rsnxe_len;
+};
+#endif /* CONFIG_IEEE8021X_AUTH */
+
 /**
  * struct wpa_supplicant - Internal data for wpa_supplicant interface
  *
@@ -1622,6 +1660,10 @@ struct wpa_supplicant {
 	bool wps_overlap;
 	bool scan_in_progress_6ghz; /* Set upon a 6 GHz scan being triggered */
 
+#ifdef CONFIG_IEEE8021X_AUTH
+	struct auth_802_1x_data *auth_1x;
+#endif /* CONFIG_IEEE8021X_AUTH */
+
 #ifdef CONFIG_PASN
 	struct pasn_data pasn;
 	struct wpa_radio_work *pasn_auth_work;
@@ -2091,6 +2133,7 @@ int wpas_pasn_auth_start(struct wpa_supplicant *wpa_s, const u8 *own_addr,
 			 u16 group, int network_id,
 			 const u8 *comeback, size_t comeback_len);
 void wpas_pasn_auth_stop(struct wpa_supplicant *wpa_s);
+void wpas_pasn_free_params(struct wpa_supplicant *wpa_s);
 int wpas_pasn_auth_tx_status(struct wpa_supplicant *wpa_s,
 			     const u8 *data, size_t data_len, u8 acked);
 int wpas_pasn_auth_rx(struct wpa_supplicant *wpa_s,

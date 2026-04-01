@@ -128,6 +128,7 @@ struct ieee802_11_elems {
 	const u8 *rsn_selection;
 	const u8 *wfa_capab;
 	const u8 *proximity_ranging;
+	const u8 *akm_suite_selector;
 
 	u8 ssid_len;
 	u8 supp_rates_len;
@@ -172,6 +173,7 @@ struct ieee802_11_elems {
 	size_t key_delivery_len;
 	size_t wrapped_data_len;
 	u8 fils_pk_len;
+	u8 nonce_len;
 	u8 owe_dh_len;
 	u8 power_capab_len;
 	u8 roaming_cons_sel_len;
@@ -198,6 +200,7 @@ struct ieee802_11_elems {
 	size_t rsn_selection_len;
 	u8 wfa_capab_len;
 	size_t proximity_ranging_len;
+	u8 akm_suite_selector_len;
 
 	struct mb_ies_info mb_ies;
 

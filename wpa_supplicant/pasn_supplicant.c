@@ -40,6 +40,27 @@ struct wpa_pasn_auth_work {
 };
 
 
+static void wpas_pasn_free_peer_password(struct pasn_peer *peer)
+{
+	str_clear_free(peer->password);
+	peer->password = NULL;
+}
+
+
+static void wpas_pasn_free_peer_comeback(struct pasn_peer *peer)
+{
+	os_free(peer->comeback);
+	peer->comeback = NULL;
+}
+
+
+static void wpas_pasn_free_peer(struct pasn_peer *peer)
+{
+	wpas_pasn_free_peer_password(peer);
+	wpas_pasn_free_peer_comeback(peer);
+}
+
+
 static int wpas_pasn_send_mlme(void *ctx, const u8 *data, size_t data_len,
 			       int noack, unsigned int freq, unsigned int wait)
 {
@@ -465,10 +486,7 @@ static void wpas_pasn_configure_next_peer(struct wpa_supplicant *wpa_s,
 				wpa_key_mgmt_txt(peer->akmp, WPA_PROTO_RSN),
 				peer->status);
 			wpa_s->pasn_count++;
-			str_clear_free(peer->password);
-			os_free(peer->comeback);
-			peer->password = NULL;
-			peer->comeback = NULL;
+			wpas_pasn_free_peer(peer);
 			continue;
 		}
 		wpa_printf(MSG_DEBUG, "PASN: Sent PASN auth start for " MACSTR,
@@ -483,8 +501,7 @@ static void wpas_pasn_configure_next_peer(struct wpa_supplicant *wpa_s,
 		wpa_printf(MSG_DEBUG, "PASN: Response sent");
 		for (i = 0; i < pasn_params->num_peers; i++) {
 			peer = &pasn_params->peer[i];
-			str_clear_free(peer->password);
-			os_free(peer->comeback);
+			wpas_pasn_free_peer(peer);
 
 			if (peer->temporary_network) {
 				ssid = wpa_config_get_network(wpa_s->conf,
@@ -529,8 +546,7 @@ static void wpas_pasn_delete_peers(struct wpa_supplicant *wpa_s,
 		peer = &pasn_params->peer[i];
 		ptksa_cache_flush(wpa_s->ptksa, peer->peer_addr,
 				  WPA_CIPHER_NONE);
-		str_clear_free(peer->password);
-		peer->password = NULL;
+		wpas_pasn_free_peer_password(peer);
 	}
 }
 
@@ -895,6 +911,21 @@ void wpas_pasn_auth_stop(struct wpa_supplicant *wpa_s)
 }
 
 
+void wpas_pasn_free_params(struct wpa_supplicant *wpa_s)
+{
+	unsigned int i;
+
+	if (!wpa_s->pasn_params)
+		return;
+
+	for (i = 0; i < wpa_s->pasn_params->num_peers; i++)
+		wpas_pasn_free_peer(&wpa_s->pasn_params->peer[i]);
+
+	os_free(wpa_s->pasn_params);
+	wpa_s->pasn_params = NULL;
+}
+
+
 static int wpas_pasn_immediate_retry(struct wpa_supplicant *wpa_s,
 				     struct pasn_data *pasn,
 				     struct wpa_pasn_params_data *params)
@@ -948,8 +979,8 @@ static void wpas_pasn_store_comeback_data(struct wpa_supplicant *wpa_s,
 	if (!peer)
 		return;
 
-	os_free(peer->comeback);
-	peer->comeback = os_zalloc(wpabuf_len(comeback));
+	wpas_pasn_free_peer_comeback(peer);
+	peer->comeback = os_memdup(wpabuf_head(comeback), wpabuf_len(comeback));
 	if (!peer->comeback) {
 		wpa_printf(MSG_ERROR,
 			   "PASN: Mem alloc failed for comeback data");
@@ -957,7 +988,6 @@ static void wpas_pasn_store_comeback_data(struct wpa_supplicant *wpa_s,
 	}
 
 	peer->comeback_len = wpabuf_len(comeback);
-	os_memcpy(peer->comeback, wpabuf_head_u8(comeback), peer->comeback_len);
 	peer->comeback_after = comeback_after;
 }
 
@@ -1051,7 +1081,7 @@ void wpas_pasn_auth_trigger(struct wpa_supplicant *wpa_s,
 			if (!dst->password) {
 				wpa_printf(MSG_DEBUG,
 					   "PASN: Mem alloc failed for password");
-				return;
+				goto fail;
 			}
 		}
 		if (src->comeback_len && src->comeback) {
@@ -1060,7 +1090,7 @@ void wpas_pasn_auth_trigger(struct wpa_supplicant *wpa_s,
 			if (!dst->comeback) {
 				wpa_printf(MSG_DEBUG,
 					   "PASN: Mem alloc failed for comeback cookie");
-				return;
+				goto fail;
 			}
 			dst->comeback_len = src->comeback_len;
 		}
@@ -1079,6 +1109,11 @@ void wpas_pasn_auth_trigger(struct wpa_supplicant *wpa_s,
 	} else if (pasn_auth->action == PASN_ACTION_AUTH) {
 		wpas_pasn_configure_next_peer(wpa_s, wpa_s->pasn_params);
 	}
+
+	return;
+
+fail:
+	wpas_pasn_free_params(wpa_s);
 }
 
 

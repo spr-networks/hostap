@@ -4376,8 +4376,10 @@ struct crypto_csr * crypto_csr_verify(const struct wpabuf *req)
 	if (X509_REQ_verify((X509_REQ *)csr, pkey) != 1)
 		goto fail;
 
+	EVP_PKEY_free(pkey);
 	return (struct crypto_csr *)csr;
 fail:
+	EVP_PKEY_free(pkey);
 	X509_REQ_free(csr);
 	return NULL;
 }

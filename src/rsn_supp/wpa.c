@@ -429,13 +429,20 @@ static int wpa_supplicant_get_pmk(struct wpa_sm *sm,
 			if (sm->proto == WPA_PROTO_RSN &&
 			    !wpa_key_mgmt_suite_b(sm->key_mgmt) &&
 			    !wpa_key_mgmt_ft(sm->key_mgmt)) {
+				u16 auth_alg = 0;
+
+#ifdef CONFIG_IEEE8021X_AUTH
+				if (eapol_sm_get_eap_over_auth_frame(sm->eapol))
+					auth_alg = WLAN_AUTH_802_1X;
+#endif /* CONFIG_IEEE8021X_AUTH */
+
 				sa = pmksa_cache_add(sm->pmksa,
 						     sm->pmk, pmk_len, NULL,
 						     NULL, 0,
 						     src_addr, sm->own_addr,
 						     sm->network_ctx,
 						     sm->key_mgmt,
-						     fils_cache_id, 0);
+						     fils_cache_id, auth_alg);
 			}
 			if (!sm->cur_pmksa && pmkid &&
 			    pmksa_cache_get(sm->pmksa, src_addr, sm->own_addr,
@@ -484,6 +491,14 @@ static int wpa_supplicant_get_pmk(struct wpa_sm *sm,
 	if (abort_cached && wpa_key_mgmt_wpa_ieee8021x(sm->key_mgmt) &&
 	    !wpa_key_mgmt_suite_b(sm->key_mgmt) &&
 	    !wpa_key_mgmt_ft(sm->key_mgmt)) {
+#ifdef CONFIG_IEEE8021X_AUTH
+		if (eapol_sm_get_eap_over_auth_frame(sm->eapol)) {
+			wpa_printf(MSG_DEBUG,
+				   "RSN: EAP over auth frame - skip EAPOL-Start");
+			return 0;
+		}
+#endif /* CONFIG_IEEE8021X_AUTH */
+
 		/* Send EAPOL-Start to trigger full EAP authentication. */
 		u8 *buf;
 		size_t buflen;
@@ -1310,9 +1325,11 @@ static int wpa_supplicant_install_ptk(struct wpa_sm *sm,
 	if (key_flag & KEY_FLAG_NEXT) {
 		sm->ptk.installed_rx = true;
 	} else {
+#ifndef CONFIG_TESTING_OPTIONS
 		/* TK is not needed anymore in supplicant */
 		os_memset(sm->ptk.tk, 0, WPA_TK_MAX_LEN);
 		sm->ptk.tk_len = 0;
+#endif /* CONFIG_TESTING_OPTIONS */
 		sm->ptk.installed = 1;
 		sm->tk_set = true;
 	}
@@ -3159,7 +3176,8 @@ static void wpa_supplicant_process_mlo_1_of_2(struct wpa_sm *sm,
 	struct wpa_eapol_ie_parse ie;
 
 	if (!sm->msg_3_of_4_ok && !wpa_fils_is_completed(sm) &&
-	    !wpa_eppke_is_completed(sm)) {
+	    !wpa_eppke_is_completed(sm) &&
+	    !wpa_eap_over_auth_frame_is_completed(sm)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
 			"MLO RSN: Group Key Handshake started prior to completion of 4-way handshake");
 		goto failed;
@@ -3396,7 +3414,8 @@ static void wpa_supplicant_process_1_of_2(struct wpa_sm *sm,
 	u16 gtk_len;
 
 	if (!sm->msg_3_of_4_ok && !wpa_fils_is_completed(sm) &&
-	    !wpa_eppke_is_completed(sm)) {
+	    !wpa_eppke_is_completed(sm) &&
+	    !wpa_eap_over_auth_frame_is_completed(sm)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
 			"RSN: Group Key Handshake started prior to completion of 4-way handshake");
 		goto failed;
@@ -4576,7 +4595,7 @@ void wpa_sm_notify_assoc(struct wpa_sm *sm, const u8 *bssid)
 	}
 #endif /* CONFIG_FILS */
 #ifdef CONFIG_ENC_ASSOC
-	if (sm->eppke_completed) {
+	if (sm->eppke_completed || sm->eap_over_auth_frame_completed) {
 		/*
 		 * Clear portValid to kick EAPOL state machine to re-enter
 		 * AUTHENTICATED state to get the EAPOL port Authorized.
@@ -4635,6 +4654,7 @@ void wpa_sm_notify_disassoc(struct wpa_sm *sm)
 #endif /* CONFIG_IEEE80211R */
 #ifdef CONFIG_ENC_ASSOC
 	sm->eppke_completed = 0;
+	sm->eap_over_auth_frame_completed = 0;
 #endif /* CONFIG_ENC_ASSOC */
 
 	/* Keys are not needed in the WPA state machine anymore */
@@ -6044,6 +6064,16 @@ void wpa_sm_set_ptk_kck_kek(struct wpa_sm *sm, enum rsn_hash_alg hash,
 
 
 #ifdef CONFIG_TESTING_OPTIONS
+
+void wpa_sm_set_ptk_tk(struct wpa_sm *sm, const u8 *ptk_tk, size_t ptk_tk_len)
+{
+	if (ptk_tk && ptk_tk_len <= WPA_TK_MAX_LEN) {
+		os_memcpy(sm->ptk.tk, ptk_tk, ptk_tk_len);
+		sm->ptk.tk_len = ptk_tk_len;
+		wpa_printf(MSG_DEBUG, "Updated PTK TK");
+	}
+}
+
 
 void wpa_sm_set_test_assoc_ie(struct wpa_sm *sm, struct wpabuf *buf)
 {
@@ -7680,6 +7710,7 @@ int process_encrypted_assoc_resp(struct wpa_sm *sm, int valid_links,
 	}
 
 	sm->eppke_completed = 0;
+	sm->eap_over_auth_frame_completed = 0;
 	wpa_hexdump_key(MSG_DEBUG, "ENC_ASSOC: (Re)Association Response frame",
 			ies, ies_len);
 
@@ -7692,7 +7723,8 @@ int process_encrypted_assoc_resp(struct wpa_sm *sm, int valid_links,
 		return -1;
 	}
 
-	if (wpa_compare_rsn_ie(wpa_key_mgmt_sae(sm->key_mgmt),
+	if (wpa_compare_rsn_ie(wpa_key_mgmt_sae(sm->key_mgmt) ||
+			       wpa_key_mgmt_wpa_ieee8021x(sm->key_mgmt),
 			       sm->ap_rsn_ie, sm->ap_rsn_ie_len,
 			       elems.rsn_ie - 2, elems.rsn_ie_len + 2)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
@@ -7755,6 +7787,7 @@ int process_encrypted_assoc_resp(struct wpa_sm *sm, int valid_links,
 
 	wpa_printf(MSG_DEBUG, "ENC_ASSOC: Association completed successfully");
 	sm->eppke_completed = 1;
+	sm->eap_over_auth_frame_completed = 1;
 
 	ret = 0;
 fail:
@@ -7775,7 +7808,65 @@ bool wpa_eppke_is_completed(struct wpa_sm *sm)
 }
 
 
+bool wpa_eap_over_auth_frame_is_completed(struct wpa_sm *sm)
+{
+#ifdef CONFIG_ENC_ASSOC
+	return sm && sm->eap_over_auth_frame_completed;
+#else /* CONFIG_ENC_ASSOC */
+	return false;
+#endif /* CONFIG_ENC_ASSOC */
+}
+
+
 bool wpa_sm_pmksa_privacy_supported(struct wpa_sm *sm)
 {
 	return sm && sm->pmksa_privacy;
 }
+
+
+#ifdef CONFIG_IEEE8021X_AUTH
+
+void wpa_sm_set_802_1x_auth_caps(struct wpa_sm *sm, u64 flags2)
+{
+	sm->eap_over_auth_frame =
+		!!(flags2 & WPA_DRIVER_FLAGS2_802_1X_AUTH);
+}
+
+
+const u8 * wpa_sm_get_pmk(struct wpa_sm *sm, const u8 *addr, const u8 *pmkid,
+			  size_t *pmk_len)
+{
+	if (wpa_supplicant_get_pmk(sm, addr, pmkid) < 0 ||
+	    sm->pmk_len == 0)
+		return NULL;
+
+	*pmk_len = sm->pmk_len;
+	return sm->pmk;
+}
+
+#endif /* CONFIG_IEEE8021X_AUTH */
+
+
+#ifdef CONFIG_TESTING_OPTIONS
+/**
+ * wpa_sm_get_cached_tk - Get cached TK for testing purposes
+ * @sm: Pointer to WPA state machine data from wpa_sm_init()
+ * @tk: Buffer to store the TK
+ * @tk_len: Pointer to store the TK length
+ * Returns: 0 on success, -1 if TK is not available
+ *
+ * This function retrieves the cached TK from wpa_sm. The TK is only available
+ * if PTK is set and TK is not null.
+ */
+int wpa_sm_get_cached_tk(struct wpa_sm *sm, u8 *tk, size_t *tk_len)
+{
+	if (!sm || !sm->ptk_set ||
+	    sm->ptk.tk_len == 0 || sm->ptk.tk_len > WPA_TK_MAX_LEN)
+		return -1;
+
+	os_memcpy(tk, sm->ptk.tk, sm->ptk.tk_len);
+	*tk_len = sm->ptk.tk_len;
+
+	return 0;
+}
+#endif /* CONFIG_TESTING_OPTIONS */

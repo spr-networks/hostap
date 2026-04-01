@@ -1053,10 +1053,10 @@ static const u8 * auth_skip_fixed_fields(struct hostapd_data *hapd,
 					 size_t len)
 {
 	u16 auth_alg = le_to_host16(mgmt->u.auth.auth_alg);
-#ifdef CONFIG_SAE
+#if defined(CONFIG_SAE) || defined(CONFIG_IEEE8021X_AUTH)
 	u16 auth_transaction = le_to_host16(mgmt->u.auth.auth_transaction);
 	u16 status_code = le_to_host16(mgmt->u.auth.status_code);
-#endif /* CONFIG_SAE */
+#endif /* CONFIG_SAE or CONFIG_IEEE8021X_AUTH */
 	const u8 *pos = mgmt->u.auth.variable;
 
 	/* Skip fixed fields as based on IEEE Std 802.11-2024, Table 9-71
@@ -1065,6 +1065,28 @@ static const u8 * auth_skip_fixed_fields(struct hostapd_data *hapd,
 	case WLAN_AUTH_OPEN:
 	case WLAN_AUTH_EPPKE:
 		return pos;
+#ifdef CONFIG_IEEE8021X_AUTH
+	case WLAN_AUTH_802_1X: {
+		u16 encap_len;
+
+		/* Extract 2-octet Encapsulation Length from variable field */
+		if (len < 2)
+			return NULL;
+
+		encap_len = WPA_GET_LE16(pos);
+		pos += 2;
+		len -= 2;
+
+		/* Skip Encapsulation field if present */
+		if (encap_len > 0) {
+			if (len < encap_len)
+				return NULL;
+			pos += encap_len;
+		}
+
+		return pos;
+	}
+#endif /* CONFIG_IEEE8021X_AUTH */
 #ifdef CONFIG_SAE
 	case WLAN_AUTH_SAE:
 		if (auth_transaction == WLAN_AUTH_TR_SEQ_SAE_COMMIT) {

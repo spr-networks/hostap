@@ -858,6 +858,7 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 
 #ifdef CONFIG_PASN
 	wpas_pasn_auth_stop(wpa_s);
+	wpas_pasn_free_params(wpa_s);
 #endif /* CONFIG_PASN */
 #ifndef CONFIG_NO_ROBUST_AV
 	wpas_scs_deinit(wpa_s);
@@ -2757,7 +2758,7 @@ void wpa_s_setup_sae_pt(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 		if (password_id && ssid->pt->password_id &&
 		    password_id_len == wpabuf_len(ssid->pt->password_id) &&
 		    os_memcmp(password_id, wpabuf_head(ssid->pt->password_id),
-			      password_id_len == 0))
+			      password_id_len) == 0)
 			return; /* PT already derived for same PW ID */
 
 		/* PT was derived for another password identifier */
@@ -7925,6 +7926,11 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 #ifdef CONFIG_PASN
 	wpa_pasn_sm_set_caps(wpa_s->wpa, wpa_s->drv_flags2);
 #endif /* CONFIG_PASN */
+
+#ifdef CONFIG_IEEE8021X_AUTH
+	wpa_sm_set_802_1x_auth_caps(wpa_s->wpa, wpa_s->drv_flags2);
+#endif /* CONFIG_IEEE8021X_AUTH */
+
 	wpa_sm_set_driver_bss_selection(wpa_s->wpa,
 					!!(wpa_s->drv_flags &
 					   WPA_DRIVER_FLAGS_BSS_SELECTION));
@@ -10262,7 +10268,8 @@ void wpas_configure_frame_filters(struct wpa_supplicant *wpa_s)
 	proxy_arp_capa = wpa_bss_ext_capab(bss, WLAN_EXT_CAPAB_PROXY_ARP);
 
 	if ((hs20 && proxy_arp_capa) ||
-	    wpa_s->current_ssid->always_use_proxy_arp == 2 ||
+	    (wpa_s->current_ssid &&
+	     wpa_s->current_ssid->always_use_proxy_arp == 2) ||
 	    (proxy_arp_capa && wpa_s->current_ssid &&
 	     wpa_s->current_ssid->always_use_proxy_arp == 1))
 		filter |= WPA_DATA_FRAME_FILTER_FLAG_ARP |

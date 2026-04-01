@@ -10701,6 +10701,24 @@ static int wpas_ctrl_iface_send_twt_teardown(struct wpa_supplicant *wpa_s,
 	return wpas_twt_send_teardown(wpa_s, flags);
 }
 
+
+static int wpas_ctrl_iface_get_tk(struct wpa_supplicant *wpa_s, char *buf,
+				  size_t buflen)
+{
+	u8 tk[WPA_TK_MAX_LEN];
+	size_t tk_len = 0;
+	int ret;
+
+	if (wpa_sm_get_cached_tk(wpa_s->wpa, tk, &tk_len) < 0) {
+		ret = os_snprintf(buf, buflen, "FAIL");
+	} else {
+		ret = wpa_snprintf_hex(buf, buflen, tk, tk_len);
+		forced_memzero(tk, sizeof(tk));
+	}
+
+	return ret;
+}
+
 #endif /* CONFIG_TESTING_OPTIONS */
 
 
@@ -14085,6 +14103,8 @@ char * wpa_supplicant_ctrl_iface_process(struct wpa_supplicant *wpa_s,
 	} else if (os_strncmp(buf, "TEST_RSNXE_DATA ", 16) == 0) {
 		if (wpas_ctrl_test_rsnxe_data(wpa_s, buf + 16) < 0)
 			reply_len = -1;
+	} else if (os_strcmp(buf, "GET_TK") == 0) {
+		reply_len = wpas_ctrl_iface_get_tk(wpa_s, reply, reply_size);
 #endif /* CONFIG_TESTING_OPTIONS */
 	} else if (os_strncmp(buf, "VENDOR_ELEM_ADD ", 16) == 0) {
 		if (wpas_ctrl_vendor_elem_add(wpa_s, buf + 16) < 0)

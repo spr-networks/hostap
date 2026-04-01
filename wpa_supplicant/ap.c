@@ -2153,7 +2153,7 @@ void wpas_ap_event_dfs_cac_started(struct wpa_supplicant *wpa_s,
 	if (!iface || !iface->bss[0])
 		return;
 	wpa_printf(MSG_DEBUG, "DFS CAC started on %d MHz", radar->freq);
-	hostapd_dfs_start_cac(iface, radar->freq,
+	hostapd_dfs_start_cac(iface->bss[0], radar->freq,
 			      radar->ht_enabled, radar->chan_offset,
 			      radar->chan_width, radar->cf1, radar->cf2);
 }

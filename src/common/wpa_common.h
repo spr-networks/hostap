@@ -25,6 +25,7 @@
 #define WPA_PASN_PMK_LEN 32
 #define WPA_PASN_MAX_MIC_LEN 32
 #define WPA_MAX_RSNXE_LEN 4
+#define WPA_1X_MAX_MIC_LEN 32
 
 #define OWE_DH_GROUP 19
 
@@ -575,6 +576,8 @@ u32 wpa_akm_to_suite(int akm);
 int wpa_compare_rsn_ie(int ft_initial_assoc,
 		       const u8 *ie1, size_t ie1len,
 		       const u8 *ie2, size_t ie2len);
+int wpa_compare_rsne_params(const u8 *rsne1, size_t rsne1_len,
+			    const u8 *rsne2, size_t rsne2_len);
 int wpa_insert_pmkid(u8 *ies, size_t *ies_len, const u8 *pmkid, bool replace);
 
 struct wpa_ft_ies {
@@ -791,6 +794,10 @@ int pasn_pmk_to_ptk(const u8 *pmk, size_t pmk_len,
 
 size_t pasn_mic_len(enum rsn_hash_alg alg);
 
+int wpa_auth_8021x_mic(int akmp, const u8 *kck, size_t kck_len, const u8 *addr1,
+		       const u8 *addr2, const u8 *data, size_t data_len,
+		       const u8 *frame, size_t frame_len, u8 *mic);
+
 int pasn_mic(enum rsn_hash_alg alg, const u8 *kck, size_t kck_len,
 	     const u8 *addr1, const u8 *addr2,
 	     const u8 *data, size_t data_len,
@@ -828,5 +835,11 @@ bool rsn_is_snonce_cookie(const u8 *snonce);
 
 int rsn_cipher_suite_to_wpa_cipher(u32 cipher);
 int rsn_key_mgmt_to_wpa_akm(u32 akm_suite);
+
+int wpa_auth_802_1x_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const u8 *spa,
+			       const u8 *aa, const u8 *snonce, const u8 *anonce,
+			       int akmp, int cipher, const u8 *dhss,
+			       size_t dhss_len, struct wpa_ptk *ptk,
+			       size_t kdk_len);
 
 #endif /* WPA_COMMON_H */

@@ -276,6 +276,69 @@ static char * wpa_config_write_int(const struct parse_data *data,
 #endif /* NO_CONFIG_WRITE */
 
 
+static int wpa_config_parse_bool(const struct parse_data *data,
+				 struct wpa_ssid *ssid,
+				 int line, const char *value)
+{
+	int val;
+	bool *dst;
+	char *end;
+
+	dst = (bool *) (((u8 *) ssid) + (long) data->param1);
+	val = strtol(value, &end, 0);
+	if (*end) {
+		wpa_printf(MSG_ERROR, "Line %d: invalid number \"%s\"",
+			   line, value);
+		return -1;
+	}
+
+	if (val < 0) {
+		wpa_printf(MSG_ERROR,
+			   "Line %d: too small %s (value=%d)",
+			   line, data->name, val);
+		return -1;
+	}
+
+	if (val > 1) {
+		wpa_printf(MSG_ERROR,
+			   "Line %d: too large %s (value=%d)",
+			   line, data->name, val);
+		return -1;
+	}
+
+	if (*dst == val)
+		return 1;
+
+	*dst = val;
+	wpa_printf(MSG_MSGDUMP, "%s=%d)", data->name, *dst);
+
+	return 0;
+}
+
+
+#ifndef NO_CONFIG_WRITE
+static char * wpa_config_write_bool(const struct parse_data *data,
+				   struct wpa_ssid *ssid)
+{
+	bool *src, res;
+	char *value;
+
+	src = (bool *) (((u8 *) ssid) + (long) data->param1);
+
+	value = os_malloc(20);
+	if (value == NULL)
+		return NULL;
+	res = os_snprintf(value, 20, "%d", *src);
+	if (os_snprintf_error(20, res)) {
+		os_free(value);
+		return NULL;
+	}
+	value[20 - 1] = '\0';
+	return value;
+}
+#endif /* NO_CONFIG_WRITE */
+
+
 static int wpa_config_parse_addr_list(const struct parse_data *data,
 				      int line, const char *value,
 				      u8 **list, size_t *num, char *name,
@@ -2559,6 +2622,20 @@ static char * wpa_config_write_mac_value(const struct parse_data *data,
 	(void *) 0, (void *) (min), (void *) (max), 0
 #endif /* NO_CONFIG_WRITE */
 
+#ifdef NO_CONFIG_WRITE
+#define _BOOL(f) #f, wpa_config_parse_bool, OFFSET(f), (void *) 0
+#define _BOOLe(f, m) #f, wpa_config_parse_bool, OFFSET(eap.m), (void *) 0
+#else /* NO_CONFIG_WRITE */
+#define _BOOL(f) #f, wpa_config_parse_bool, wpa_config_write_bool, \
+	OFFSET(f), (void *) 0
+#define _BOOLe(f, m) #f, wpa_config_parse_bool, wpa_config_write_bool,	\
+	OFFSET(eap.m), (void *) 0
+#endif /* NO_CONFIG_WRITE */
+
+/* INT: Define an integer variable */
+#define BOOL(f) _BOOL(f), NULL, NULL, 0
+#define BOOLe(f, m) _BOOLe(f, m), NULL, NULL, 0
+
 /* FUNC: Define a configuration variable that uses a custom function for
  * parsing and writing the value. */
 #ifdef NO_CONFIG_WRITE
@@ -2837,13 +2914,16 @@ static const struct parse_data ssid_fields[] = {
 	{ INT_RANGE(disable_eht, 0, 1)},
 	{ INT_RANGE(enable_4addr_mode, 0, 1)},
 	{ INT_RANGE(max_idle, 0, 65535)},
-	{ INT_RANGE(ssid_protection, 0, 1)},
+	{ BOOL(ssid_protection)},
 	{ INT_RANGE(rsn_overriding, 0, 2)},
-	{ INT_RANGE(sae_password_id_change, 0, 1)},
+	{ BOOL(sae_password_id_change)},
 #ifdef CONFIG_PMKSA_PRIVACY
 	{ INT_RANGE(pmksa_privacy, 0, 1)},
 #endif /* CONFIG_PMKSA_PRIVACY */
-	{ INT_RANGE(drop_unicast_ip_in_l2_multicast, 0, 1)},
+#ifdef CONFIG_IEEE8021X_AUTH
+	{ INT_RANGE(eap_over_auth_frame, 0, 1)},
+#endif /* CONFIG_IEEE8021X_AUTH */
+	{ BOOL(drop_unicast_ip_in_l2_multicast)},
 	{ INT_RANGE(always_use_proxy_arp, 0, 2)},
 };
 
@@ -2860,6 +2940,10 @@ static const struct parse_data ssid_fields[] = {
 #undef _INT
 #undef INT
 #undef INT_RANGE
+#undef BOOLe
+#undef BOOL
+#undef _BOOLe
+#undef _BOOL
 #undef _FUNC
 #undef FUNC
 #undef FUNC_KEY

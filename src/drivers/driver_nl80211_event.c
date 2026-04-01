@@ -229,6 +229,8 @@ static void mlme_event_auth(struct wpa_driver_nl80211_data *drv,
 	os_memset(drv->auth_attempt_bssid, 0, ETH_ALEN);
 	os_memset(&event, 0, sizeof(event));
 	os_memcpy(event.auth.peer, mgmt->sa, ETH_ALEN);
+	event.auth.frame_body = (const u8 *) &mgmt->u.auth;
+	event.auth.frame_body_len = len - 24;
 	event.auth.auth_type = le_to_host16(mgmt->u.auth.auth_alg);
 	event.auth.auth_transaction =
 		le_to_host16(mgmt->u.auth.auth_transaction);

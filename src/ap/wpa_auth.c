@@ -1112,6 +1112,19 @@ int wpa_auth_sta_associated(struct wpa_authenticator *wpa_auth,
 		return 0;
 	}
 #endif /* CONFIG_ENC_ASSOC */
+#ifdef CONFIG_IEEE8021X_AUTH
+	if (wpa_auth->conf.assoc_frame_encryption &&
+	    sm->auth_alg == WLAN_AUTH_802_1X &&
+	    ieee802_11_rsnx_capab(sm->rsnxe,
+				  WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION)) {
+		wpa_auth_logger(wpa_auth, wpa_auth_get_spa(sm), LOGGER_DEBUG,
+				"IEEE 802.1X (EAP) over Authentication frames already completed - do not start 4-way handshake");
+		/* Go to PTKINITDONE state to allow GTK rekeying */
+		sm->wpa_ptk_state = WPA_PTK_PTKINITDONE;
+		sm->Pair = true;
+		return 0;
+	}
+#endif /* CONFIG_IEEE8021X_AUTH */
 
 #ifdef CONFIG_IEEE80211R_AP
 	if (sm->ft_completed) {
@@ -2608,6 +2621,11 @@ int wpa_auth_sm_event(struct wpa_state_machine *sm, enum wpa_event event)
 	    (event == WPA_AUTH || event == WPA_ASSOC))
 		remove_ptk = 0;
 #endif /* CONFIG_ENC_ASSOC */
+#ifdef CONFIG_IEEE8021X_AUTH
+	if (sm->auth_alg == WLAN_AUTH_802_1X &&
+	    (event == WPA_AUTH || event == WPA_ASSOC))
+		remove_ptk = 0;
+#endif /* CONFIG_IEEE8021X_AUTH */
 
 	if (remove_ptk) {
 		sm->PTK_valid = false;
@@ -3994,6 +4012,9 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 			wpa_auth_psk_failure_report(sm->wpa_auth, sm->addr);
 		goto out;
 	}
+
+	wpa_msg(wpa_auth->conf.msg_ctx, MSG_INFO, SPR_AP_STA_PSK_PROGRESS MACSTR " wpa confirmed",
+		MAC2STR(sm->addr));
 
 	/*
 	 * Note: last_rx_eapol_key length fields have already been validated in
@@ -5610,10 +5631,6 @@ SM_STEP(WPA_PTK)
 					LOGGER_INFO,
 					"no PSK configured for the STA");
 			wpa_auth->dot11RSNA4WayHandshakeFailures++;
-
-			wpa_msg(wpa_auth->conf.msg_ctx, MSG_INFO, AP_STA_POSSIBLE_PSK_MISMATCH MACSTR " wpa noentry",
-				MAC2STR(sm->addr));
-
 			SM_ENTER(WPA_PTK, DISCONNECT);
 		}
 		break;
@@ -8100,6 +8117,17 @@ u8 * wpa_auth_eid_key_delivery(u8 *eid, size_t max_len,
 }
 
 
+bool wpa_auth_ap_sta_support_assoc_enc(struct wpa_state_machine *sm)
+{
+	if (!sm)
+		return false;
+
+	return sm->wpa_auth->conf.assoc_frame_encryption &&
+		ieee802_11_rsnx_capab(sm->rsnxe,
+				      WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION);
+}
+
+
 u8 * wpa_auth_write_assoc_resp_eppke(struct wpa_state_machine *sm,
 				     u8 *pos, size_t max_len, bool is_ml)
 {
@@ -8210,3 +8238,27 @@ bool wpa_auth_get_first_sta_seen(struct wpa_authenticator *wpa_auth,
 	group = wpa_select_vlan_wpa_group(wpa_auth->group, vlan_id);
 	return group->first_sta_seen;
 }
+
+#ifdef CONFIG_IEEE8021X_AUTH
+int wpa_auth_802_1x_get_msk(struct wpa_authenticator *wpa_auth,
+			     const u8 *addr, u8 *msk, size_t *len)
+{
+	return wpa_auth_get_msk(wpa_auth, addr, msk, len);
+}
+
+
+int wpa_auth_802_1x_set_key(struct wpa_authenticator *wpa_auth,
+			    enum wpa_alg alg, const u8 *addr,
+			    u8 *key, size_t key_len)
+{
+
+	return wpa_auth_set_key(wpa_auth, 0, alg, addr, 0, key,
+				key_len, KEY_FLAG_PAIRWISE_RX_TX);
+
+}
+
+bool wpa_auth_ap_support_secure_ltf(struct wpa_authenticator *wpa_auth)
+{
+	return wpa_auth->conf.secure_ltf;
+}
+#endif /* CONFIG_IEEE8021X_AUTH */

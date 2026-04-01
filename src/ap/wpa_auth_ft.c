@@ -3276,6 +3276,12 @@ pmk_r1_derived:
 	os_memcpy(sm->pmk_r1_name, pmk_r1_name, WPA_PMK_NAME_LEN);
 	os_memcpy(sm->pmk_r1, pmk_r1, pmk_r1_len);
 	sm->pmk_r1_len = pmk_r1_len;
+	if (sm->pmk_r1_len == SHA512_MAC_LEN)
+		sm->hash_alg = RSN_HASH_SHA512;
+	else if (sm->pmk_r1_len == SHA384_MAC_LEN)
+		sm->hash_alg = RSN_HASH_SHA384;
+	else
+		sm->hash_alg = RSN_HASH_SHA256;
 
 	if (random_get_bytes(sm->ANonce, WPA_NONCE_LEN)) {
 		wpa_printf(MSG_DEBUG, "FT: Failed to get random data for "

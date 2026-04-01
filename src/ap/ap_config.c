@@ -370,7 +370,7 @@ static int hostapd_config_read_sae_psk(const char *fname,
 			continue;
 
 		if (parse_sae_password(bss, buf) < 0) {
-			wpa_printf(MSG_ERROR, "SAE failed to parse sae entry %s", fname);
+			wpa_printf(MSG_ERROR, "SAE failed to parse sae entry");
 			return -1;
 		}
 	}
@@ -378,6 +378,7 @@ static int hostapd_config_read_sae_psk(const char *fname,
 #endif
 	return 0;
 }
+
 static int hostapd_config_read_wpa_psk(const char *fname,
 				       struct hostapd_ssid *ssid)
 {
@@ -1576,7 +1577,8 @@ static int hostapd_config_check_bss(struct hostapd_bss_config *bss,
 			   "Enabling beacon protection as IEEE 802.11be is enabled for this BSS");
 	}
 
-	if ((!conf->ieee80211be || bss->disable_11be) && bss->mld_ap) {
+	if (full_config && (!conf->ieee80211be || bss->disable_11be) &&
+	    bss->mld_ap) {
 		wpa_printf(MSG_INFO,
 			   "Cannot enable mld_ap when IEEE 802.11be is disabled");
 		return -1;

@@ -119,6 +119,7 @@ struct wpa_sm {
 	unsigned int sae_pw_id_change:1;
 	unsigned int assoc_encryption:1;
 	unsigned int pmksa_privacy:1;
+	unsigned int eap_over_auth_frame:1;
 
 	u8 *assoc_wpa_ie; /* Own WPA/RSN IE from (Re)AssocReq */
 	size_t assoc_wpa_ie_len;
@@ -228,6 +229,7 @@ struct wpa_sm {
 #endif /* CONFIG_FILS */
 #ifdef CONFIG_ENC_ASSOC
 	unsigned int eppke_completed:1;
+	unsigned int eap_over_auth_frame_completed:1;
 #endif /* CONFIG_ENC_ASSOC */
 
 #ifdef CONFIG_OWE

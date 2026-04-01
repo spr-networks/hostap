@@ -1620,10 +1620,12 @@ int hostapd_is_dfs_required(struct hostapd_iface *iface)
 }
 
 
-int hostapd_dfs_start_cac(struct hostapd_iface *iface, int freq,
+int hostapd_dfs_start_cac(struct hostapd_data *hapd, int freq,
 			  int ht_enabled, int chan_offset, int chan_width,
 			  int cf1, int cf2)
 {
+	struct hostapd_iface *iface = hapd->iface;
+
 	if (!hostapd_is_freq_in_current_hw_info(iface, freq)) {
 		wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, DFS_EVENT_CAC_START
 			"Ignoring since freq=%d info is out of own range",
@@ -1649,7 +1651,7 @@ int hostapd_dfs_start_cac(struct hostapd_iface *iface, int freq,
 	}
 	/* TODO: How to check CAC time for ETSI weather channels? */
 	iface->dfs_cac_ms = 60000;
-	wpa_msg(iface->bss[0]->msg_ctx, MSG_INFO, DFS_EVENT_CAC_START
+	wpa_msg(hapd->msg_ctx, MSG_INFO, DFS_EVENT_CAC_START
 		"freq=%d chan=%d chan_offset=%d width=%d seg0=%d "
 		"seg1=%d cac_time=%ds%s",
 		freq, (freq - 5000) / 5, chan_offset, chan_width, cf1, cf2,

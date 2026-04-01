@@ -687,5 +687,11 @@ CONFIG_DPP2=y
 # Encrypted association frame support (needed for EPPKE and EAP in
 # Authentication frames)
 #CONFIG_ENC_ASSOC=y
+#
 # PMKSA caching privacy support
 #CONFIG_PMKSA_PRIVACY=y
+#
+# IEEE 802.1X (EAP) authentication in Authentication frames
+# IEEE P802.11bi/D4.0, 12.16.5 (IEEE 802.1X authentication utilizing
+# Authentication frames)
+#CONFIG_IEEE8021X_AUTH=y
