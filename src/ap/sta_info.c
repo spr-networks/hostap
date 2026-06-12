@@ -2096,11 +2096,22 @@ int ap_sta_re_add(struct hostapd_data *hapd, struct sta_info *sta)
 
 #ifdef CONFIG_IEEE80211BE
 	if (ap_sta_is_mld(hapd, sta)) {
+		struct hostapd_data *assoc_hapd;
+		struct sta_info *assoc_sta;
 		u8 mld_link_id = hapd->mld_link_id;
 
 		mld_link_sta = sta->mld_assoc_link_id != mld_link_id;
 		mld_link_addr = sta->mld_info.links[mld_link_id].peer_addr;
 		eml_cap = sta->mld_info.common_info.eml_capa;
+
+		/*
+		 * Re-authentication replaces the old MLD STA entries, so any
+		 * pending link reconfiguration state for the association is no
+		 * longer valid.
+		 */
+		assoc_sta = hostapd_ml_get_assoc_sta(hapd, sta, &assoc_hapd);
+		if (assoc_sta)
+			ml_deinit_link_reconf_req(&assoc_sta->reconf_req);
 
 		/*
 		 * In case the AP is affiliated with an AP MLD, we need to
