@@ -17,7 +17,7 @@ struct bitfield * bitfield_dup(const struct bitfield *orig);
 void bitfield_free(struct bitfield *bf);
 void bitfield_set(struct bitfield *bf, size_t bit);
 void bitfield_clear(struct bitfield *bf, size_t bit);
-int bitfield_is_set(struct bitfield *bf, size_t bit);
+int bitfield_is_set(const struct bitfield *bf, size_t bit);
 int bitfield_get_first_zero(struct bitfield *bf);
 int bitfield_union_in_place(struct bitfield *a, const struct bitfield *b);
 struct bitfield * bitfield_union(const struct bitfield *a,

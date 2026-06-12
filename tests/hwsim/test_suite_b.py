@@ -27,18 +27,9 @@ def check_suite_b_tls_lib(dev, dhe=False, level128=False):
         return
     if tls.startswith("wolfSSL"):
         return
-    if not tls.startswith("OpenSSL"):
-        raise HwsimSkip("TLS library not supported for Suite B: " + tls)
-    supported = False
-    for ver in ['1.0.2', '1.1.0', '1.1.1', '3.']:
-        if "build=OpenSSL " + ver in tls and "run=OpenSSL " + ver in tls:
-            supported = True
-            break
-        if not dhe and not level128 and "build=OpenSSL " + ver in tls and "run=BoringSSL" in tls:
-            supported = True
-            break
-    if not supported:
-        raise HwsimSkip("OpenSSL version not supported for Suite B: " + tls)
+    if tls.startswith("OpenSSL"):
+        return
+    raise HwsimSkip("TLS library not supported for Suite B: " + tls)
 
 def suite_b_ap_params():
     params = {"ssid": "test-suite-b",

@@ -23,10 +23,10 @@
 #define NAN_TEST_MAX_LATENCY     3
 #define NAN_TEST_PUBLISH_INST_ID 12
 
-static const u8 pub_nmi[] = { 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
-static const u8 pub_ndi[] = { 0x00, 0xAA, 0xAA, 0x00, 0x00, 0x00 };
-static const u8 sub_nmi[] = { 0x00, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB };
-static const u8 sub_ndi[] = { 0x00, 0xBB, 0xBB, 0xBB, 0x00, 0x00 };
+static const u8 g_pub_nmi[] = { 0x00, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA };
+static const u8 g_pub_ndi[] = { 0x00, 0xAA, 0xAA, 0x00, 0x00, 0x00 };
+static const u8 g_sub_nmi[] = { 0x00, 0xBB, 0xBB, 0xBB, 0xBB, 0xBB };
+static const u8 g_sub_ndi[] = { 0x00, 0xBB, 0xBB, 0xBB, 0x00, 0x00 };
 
 /**
  * struct nan_test_action - NAN test action context
@@ -375,7 +375,7 @@ static int nan_ndp_notify_action(struct nan_device *dev, void *ctx)
 			wpa_printf(MSG_INFO, "%s: Accepting request",
 				   dev->name);
 
-			os_memcpy(params->u.resp.resp_ndi, pub_ndi, ETH_ALEN);
+			os_memcpy(params->u.resp.resp_ndi, dev->ndi, ETH_ALEN);
 			params->u.resp.status = NAN_NDP_STATUS_ACCEPTED;
 			dev->conf->schedule_cb(&params->sched);
 			params->sched.elems = dev->global->elems;
@@ -421,7 +421,7 @@ static int nan_ndp_notify_action(struct nan_device *dev, void *ctx)
 			wpa_printf(MSG_INFO, "%s: Accepting response",
 				   dev->name);
 
-			os_memcpy(params->u.resp.resp_ndi, sub_ndi, ETH_ALEN);
+			os_memcpy(params->u.resp.resp_ndi, dev->ndi, ETH_ALEN);
 			params->u.resp.status = NAN_NDP_STATUS_ACCEPTED;
 
 			if (!dev->conf->schedule_conf_cb) {
@@ -585,18 +585,19 @@ nan_test_ndp_action_notfi_cb(void *ctx,
  * nan_test_ndp_connected_cb - Callback for NDP connected
  * @ctx: Pointer to &struct nan_device
  * @params: NDP action notification parameters
+ * Returns: 0 on success, -1 on failure
  *
  * The handling of the event is done asynchronously through the NAN test actions
  * processing.
  */
-static void nan_test_ndp_connected_cb(void *ctx,
-				      struct nan_ndp_connection_params *params)
+static int nan_test_ndp_connected_cb(void *ctx,
+				     struct nan_ndp_connection_params *params)
 {
 	struct nan_device *dev = ctx;
 	struct nan_peer_schedule sched;
 	struct nan_peer_potential_avail pot;
 
-	DEV_NOT_INIT_ERR_VOID(dev);
+	DEV_NOT_INIT_ERR(dev);
 
 	wpa_printf(MSG_INFO,
 		   "%s: %s: Enter. local_ndi=" MACSTR " peer_ndi=" MACSTR,
@@ -618,6 +619,7 @@ static void nan_test_ndp_connected_cb(void *ctx,
 				   dev->name, dev->csid,
 				   dev->conf->ndp_confs[dev->n_ndps].
 				   expected_csid);
+			return -1;
 		}
 	}
 
@@ -625,6 +627,8 @@ static void nan_test_ndp_connected_cb(void *ctx,
 			    0, params->ssi, params->ssi_len, NAN_CS_NONE, NULL);
 
 	dev->connected_notify_received = true;
+
+	return 0;
 }
 
 
@@ -635,6 +639,10 @@ static void nan_test_ndp_connected_cb(void *ctx,
  * @local_ndi: Local NDI address
  * @peer_ndi: Peer NDI address
  * @reason: Reason for disconnection
+ * @locally_generated: true if locally generated, false if triggered by peer
+ * @remove_sta: true if the NDI station should be removed
+ * @failure: true if NDP setup failed, false if graceful disconnection
+ * @gtk_id: GTK key ID used for the NDP; 0 if no GTK was used
  *
  * The handling of the event is done asynchronously through the NAN test actions
  * processing.
@@ -642,7 +650,11 @@ static void nan_test_ndp_connected_cb(void *ctx,
 static void nan_test_ndp_disconnected_cb(void *ctx, struct nan_ndp_id *ndp_id,
 					 const u8 *local_ndi,
 					 const u8 *peer_ndi,
-					 enum nan_reason reason)
+					 enum nan_reason reason,
+					 bool locally_generated,
+					 bool remove_sta,
+					 bool failure,
+					 u8 gtk_id)
 {
 	struct nan_device *dev = ctx;
 
@@ -735,7 +747,8 @@ static int nan_test_send_naf_cb(void *ctx, const u8 *dst, const u8 *src,
 		   MAC2STR(dst));
 
 	dl_list_for_each(curd, &dev->global->devs, struct nan_device, list) {
-		if (ether_addr_equal(curd->nmi, dst)) {
+		if (ether_addr_equal(curd->nmi, dst) ||
+		    ether_addr_equal(curd->ndi, dst)) {
 			found = true;
 			break;
 		}
@@ -848,6 +861,33 @@ static bool nan_test_is_valid_publish_id_cb(void *ctx, u8 instance_id,
 }
 
 
+/*
+ * nan_test_set_peer_schedule_cb - Set peer schedule callback
+ *
+ * @ctx: Pointer to &struct nan_device
+ * @sched: Pointer to &struct nan_peer_schedule to be filled
+ */
+static int
+nan_test_set_peer_schedule_cb(void *ctx, const u8 *nmi_addr, bool new_sta,
+			      u16 cdw, u8 sequence_id,
+			      u16 max_channel_switch_time,
+			      const struct nan_peer_schedule *sched,
+			      const struct wpabuf *ulw_elems)
+{
+	struct nan_device *dev = (struct nan_device *)ctx;
+
+	DEV_NOT_INIT_ERR(dev);
+
+	wpa_printf(MSG_INFO, "%s: %s: Enter", dev->name, __func__);
+	wpa_printf(MSG_INFO, "%s: nmi_addr=" MACSTR
+		   " new_sta=%d cdw=%u sequence_id=%u max_channel_switch_time=%u",
+		   dev->name, MAC2STR(nmi_addr), new_sta, cdw, sequence_id,
+		   max_channel_switch_time);
+
+	return 0;
+}
+
+
 /**
  * nan_test_dev_init - Initialize a test device instance
  * @dev: the instance of the device to initialize
@@ -868,6 +908,7 @@ static int nan_test_dev_init(struct nan_device *dev)
 	nan.send_naf = nan_test_send_naf_cb;
 	nan.get_chans = nan_test_get_chans_cb;
 	nan.is_valid_publish_id = nan_test_is_valid_publish_id_cb;
+	nan.set_peer_schedule = nan_test_set_peer_schedule_cb;
 
 	/* Awake on every DW on 2 GHz and 5 GHz */
 	nan.dev_capa.cdw_info = 0x9;
@@ -881,9 +922,8 @@ static int nan_test_dev_init(struct nan_device *dev)
 	nan.dev_capa.capa = 0;
 
 	nan.dev_capa_ext_reg_info = 0;
-	nan.dev_capa_ext_pairing_npk_caching =
-		NAN_DEV_CAPA_EXT_INFO_1_PAIRING_SETUP |
-		NAN_DEV_CAPA_EXT_INFO_1_NPK_NIK_CACHING;
+	nan.pairing_cfg.npk_caching = true;
+	nan.pairing_cfg.pairing_setup = true;
 
 	dev->nan = nan_init(&nan);
 	if (!dev->nan) {
@@ -900,12 +940,14 @@ static int nan_test_dev_init(struct nan_device *dev)
  * @global: NAN test global data structure
  * @name: Name of the device
  * @nmi: NAN Management interface address
+ * @ndi: NAN Data interface address
  * @cconf: NAN cluster configuration
  * @dconf: Test device configuration
  */
 static struct nan_device *
 nan_test_start_dev(struct nan_test_global *global,
 		   const char *name, const u8 *nmi,
+		   const u8 *ndi,
 		   struct nan_cluster_config *conf,
 		   const struct nan_test_dev_conf *dconf)
 {
@@ -922,6 +964,7 @@ nan_test_start_dev(struct nan_test_global *global,
 		nlen = sizeof(dev->name) - 1;
 	os_memcpy(dev->name, name, nlen);
 	os_memcpy(dev->nmi, nmi, sizeof(dev->nmi));
+	os_memcpy(dev->ndi, ndi, sizeof(dev->ndi));
 	dl_list_init(&dev->list);
 	dev->global = global;
 
@@ -967,7 +1010,23 @@ nan_test_setup_devices(struct nan_test_global *global,
 		.master_pref = 2,
 		.dual_band = 1,
 	};
-	const u8 pot_avail[] = {
+	/*
+	 * Device attributes containing:
+	 * 1. Device capability attribute (ID=0x0F, len=10):
+	 *    - map_id=0
+	 *    - cdw_info=0x0009 (awake on every DW on 2G and 5G)
+	 *    - supported_bands=0x07 (2G, 5G, 6G)
+	 *    - op_mode=0x01
+	 *    - n_antennas=0x22
+	 *    - channel_switch_time=0x000a (10)
+	 *    - capa=0x00
+	 * 2. Availability attribute (ID=0x12, len=12)
+	 */
+	const u8 attrs[] = {
+		/* Device capability attribute */
+		0x0f, 0x09, 0x00, 0x00, 0x09, 0x00, 0x07, 0x01,
+		0x22, 0x0a, 0x00, 0x00,
+		/* Availability attribute */
 		0x12, 0x0c, 0x00, 0x01, 0x20, 0x00, 0x07, 0x00,
 		0x1a, 0x00, 0x11, 0x51, 0xff, 0x07, 0x00,
 	};
@@ -976,18 +1035,18 @@ nan_test_setup_devices(struct nan_test_global *global,
 
 	wpa_printf(MSG_INFO, "%s: Enter\n", __func__);
 
-	pub = nan_test_start_dev(global, "publisher", pub_nmi, &cconf,
-				 pub_conf);
+	pub = nan_test_start_dev(global, "publisher", g_pub_nmi, g_pub_ndi,
+				 &cconf, pub_conf);
 	if (!pub)
 		goto fail;
 
-	sub = nan_test_start_dev(global, "subscriber", sub_nmi, &cconf,
-				 sub_conf);
+	sub = nan_test_start_dev(global, "subscriber", g_sub_nmi, g_sub_ndi,
+				 &cconf, sub_conf);
 	if (!sub)
 		goto fail;
 
-	nan_add_peer(pub->nan, sub_nmi, pot_avail, sizeof(pot_avail));
-	nan_add_peer(sub->nan, pub_nmi, pot_avail, sizeof(pot_avail));
+	nan_add_peer(pub->nan, g_sub_nmi, attrs, sizeof(attrs));
+	nan_add_peer(sub->nan, g_pub_nmi, attrs, sizeof(attrs));
 
 	wpa_printf(MSG_INFO, "\n%s: Done\n", __func__);
 	return sub;
@@ -998,7 +1057,7 @@ fail:
 }
 
 
-static int nan_test_ndp_request(struct nan_device *sub)
+static int nan_test_ndp_request(struct nan_device *sub, const u8 *pub_nmi)
 {
 	struct nan_ndp_params *params;
 	struct nan_test_action *action;
@@ -1013,7 +1072,7 @@ static int nan_test_ndp_request(struct nan_device *sub)
 
 	params->type = NAN_NDP_ACTION_REQ;
 	os_memcpy(params->ndp_id.peer_nmi, pub_nmi, ETH_ALEN);
-	os_memcpy(params->ndp_id.init_ndi, sub_ndi, ETH_ALEN);
+	os_memcpy(params->ndp_id.init_ndi, sub->ndi, ETH_ALEN);
 	params->ndp_id.id = ++sub->counter;
 	params->qos.min_slots = NAN_TEST_MIN_SLOTS;
 	params->qos.max_latency = NAN_TEST_MAX_LATENCY;
@@ -1172,7 +1231,7 @@ static int nan_test_run(void)
 		}
 
 		for (i = 0; i < sub->conf->n_ndps; i++) {
-			int ret = nan_test_ndp_request(sub);
+			int ret = nan_test_ndp_request(sub, g_pub_nmi);
 
 			if (!ret)
 				ret = nan_test_run_actions(&global);
@@ -1425,12 +1484,38 @@ static int nan_test_crypto_auth_token(void)
 }
 
 
+static int nan_test_derive_nd_pmk(void)
+{
+	u8 pmk[PMK_LEN];
+	/* Wi-Fi Aware spec v4.0, Appendix M.1 - Test Vector 1 */
+	const char *pwd = "NAN";
+	const u8 service_id[NAN_SERVICE_ID_LEN] = {
+		0x2b, 0x9c, 0x45, 0x0f, 0x66, 0x71,
+	};
+	const u8 nmi[ETH_ALEN] = {
+		0x02, 0x90, 0x4c, 0x12, 0xd0, 0x01,
+	};
+	const u8 expected_pmk_ccm128[PMK_LEN] = {
+		0xee, 0x35, 0x85, 0x06, 0x30, 0x56, 0xd1, 0x64,
+		0xd1, 0x54, 0x54, 0xad, 0x39, 0x01, 0x0d, 0x4e,
+		0x26, 0x40, 0xb0, 0xd8, 0x2f, 0xb2, 0x4a, 0x2d,
+		0x68, 0x99, 0x86, 0x2d, 0x27, 0x3c, 0x68, 0xbf,
+	};
+
+	NAN_CRYPTO_FAIL(nan_crypto_derive_nd_pmk(pwd, service_id,
+						 NAN_CS_SK_CCM_128, nmi, pmk));
+	NAN_CRYPTO_FAIL(os_memcmp(pmk, expected_pmk_ccm128, PMK_LEN));
+
+	return 0;
+}
+
 int nan_test_crypto(void)
 {
 	NAN_CRYPTO_FAIL(nan_test_crypto_key_mic());
 	NAN_CRYPTO_FAIL(nan_test_crypto_pmkid());
 	NAN_CRYPTO_FAIL(nan_test_ptk());
 	NAN_CRYPTO_FAIL(nan_test_crypto_auth_token());
+	NAN_CRYPTO_FAIL(nan_test_derive_nd_pmk());
 
 	return 0;
 }

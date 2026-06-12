@@ -294,6 +294,10 @@ struct wpa_auth_config {
 	unsigned int assoc_frame_encryption:1;
 	unsigned int pmksa_caching_privacy:1;
 	unsigned int eap_using_authentication_frames:1;
+#ifdef CONFIG_PASN
+	/* Whether to allow unauthenticated EPPKE (EPPKE without base AKM) */
+	bool eppke_unauth;
+#endif /* CONFIG_PASN */
 #endif /* CONFIG_ENC_ASSOC */
 
 	int owe_ptk_workaround;
@@ -757,5 +761,9 @@ int wpa_write_802_1x_rsne(struct wpa_authenticator *wpa_auth, u8 *buf,
 			  size_t len, const u8 *pmkid, int akmp,
 			  int pairwise_cipher, int group_cipher,
 			  int group_mgmt_cipher, enum mfp_options mfp);
+int wpa_write_eppke_rsne(const u8 *wpa_ie, size_t wpa_ie_len,
+			 u8 *buf, size_t len,
+			 const u8 *pmkid, int akmp,
+			 int pairwise_cipher, enum mfp_options mfp);
 
 #endif /* WPA_AUTH_H */

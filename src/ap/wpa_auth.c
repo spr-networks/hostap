@@ -55,8 +55,6 @@ static void wpa_sm_call_step(void *eloop_ctx, void *timeout_ctx);
 static void wpa_group_sm_step(struct wpa_authenticator *wpa_auth,
 			      struct wpa_group *group);
 static void wpa_request_new_ptk(struct wpa_state_machine *sm);
-static int wpa_gtk_update(struct wpa_authenticator *wpa_auth,
-			  struct wpa_group *group);
 static int wpa_group_config_group_keys(struct wpa_authenticator *wpa_auth,
 				       struct wpa_group *group);
 static int wpa_derive_ptk(struct wpa_state_machine *sm, const u8 *snonce,
@@ -64,8 +62,6 @@ static int wpa_derive_ptk(struct wpa_state_machine *sm, const u8 *snonce,
 			  struct wpa_ptk *ptk, int force_sha256,
 			  u8 *pmk_r0, u8 *pmk_r1, u8 *pmk_r0_name,
 			  size_t *key_len, bool no_kdk);
-static void wpa_group_free(struct wpa_authenticator *wpa_auth,
-			   struct wpa_group *group);
 static void wpa_group_get(struct wpa_authenticator *wpa_auth,
 			  struct wpa_group *group);
 static void wpa_group_put(struct wpa_authenticator *wpa_auth,
@@ -918,8 +914,6 @@ struct wpa_authenticator * wpa_init(const u8 *addr,
 
 	if (conf->tx_bss_auth && conf->beacon_prot) {
 		conf->tx_bss_auth->non_tx_beacon_prot = true;
-		if (!conf->tx_bss_auth->conf.beacon_prot)
-			conf->tx_bss_auth->conf.beacon_prot = true;
 		if (!conf->tx_bss_auth->conf.group_mgmt_cipher)
 			conf->tx_bss_auth->conf.group_mgmt_cipher =
 				conf->group_mgmt_cipher;
@@ -5974,7 +5968,10 @@ static int wpa_gtk_update(struct wpa_authenticator *wpa_auth,
 	if (!wpa_auth->non_tx_beacon_prot &&
 	     !wpa_auth_pmf_enabled(conf))
 		return ret;
-	if (!conf->beacon_prot)
+
+	/* Skip BIGTK generation if neither the TX BSS nor any of the non-TX BSS
+	 * enable beacon protection */
+	if (!wpa_auth->non_tx_beacon_prot && !conf->beacon_prot)
 		return ret;
 
 	if (wpa_auth->conf.tx_bss_auth) {
@@ -6289,6 +6286,8 @@ static int wpa_group_config_group_keys(struct wpa_authenticator *wpa_auth,
 {
 	struct wpa_auth_config *conf = &wpa_auth->conf;
 	int ret = 0;
+	enum wpa_alg alg;
+	size_t len;
 
 	if (wpa_auth_set_key(wpa_auth, group->vlan_id,
 			     wpa_cipher_to_alg(conf->wpa_group),
@@ -6297,39 +6296,44 @@ static int wpa_group_config_group_keys(struct wpa_authenticator *wpa_auth,
 			     KEY_FLAG_GROUP_TX_DEFAULT) < 0)
 		ret = -1;
 
-	if (wpa_auth_pmf_enabled(conf)) {
-		enum wpa_alg alg;
-		size_t len;
+	alg = wpa_cipher_to_alg(conf->group_mgmt_cipher);
+	len = wpa_cipher_key_len(conf->group_mgmt_cipher);
 
-		alg = wpa_cipher_to_alg(conf->group_mgmt_cipher);
-		len = wpa_cipher_key_len(conf->group_mgmt_cipher);
+	if (wpa_auth_pmf_enabled(conf) && ret == 0 &&
+	    wpa_auth_set_key(wpa_auth, group->vlan_id, alg,
+			     broadcast_ether_addr, group->GN_igtk,
+			     group->IGTK[group->GN_igtk - 4], len,
+			     KEY_FLAG_GROUP_TX_DEFAULT) < 0)
+		ret = -1;
 
-		if (ret == 0 &&
-		    wpa_auth_set_key(wpa_auth, group->vlan_id, alg,
-				     broadcast_ether_addr, group->GN_igtk,
-				     group->IGTK[group->GN_igtk - 4], len,
-				     KEY_FLAG_GROUP_TX_DEFAULT) < 0)
-			ret = -1;
+	/* Skip setting of BIGTK in following cases:
+	 * PMF is not enabled and no beacon protection requirement for any of
+	 * the non TX BSSs in the MBSSID set.
+	 * Groups with a non-zero VLAN ID since only a single BIGTK is shared
+	 * for all VLANs in a BSS.
+	 * If beacon protection is enabled neither in the TX BSS nor in any of
+	 * the non-TX BSS.
+	 */
+	if (!wpa_auth->non_tx_beacon_prot && !wpa_auth_pmf_enabled(conf))
+		return ret;
 
-		/* Skip setting of BIGTK for groups with a non-zero VLAN ID
-		 * since only a single BIGTK is shared for all VLANs in a BSS.
-		 */
-		if (ret || !conf->beacon_prot || group->vlan_id)
+	if (ret || (!conf->beacon_prot && !wpa_auth->non_tx_beacon_prot) ||
+	    group->vlan_id)
+		return ret;
+
+	if (wpa_auth->conf.tx_bss_auth) {
+		wpa_auth = wpa_auth->conf.tx_bss_auth;
+		group = wpa_auth->group;
+		if (!group->bigtk_set || group->bigtk_configured)
 			return ret;
-		if (wpa_auth->conf.tx_bss_auth) {
-			wpa_auth = wpa_auth->conf.tx_bss_auth;
-			group = wpa_auth->group;
-			if (!group->bigtk_set || group->bigtk_configured)
-				return ret;
-		}
-		if (wpa_auth_set_key(wpa_auth, group->vlan_id, alg,
-				     broadcast_ether_addr, group->GN_bigtk,
-				     group->BIGTK[group->GN_bigtk - 6], len,
-				     KEY_FLAG_GROUP_TX_DEFAULT) < 0)
-			ret = -1;
-		else
-			group->bigtk_configured = true;
 	}
+	if (wpa_auth_set_key(wpa_auth, group->vlan_id, alg,
+			     broadcast_ether_addr, group->GN_bigtk,
+			     group->BIGTK[group->GN_bigtk - 6], len,
+			     KEY_FLAG_GROUP_TX_DEFAULT) < 0)
+		ret = -1;
+	else
+		group->bigtk_configured = true;
 
 	return ret;
 }
@@ -8054,7 +8058,9 @@ u8 * wpa_auth_eid_key_delivery(u8 *eid, size_t max_len,
 	u8 *kde, *buf;
 	const u8 *ptr;
 	size_t slice_len;
-	const size_t buflen = 1024;
+	size_t buflen = 1024;
+
+	buflen += 2 + 255; /* extra room for SAE PW IDs KDE */
 
 	/* TODO: Make sure there is sufficient length for the element */
 	buf = os_malloc(buflen);
@@ -8079,6 +8085,25 @@ u8 * wpa_auth_eid_key_delivery(u8 *eid, size_t max_len,
 		kde_len = 2 + RSN_SELECTOR_LEN + 2 + gsm->GTK_len +
 			ieee80211w_kde_len(sm);
 	}
+
+#ifdef CONFIG_SAE
+	/* For EPPKE, the 4-way handshake is skipped, so deliver the SAE
+	 * Password Identifiers KDE here in the encrypted (Re)Association
+	 * Response frame. */
+	if (sm->auth_alg == WLAN_AUTH_EPPKE &&
+	    wpa_key_mgmt_sae(sm->wpa_key_mgmt) &&
+	    sm->wpa_auth->conf.sae_pw_id_num &&
+	    sm->sae_pw_id &&
+	    ieee802_11_rsnx_capab(sm->rsnxe,
+				  WLAN_RSNX_CAPAB_SAE_PW_ID_CHANGE)) {
+		u8 *new_kde = add_sae_pw_ids(sm, kde, buf + buflen);
+
+		if (new_kde) {
+			kde_len += new_kde - kde;
+			kde = new_kde;
+		}
+	}
+#endif /* CONFIG_SAE */
 
 	if (!is_ml && sm->group->wpa_group_state == WPA_GROUP_SETKEYSDONE)
 		wpa_auth_get_seqnum(sm->wpa_auth, NULL, gsm->GN, rsc);
@@ -8167,7 +8192,7 @@ bool wpa_auth_ap_sta_support_pmkid_privacy(struct wpa_state_machine *sm)
 
 	conf = &sm->wpa_auth->conf;
 
-	return conf->assoc_frame_encryption &&
+	return conf->pmksa_caching_privacy &&
 		ieee802_11_rsnx_capab(sm->rsnxe,
 				      WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
 }

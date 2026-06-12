@@ -170,6 +170,7 @@ void hostapd_config_defaults_bss(struct hostapd_bss_config *bss)
 #ifdef CONFIG_TESTING_OPTIONS
 	bss->sae_commit_status = -1;
 	bss->test_assoc_comeback_type = -1;
+	bss->association_response_status_code = -1;
 #endif /* CONFIG_TESTING_OPTIONS */
 
 #ifdef CONFIG_PASN
@@ -1081,6 +1082,9 @@ void hostapd_config_free_bss(struct hostapd_bss_config *conf)
 
 #ifdef CONFIG_PASN
 	os_free(conf->pasn_groups);
+#ifdef CONFIG_TESTING_OPTIONS
+	os_free(conf->pasn_test_groups);
+#endif /* CONFIG_TESTING_OPTIONS */
 #endif /* CONFIG_PASN */
 
 	wpabuf_clear_free(conf->sae_pw_id_key);

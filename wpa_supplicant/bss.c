@@ -2001,18 +2001,24 @@ void wpa_bss_parse_basic_ml_element(struct wpa_supplicant *wpa_s,
 
 	/* Link ID Info, BSS Parameters Change Count (see control/control_mask)
 	 */
-	link_id = ml_basic_common_info->variable[0] & EHT_ML_LINK_ID_MSK;
 	pos = 1 + 1;
 
 	/* Medium Synchronization Delay Information */
 	if (le_to_host16(eht_ml->ml_control) &
-	    BASIC_MULTI_LINK_CTRL_PRES_MSD_INFO)
+	    BASIC_MULTI_LINK_CTRL_PRES_MSD_INFO) {
+		if (ml_basic_common_info->len <
+		    sizeof(*ml_basic_common_info) + pos + 2)
+			goto out;
 		pos += 2;
+	}
 
 	/* EML Capabilities */
 	bss->eml_capa = 0;
 	if (le_to_host16(eht_ml->ml_control) &
 	    BASIC_MULTI_LINK_CTRL_PRES_EML_CAPA) {
+		if (ml_basic_common_info->len <
+		    sizeof(*ml_basic_common_info) + pos + 2)
+			goto out;
 		bss->eml_capa =
 			WPA_GET_LE16(&ml_basic_common_info->variable[pos]);
 		pos += 2;
@@ -2020,6 +2026,8 @@ void wpa_bss_parse_basic_ml_element(struct wpa_supplicant *wpa_s,
 
 	/* MLD Capabilities And Operations (always present, see
 	 * control/control_mask) */
+	if (ml_basic_common_info->len < sizeof(*ml_basic_common_info) + pos + 2)
+		goto out;
 	bss->mld_capa = WPA_GET_LE16(&ml_basic_common_info->variable[pos]);
 	pos += 2;
 
@@ -2055,6 +2063,11 @@ void wpa_bss_parse_basic_ml_element(struct wpa_supplicant *wpa_s,
 		goto out;
 
 	link_id = ml_basic_common_info->variable[0] & EHT_ML_LINK_ID_MSK;
+	if (link_id >= MAX_NUM_MLD_LINKS) {
+		wpa_printf(MSG_DEBUG, "MLD: Invalid link ID %u in Basic MLE",
+			   link_id);
+		goto out;
+	}
 
 	os_memcpy(bss->mld_addr, ml_basic_common_info->mld_addr, ETH_ALEN);
 
@@ -2238,7 +2251,8 @@ u16 wpa_bss_parse_reconf_ml_element(struct wpa_supplicant *wpa_s,
 			u8 link_id;
 
 			link_id = control & EHT_PER_STA_RECONF_CTRL_LINK_ID_MSK;
-			removed_links |= BIT(link_id);
+			if (link_id < MAX_NUM_MLD_LINKS)
+				removed_links |= BIT(link_id);
 		}
 
 		pos += 2 + sub_elem_len;

@@ -1393,9 +1393,28 @@ static int wpa_supplicant_check_group_cipher(struct wpa_sm *sm,
 struct wpa_gtk_data {
 	enum wpa_alg alg;
 	int tx, key_rsc_len, keyidx;
-	u8 gtk[32];
+	u8 gtk[WPA_GTK_MAX_LEN];
 	int gtk_len;
 };
+
+
+static int wpa_supplicant_validate_gtk_kde_len(size_t gtk_len)
+{
+	if (gtk_len < 2 || gtk_len - 2 > WPA_GTK_MAX_LEN)
+		return -1;
+
+	return 0;
+}
+
+
+static int wpa_supplicant_validate_mlo_gtk_kde_len(size_t gtk_len)
+{
+	if (gtk_len < RSN_MLO_GTK_KDE_PREFIX_LENGTH ||
+	    gtk_len - RSN_MLO_GTK_KDE_PREFIX_LENGTH > WPA_GTK_MAX_LEN)
+		return -1;
+
+	return 0;
+}
 
 
 static int wpa_supplicant_install_gtk(struct wpa_sm *sm,
@@ -1591,8 +1610,7 @@ static int wpa_supplicant_mlo_gtk(struct wpa_sm *sm, u8 link_id, const u8 *gtk,
 			     "RSN: received GTK in pairwise handshake",
 			     gtk, gtk_len);
 
-	if (gtk_len < RSN_MLO_GTK_KDE_PREFIX_LENGTH ||
-	    gtk_len - RSN_MLO_GTK_KDE_PREFIX_LENGTH > sizeof(gd.gtk))
+	if (wpa_supplicant_validate_mlo_gtk_kde_len(gtk_len) < 0)
 		return -1;
 
 	gd.keyidx = gtk[0] & 0x3;
@@ -1668,7 +1686,7 @@ static int wpa_supplicant_pairwise_gtk(struct wpa_sm *sm,
 	wpa_hexdump_key(MSG_DEBUG, "RSN: received GTK in pairwise handshake",
 			gtk, gtk_len);
 
-	if (gtk_len < 2 || gtk_len - 2 > sizeof(gd.gtk))
+	if (wpa_supplicant_validate_gtk_kde_len(gtk_len) < 0)
 		return -1;
 
 	gd.keyidx = gtk[0] & 0x3;
@@ -2875,6 +2893,14 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 			goto failed;
 		}
 
+		if (wpa_supplicant_validate_mlo_gtk_kde_len(
+			    ie.mlo_gtk_len[i]) < 0) {
+			wpa_msg(sm->ctx->msg_ctx, MSG_WARNING,
+				"RSN: Invalid MLO GTK KDE length %zu for link ID %u",
+				ie.mlo_gtk_len[i], i);
+			goto failed;
+		}
+
 		if (sm->mgmt_group_cipher != WPA_CIPHER_GTK_NOT_USED &&
 		    wpa_cipher_valid_mgmt_group(sm->mgmt_group_cipher) &&
 		    wpa_validate_mlo_ieee80211w_kdes(sm, i, &ie) < 0)
@@ -2892,6 +2918,14 @@ static void wpa_supplicant_process_3_of_4(struct wpa_sm *sm,
 			"WPA: GTK IE in unencrypted key data");
 		goto failed;
 	}
+
+	if (!mlo && ie.gtk &&
+	    wpa_supplicant_validate_gtk_kde_len(ie.gtk_len) < 0) {
+		wpa_msg(sm->ctx->msg_ctx, MSG_WARNING,
+			"WPA: Invalid GTK KDE length %zu", ie.gtk_len);
+		goto failed;
+	}
+
 	if (!mlo && ie.igtk && !(key_info & WPA_KEY_INFO_ENCR_KEY_DATA)) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_WARNING,
 			"WPA: IGTK KDE in unencrypted key data");
@@ -3447,18 +3481,13 @@ static void wpa_supplicant_process_1_of_2(struct wpa_sm *sm,
 		goto failed;
 	}
 	gtk_len = ie.gtk_len;
-	if (gtk_len < 2) {
+	if (wpa_supplicant_validate_gtk_kde_len(gtk_len) < 0) {
 		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
 			"RSN: Invalid GTK KDE length (%u) in Group Key msg 1/2",
 			gtk_len);
 		goto failed;
 	}
 	gtk_len -= 2;
-	if (gtk_len > sizeof(gd.gtk)) {
-		wpa_msg(sm->ctx->msg_ctx, MSG_INFO,
-			"RSN: Too long GTK in GTK KDE (len=%u)", gtk_len);
-		goto failed;
-	}
 	maxkeylen = gd.gtk_len = gtk_len;
 
 #ifdef CONFIG_OCV
@@ -7782,6 +7811,13 @@ int process_encrypted_assoc_resp(struct wpa_sm *sm, int valid_links,
 	    (valid_links != -1 &&
 	     process_key_delivery_ml(sm, &kde, valid_links) < 0))
 		goto fail;
+
+	/* Process SAE Password Identifiers KDE if present in the encrypted
+	 * (Re)Association Response frame (EPPKE path). */
+	if (kde.sae_pw_ids && wpa_key_mgmt_sae(sm->key_mgmt) &&
+	    sm->sae_pw_id_change)
+		wpa_sm_sae_pw_id_change(sm, kde.sae_pw_ids,
+					kde.sae_pw_ids_len);
 
 	wpa_sm_set_rekey_offload(sm);
 

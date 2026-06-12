@@ -80,6 +80,7 @@ struct nan_test_dev_conf {
  * @global: Pointer to NAN test global data structure
  * @name: Test device name
  * @nmi: Test device NMI
+ * @ndi: Test device NDI
  * @counter: Device counter for NDP various purposes
  * @pot_avail: Device potential availability
  * @pot_avail_len: Length of the device potential availability
@@ -100,6 +101,7 @@ struct nan_device {
 
 	u8 name[NAN_TEST_NAME_MAX];
 	u8 nmi[ETH_ALEN];
+	u8 ndi[ETH_ALEN];
 	u32 counter;
 
 	u8 *pot_avail;

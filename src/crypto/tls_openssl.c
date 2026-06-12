@@ -2020,8 +2020,9 @@ static int tls_match_altsubject_component(X509 *cert, int type,
 		gen = sk_GENERAL_NAME_value(ext, i);
 		if (gen->type != type)
 			continue;
-		if (os_strlen((char *) gen->d.ia5->data) == len &&
-		    os_memcmp(value, gen->d.ia5->data, len) == 0)
+		if ((size_t) ASN1_STRING_length(gen->d.ia5) == len &&
+		    os_memcmp(value, ASN1_STRING_get0_data(gen->d.ia5), len) ==
+		    0)
 			found++;
 	}
 
@@ -2162,7 +2163,7 @@ static int match_dn_field(const X509 *cert, int nid, const char *field,
 			  const struct tls_dn_field_order_cnt *dn_cnt)
 {
 	int i, ret = 0, len, config_dn_field_index, match_index = 0;
-	X509_NAME *name;
+	const X509_NAME *name;
 
 	len = os_strlen(value);
 	name = X509_get_subject_name((X509 *) cert);
@@ -2174,9 +2175,10 @@ static int match_dn_field(const X509 *cert, int nid, const char *field,
 		return 0;
 
 	/* Fetch value based on NID */
-	for (i = -1; (i = X509_NAME_get_index_by_NID(name, nid, i)) > -1;) {
-		X509_NAME_ENTRY *e;
-		ASN1_STRING *cn;
+	for (i = -1; (i = X509_NAME_get_index_by_NID((X509_NAME *) name, nid,
+						     i)) > -1;) {
+		const X509_NAME_ENTRY *e;
+		const ASN1_STRING *cn;
 
 		e = X509_NAME_get_entry(name, i);
 		if (!e)
@@ -2331,7 +2333,7 @@ static int tls_match_suffix_helper(X509 *cert, const char *match,
 	int i;
 	stack_index_t j;
 	int dns_name = 0;
-	X509_NAME *name;
+	const X509_NAME *name;
 
 	wpa_printf(MSG_DEBUG, "TLS: Match domain against %s%s",
 		   full ? "": "suffix ", match);
@@ -2344,10 +2346,10 @@ static int tls_match_suffix_helper(X509 *cert, const char *match,
 			continue;
 		dns_name++;
 		wpa_hexdump_ascii(MSG_DEBUG, "TLS: Certificate dNSName",
-				  gen->d.dNSName->data,
-				  gen->d.dNSName->length);
-		if (domain_suffix_match(gen->d.dNSName->data,
-					gen->d.dNSName->length,
+				  ASN1_STRING_get0_data(gen->d.dNSName),
+				  ASN1_STRING_length(gen->d.dNSName));
+		if (domain_suffix_match(ASN1_STRING_get0_data(gen->d.dNSName),
+					ASN1_STRING_length(gen->d.dNSName),
 					match, match_len, full) == 1) {
 			wpa_printf(MSG_DEBUG, "TLS: %s in dNSName found",
 				   full ? "Match" : "Suffix match");
@@ -2365,10 +2367,11 @@ static int tls_match_suffix_helper(X509 *cert, const char *match,
 	name = X509_get_subject_name(cert);
 	i = -1;
 	for (;;) {
-		X509_NAME_ENTRY *e;
-		ASN1_STRING *cn;
+		const X509_NAME_ENTRY *e;
+		const ASN1_STRING *cn;
 
-		i = X509_NAME_get_index_by_NID(name, NID_commonName, i);
+		i = X509_NAME_get_index_by_NID((X509_NAME *) name,
+					       NID_commonName, i);
 		if (i == -1)
 			break;
 		e = X509_NAME_get_entry(name, i);
@@ -2378,8 +2381,10 @@ static int tls_match_suffix_helper(X509 *cert, const char *match,
 		if (cn == NULL)
 			continue;
 		wpa_hexdump_ascii(MSG_DEBUG, "TLS: Certificate commonName",
-				  cn->data, cn->length);
-		if (domain_suffix_match(cn->data, cn->length,
+				  ASN1_STRING_get0_data(cn),
+				  ASN1_STRING_length(cn));
+		if (domain_suffix_match(ASN1_STRING_get0_data(cn),
+					ASN1_STRING_length(cn),
 					match, match_len, full) == 1) {
 			wpa_printf(MSG_DEBUG, "TLS: %s in commonName found",
 				   full ? "Match" : "Suffix match");
@@ -2588,7 +2593,7 @@ static void openssl_tls_cert_event(struct tls_connection *conn,
 		    gen->type != GEN_URI)
 			continue;
 
-		pos = os_malloc(10 + gen->d.ia5->length + 1);
+		pos = os_malloc(10 + ASN1_STRING_length(gen->d.ia5) + 1);
 		if (pos == NULL)
 			break;
 		altsubject[num_altsubject++] = pos;
@@ -2608,8 +2613,9 @@ static void openssl_tls_cert_event(struct tls_connection *conn,
 			break;
 		}
 
-		os_memcpy(pos, gen->d.ia5->data, gen->d.ia5->length);
-		pos += gen->d.ia5->length;
+		os_memcpy(pos, ASN1_STRING_get0_data(gen->d.ia5),
+			  ASN1_STRING_length(gen->d.ia5));
+		pos += ASN1_STRING_length(gen->d.ia5);
 		*pos = '\0';
 	}
 	sk_GENERAL_NAME_pop_free(ext, GENERAL_NAME_free);

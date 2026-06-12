@@ -246,7 +246,31 @@ extern "C" {
 #define NAN_PUBLISH_TERMINATED "NAN-PUBLISH-TERMINATED "
 #define NAN_SUBSCRIBE_TERMINATED "NAN-SUBSCRIBE-TERMINATED "
 #define NAN_RECEIVE "NAN-RECEIVE "
+#define NAN_TRANSMIT_STATUS "NAN-TRANSMIT-STATUS "
 #define NAN_CLUSTER_JOIN "NAN-CLUSTER-JOIN "
+#define NAN_NDP_REQUEST "NAN-NDP-REQUEST "
+#define NAN_NDP_COUNTER_REQUEST "NAN-NDP-COUNTER-REQUEST "
+#define NAN_NDP_CONNECTED "NAN-NDP-CONNECTED "
+#define NAN_NDP_DISCONNECTED "NAN-NDP-DISCONNECTED "
+#define NAN_BOOTSTRAP_REQUEST "NAN-BOOTSTRAP-REQUEST "
+#define NAN_BOOTSTRAP_SUCCESS "NAN-BOOTSTRAP-SUCCESS "
+#define NAN_BOOTSTRAP_FAILURE "NAN-BOOTSTRAP-FAILURE "
+#define NAN_NIK_RECEIVED "NAN-NIK-RECEIVED "
+#define NAN_PAIRING_REQUEST "NAN-PAIRING-REQUEST "
+#define NAN_PEER_SCHEDULE_CHANGED "NAN-PEER-SCHEDULE-CHANGED "
+#define NAN_SCHEDULE_UPDATE_DONE "NAN-SCHEDULE-UPDATE-DONE "
+
+/* NAN Pairing status
+ * addr=<peer address> akmp=<SAE|PASN> cipher=<CCMP|GCMP-256>
+ * status=<success|failure> [nd_pmk=<hex>]
+ */
+#define NAN_PAIRING_STATUS "NAN-PAIRING-STATUS "
+
+/* NAN local schedule channel evacuation.
+ * parameters: map_id=<map_id> freq=<freq>
+ */
+#define NAN_CHAN_EVACUATION "NAN-CHAN-EVACUATION "
+#define NAN_STOPPED "NAN-STOPPED "
 
 /* MESH events */
 #define MESH_GROUP_STARTED "MESH-GROUP-STARTED "
@@ -473,6 +497,11 @@ extern "C" {
 /* PASN authentication status */
 #define PASN_AUTH_STATUS "PASN-AUTH-STATUS "
 
+/* Proximity Ranging PASN negotiation started
+ * peer_addr=<MAC> role=<role> protocol=<protocol type>
+ */
+#define PR_PASN_NEGOTIATION_STARTED "PR-PASN-NEGOTIATION-STARTED "
+
 /* Result of PASN performed for Proximity Ranging
  * <result> role=<role> protocol=<protocol type> opclass=<op class> channel=<op channel> cc=<country>
  */
@@ -480,6 +509,12 @@ extern "C" {
 
 /* Proximity Ranging parameters to use in ranging */
 #define PR_RANGING_PARAMS "PR-RANGING-PARAMS "
+
+/* Proximity Ranging measurement result */
+#define PR_EVENT_PEER_MEASUREMENT "PR-PEER-MEASUREMENT "
+
+/* Proximity Ranging measurement session complete */
+#define PR_EVENT_RANGING_COMPLETE "PR-RANGING-COMPLETE "
 
 /* BSS command information masks */
 

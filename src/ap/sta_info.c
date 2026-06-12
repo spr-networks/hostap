@@ -474,6 +474,7 @@ void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 	os_free(sta->he_capab);
 	os_free(sta->he_6ghz_capab);
 	os_free(sta->eht_capab);
+	os_free(sta->uhr_capab);
 	hostapd_free_psk_list(sta->psk);
 	os_free(sta->identity);
 	os_free(sta->radius_cui);
@@ -602,7 +603,7 @@ void ap_handle_timer(void *eloop_ctx, void *timeout_ctx)
 	int reason;
 	int max_inactivity = hapd->conf->ap_max_inactivity;
 
-	wpa_printf(MSG_DEBUG, "%s: %s: " MACSTR " flags=0x%x timeout_next=%d",
+	wpa_printf(MSG_DEBUG, "%s: %s: " MACSTR " flags=0x%llx timeout_next=%d",
 		   hapd->conf->iface, __func__, MAC2STR(sta->addr), sta->flags,
 		   sta->timeout_next);
 	if (sta->timeout_next == STA_REMOVE) {
@@ -1964,13 +1965,13 @@ void ap_sta_clear_assoc_timeout(struct hostapd_data *hapd,
 }
 
 
-int ap_sta_flags_txt(u32 flags, char *buf, size_t buflen)
+int ap_sta_flags_txt(unsigned long long flags, char *buf, size_t buflen)
 {
 	int res;
 
 	buf[0] = '\0';
 	res = os_snprintf(buf, buflen,
-			  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
+			  "%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s%s",
 			  (flags & WLAN_STA_AUTH ? "[AUTH]" : ""),
 			  (flags & WLAN_STA_ASSOC ? "[ASSOC]" : ""),
 			  (flags & WLAN_STA_AUTHORIZED ? "[AUTHORIZED]" : ""),
@@ -1991,6 +1992,7 @@ int ap_sta_flags_txt(u32 flags, char *buf, size_t buflen)
 			  (flags & WLAN_STA_VHT ? "[VHT]" : ""),
 			  (flags & WLAN_STA_HE ? "[HE]" : ""),
 			  (flags & WLAN_STA_EHT ? "[EHT]" : ""),
+			  (flags & WLAN_STA_UHR ? "[UHR]" : ""),
 			  (flags & WLAN_STA_6GHZ ? "[6GHZ]" : ""),
 			  (flags & WLAN_STA_VENDOR_VHT ? "[VENDOR_VHT]" : ""),
 			  (flags & WLAN_STA_SPP_AMSDU ? "[SPP-A-MSDU]" : ""),
@@ -2115,7 +2117,7 @@ int ap_sta_re_add(struct hostapd_data *hapd, struct sta_info *sta)
 	if (hostapd_sta_add(hapd, sta->addr, 0, 0,
 			    sta->supported_rates,
 			    sta->supported_rates_len,
-			    0, NULL, NULL, NULL, 0, NULL, 0, NULL,
+			    0, NULL, NULL, NULL, 0, NULL, 0, NULL, 0, NULL,
 			    sta->flags, 0, 0, 0, 0,
 			    mld_link_addr, mld_link_sta, eml_cap, epp_sta)) {
 		hostapd_logger(hapd, sta->addr,

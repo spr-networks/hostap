@@ -99,7 +99,7 @@ def check_pkcs5_v15_support(dev):
 
 def check_tls13_support(dev):
     tls = dev.request("GET tls_library")
-    ok = ['run=OpenSSL 1.1.1', 'run=OpenSSL 3.', 'wolfSSL']
+    ok = ['run=OpenSSL', 'wolfSSL']
     for s in ok:
         if s in tls:
             return
@@ -3116,7 +3116,7 @@ def test_ap_wpa2_eap_ttls_server_cert_hash(dev, apdev):
     """WPA2-Enterprise connection using EAP-TTLS and server certificate hash"""
     check_cert_probe_support(dev[0])
     skip_with_fips(dev[0])
-    srv_cert_hash = "12eb705e8d49366c86505b30015c3b8a5b57e121ca90670f9d6e24cc9b65b621"
+    srv_cert_hash = "f29933571a9b8363a6c9a6cdbe1e92096556c19cf69dc69ee09322f30dbb4137"
     params = hostapd.wpa2_eap_params(ssid="test-wpa2-eap")
     hapd = hostapd.add_ap(apdev[0], params)
     dev[0].connect("test-wpa2-eap", key_mgmt="WPA-EAP", eap="TTLS",
@@ -4580,7 +4580,7 @@ def ocsp_req(outfile):
            "-reqout", outfile,
            '-issuer', 'auth_serv/ca.pem',
            '-sha256',
-           '-serial', '0xD8D3E3A6CBE3CD91',
+           '-serial', '0xD8D3E3A6CBE3CD9B',
            '-no_nonce']
     run_openssl(arg)
     if not os.path.exists(outfile):

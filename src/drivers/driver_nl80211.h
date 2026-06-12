@@ -52,6 +52,10 @@ struct nl80211_global {
 	/* Dedicated socket for NAN interface creation and events */
 	struct nl_sock *nl_nan;
 #endif /* CONFIG_NAN */
+#ifdef CONFIG_PR
+	/* Dedicated socket for PR peer measurement commands and events */
+	struct nl_sock *nl_pr;
+#endif /* CONFIG_PR */
 };
 
 struct nl80211_wiphy_data {
@@ -281,11 +285,15 @@ struct wpa_driver_nl80211_data {
 	size_t pending_t2lm_data_len;
 	u8 *pending_link_reconfig_data;
 	size_t pending_link_reconfig_data_len;
+	unsigned int qca_vendor_ext_auth:1;
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 
 #ifdef CONFIG_NAN
 	unsigned int nan_started:1;
 #endif /* CONFIG_NAN */
+#ifdef CONFIG_PR
+	struct i802_bss *pd_bss; /* PD wdev; not in the BSS list */
+#endif /* CONFIG_PR */
 };
 
 struct nl80211_err_info {

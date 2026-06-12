@@ -6403,8 +6403,6 @@ static void p2p_pairing_set_password(struct pasn_data *pasn, u8 pasn_type,
 	pasn->pt = sae_derive_pt(pasn_groups, (const u8 *) P2P_PAIRING_SSID,
 				 os_strlen(P2P_PAIRING_SSID),
 				 (const u8 *) passphrase, len, NULL, 0);
-	/* Set passphrase for pairing responder to validate PASN auth 1 frame */
-	pasn->password = passphrase;
 }
 
 
@@ -7317,9 +7315,9 @@ void p2p_pasn_pmksa_set_pmk(struct p2p_data *p2p, const u8 *src, const u8 *dst,
 			    const u8 *pmk, size_t pmk_len, const u8 *pmkid)
 {
 	pasn_initiator_pmksa_cache_add(p2p->initiator_pmksa, src, dst, pmk,
-				       pmk_len, pmkid);
+				       pmk_len, pmkid, WPA_KEY_MGMT_SAE);
 	pasn_responder_pmksa_cache_add(p2p->responder_pmksa, src, dst, pmk,
-				       pmk_len, pmkid);
+				       pmk_len, pmkid, WPA_KEY_MGMT_SAE);
 }
 
 

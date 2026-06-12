@@ -20,12 +20,14 @@
 #include "crypto/random.h"
 #include "eap_common/eap_defs.h"
 #include "rsn_supp/wpa.h"
+#include "rsn_supp/wpa_ie.h"
 #include "rsn_supp/pmksa_cache.h"
 #include "wpa_supplicant_i.h"
 #include "driver_i.h"
 #include "bss.h"
 #include "scan.h"
 #include "config.h"
+#include "sme.h"
 
 static const int dot11RSNAConfigPMKLifetime = 43200;
 
@@ -37,6 +39,14 @@ struct wpa_pasn_auth_work {
 	u16 group;
 	int network_id;
 	struct wpabuf *comeback;
+#ifdef CONFIG_ENC_ASSOC
+	unsigned int auth_alg;
+	int group_cipher;
+	int group_mgmt_cipher;
+	u16 rsn_capab;
+	u8 *rsnxe_data;
+	bool is_ml_peer;
+#endif /* CONFIG_ENC_ASSOC */
 };
 
 
@@ -74,6 +84,10 @@ static void wpas_pasn_free_auth_work(struct wpa_pasn_auth_work *awork)
 {
 	wpabuf_free(awork->comeback);
 	awork->comeback = NULL;
+#ifdef CONFIG_ENC_ASSOC
+	os_free(awork->rsnxe_data);
+	awork->rsnxe_data = NULL;
+#endif /* CONFIG_ENC_ASSOC */
 	os_free(awork);
 }
 
@@ -156,6 +170,48 @@ wpas_pasn_sae_derive_pt(struct wpa_ssid *ssid, int group)
 }
 
 
+#ifdef CONFIG_ENC_ASSOC
+struct sae_pt *
+wpas_pasn_sae_derive_pt_for_eppke(struct wpa_ssid *ssid, int group)
+{
+	const char *password = ssid->sae_password;
+	int groups[2] = { group, 0 };
+	const u8 *password_id = NULL;
+	size_t password_id_len = 0;
+
+	if (!password)
+		password = ssid->passphrase;
+
+	if (!password) {
+		wpa_printf(MSG_DEBUG, "EPPKE: SAE without a password");
+		return NULL;
+	}
+
+	/* Prefer an alternative (changing) password identifier if available */
+	if (ssid->alt_sae_password_ids && ssid->alt_sae_password_ids->num) {
+		unsigned int idx =
+			os_random() % ssid->alt_sae_password_ids->num;
+		struct wpabuf *id = ssid->alt_sae_password_ids->buf[idx];
+
+		password_id = wpabuf_head(id);
+		password_id_len = wpabuf_len(id);
+		wpa_hexdump(MSG_DEBUG,
+			    "EPPKE: Prepare PT for alternative password ID",
+			    password_id, password_id_len);
+		ssid->alt_sae_passwords_ids_idx = idx;
+		ssid->alt_sae_passwords_ids_used = true;
+	} else if (ssid->sae_password_id) {
+		password_id = (const u8 *) ssid->sae_password_id;
+		password_id_len = os_strlen(ssid->sae_password_id);
+	}
+
+	return sae_derive_pt(groups, ssid->ssid, ssid->ssid_len,
+			     (const u8 *) password, os_strlen(password),
+			     password_id, password_id_len);
+}
+#endif /* CONFIG_ENC_ASSOC */
+
+
 static int wpas_pasn_sae_setup_pt(struct wpa_ssid *ssid, int group)
 {
 	if (!ssid->sae_password && !ssid->passphrase) {
@@ -174,6 +230,59 @@ static int wpas_pasn_sae_setup_pt(struct wpa_ssid *ssid, int group)
 #endif /* CONFIG_SAE */
 
 
+int wpas_pasn_get_group(struct wpa_supplicant *wpa_s,
+			struct wpa_ssid *ssid, struct pasn_data *pasn)
+{
+	static const int default_groups[] = { 19, 20, 21, 0 };
+	const int *groups;
+	unsigned int i, j;
+
+	if (ssid && ssid->pasn_groups)
+		groups = ssid->pasn_groups;
+	else if (wpa_s->conf->pasn_groups)
+		groups = wpa_s->conf->pasn_groups;
+	else
+		groups = default_groups;
+
+	for (i = 0; groups[i]; i++) {
+		bool rejected = false;
+		bool ap_supported = true;
+
+		if (!dragonfly_suitable_group(groups[i], 1))
+			continue;
+
+		if (!pasn)
+			return groups[i];
+
+		/* Skip groups already rejected in this session */
+		for (j = 0; j < pasn->rejected_group_idx; j++) {
+			if (groups[i] == pasn->rejected_groups[j]) {
+				rejected = true;
+				break;
+			}
+		}
+		if (rejected)
+			continue;
+
+		/* Take intersection with AP's supported groups */
+		if (pasn->ap_supported_group_idx > 0) {
+			ap_supported = false;
+			for (j = 0; j < pasn->ap_supported_group_idx; j++) {
+				if (groups[i] == pasn->ap_supported_groups[j]) {
+					ap_supported = true;
+					break;
+				}
+			}
+		}
+		if (ap_supported)
+			return groups[i];
+	}
+
+	/* pasn_groups configured but no suitable group found - failure */
+	return 0;
+}
+
+
 static int wpas_pasn_get_params_from_bss(struct wpa_supplicant *wpa_s,
 					 struct pasn_peer *peer,
 					 struct wpa_bss *bss,
@@ -183,7 +292,17 @@ static int wpas_pasn_get_params_from_bss(struct wpa_supplicant *wpa_s,
 	const u8 *rsne, *rsnxe;
 	struct wpa_ie_data rsne_data;
 	int sel, key_mgmt, pairwise_cipher;
-	int group = 19;
+	int group;
+
+	group = wpas_pasn_get_group(wpa_s, ssid, NULL);
+
+	if (!group) {
+		wpa_printf(MSG_INFO,
+			   "PASN: No suitable group found; cannot start authentication");
+		return -1;
+	}
+
+	wpa_printf(MSG_DEBUG, "PASN: Selected group %d", group);
 
 	rsne = wpa_bss_get_rsne(wpa_s, bss, NULL, false);
 	if (!rsne) {
@@ -478,7 +597,9 @@ static void wpas_pasn_configure_next_peer(struct wpa_supplicant *wpa_s,
 					 peer->peer_addr, peer->akmp,
 					 peer->cipher, peer->group,
 					 peer->network_id,
-					 peer->comeback, peer->comeback_len)) {
+					 peer->comeback, peer->comeback_len,
+					 WLAN_AUTH_PASN, 0, 0, 0, NULL,
+					 false)) {
 			peer->status = PASN_STATUS_FAILURE;
 			wpa_msg(wpa_s, MSG_INFO, PASN_AUTH_STATUS MACSTR
 				" akmp=%s, status=%u",
@@ -586,20 +707,42 @@ static void wpas_pasn_reset(struct wpa_supplicant *wpa_s)
 
 static struct wpa_bss * wpas_pasn_allowed(struct wpa_supplicant *wpa_s,
 					  const u8 *peer_addr, int akmp,
-					  int cipher)
+					  int cipher, int auth_alg,
+					  int group_cipher,
+					  int group_mgmt_cipher)
 {
 	struct wpa_bss *bss;
 	const u8 *rsne;
 	struct wpa_ie_data rsne_data;
 	int ret;
 
-	if (ether_addr_equal(wpa_s->bssid, peer_addr)) {
+	if (auth_alg != WLAN_AUTH_EPPKE &&
+	    ether_addr_equal(wpa_s->bssid, peer_addr)) {
 		wpa_printf(MSG_DEBUG,
 			   "PASN: Not doing authentication with current BSS");
 		return NULL;
 	}
 
-	bss = wpa_bss_get_bssid_latest(wpa_s, peer_addr);
+	if (auth_alg == WLAN_AUTH_EPPKE) {
+#if defined(CONFIG_SME) && defined(CONFIG_SAE)
+		/* EPPKE processing can reach here only when external
+		 * authentication is used.
+		 *
+		 * In this flow, peer_addr is the peer MLD address for MLO.
+		 * However, wpa_bss_get_bssid_latest() matches a link BSSID
+		 * entry in the BSS table. Use the link BSSID saved by SME
+		 * in ext_auth_bssid for BSS lookup.
+		 */
+		bss = wpa_bss_get_bssid_latest(wpa_s,
+					       wpa_s->sme.ext_auth_bssid);
+#else /* CONFIG_SME && CONFIG_SAE */
+		wpa_printf(MSG_ERROR,
+			   "EPPKE ext-auth requires CONFIG_SME and CONFIG_SAE");
+		return NULL;
+#endif /* CONFIG_SME && CONFIG_SAE */
+	} else {
+		bss = wpa_bss_get_bssid_latest(wpa_s, peer_addr);
+	}
 	if (!bss) {
 		wpa_printf(MSG_DEBUG, "PASN: BSS not found");
 		return NULL;
@@ -624,8 +767,59 @@ static struct wpa_bss * wpas_pasn_allowed(struct wpa_supplicant *wpa_s,
 		return NULL;
 	}
 
+#ifdef CONFIG_ENC_ASSOC
+	if (auth_alg == WLAN_AUTH_EPPKE) {
+		if (group_cipher &
+		    !(rsne_data.group_cipher & group_cipher)) {
+			wpa_printf(MSG_DEBUG,
+				   "EPPKE: AP does not support requested group cipher");
+			return NULL;
+		}
+		if (group_mgmt_cipher &&
+		    !(rsne_data.mgmt_group_cipher & group_mgmt_cipher)) {
+			wpa_printf(MSG_DEBUG,
+				   "EPPKE: AP does not support requested group mgmt cipher");
+			return NULL;
+		}
+	}
+#endif /* CONFIG_ENC_ASSOC */
+
 	return bss;
 }
+
+
+#ifdef CONFIG_ENC_ASSOC
+/*
+ * Build RSNE for EPPKE in SME-in-driver mode.
+ */
+static int wpas_eppke_set_rsne(struct wpa_supplicant *wpa_s,
+			       struct pasn_data *pasn,
+			       struct wpa_pasn_auth_work *awork)
+{
+	u8 rsne[257];
+	int rsne_len;
+
+	rsne_len = wpa_external_auth_add_rsne(rsne, sizeof(rsne), wpa_s->wpa,
+					      awork->akmp, awork->cipher,
+					      awork->group_cipher,
+					      awork->group_mgmt_cipher,
+					      awork->rsn_capab);
+	if (rsne_len < 0) {
+		wpa_printf(MSG_DEBUG, "EPPKE: Failed to build RSNE");
+		return -1;
+	}
+
+	pasn_set_rsne(pasn, rsne);
+	if (!pasn->rsn_ie)
+		return -1;
+
+	wpa_printf(MSG_DEBUG,
+		   "EPPKE: RSNE for ext-auth (group=0x%x mgmt=0x%x capab=0x%x)",
+		   awork->group_cipher, awork->group_mgmt_cipher,
+		   awork->rsn_capab);
+	return 0;
+}
+#endif /* CONFIG_ENC_ASSOC */
 
 
 static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
@@ -640,7 +834,7 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	const u8 *indic;
 	u16 fils_info;
 #endif /* CONFIG_FILS */
-	u32 capab = 0;
+	u64 capab = 0;
 	bool derive_kdk;
 	int ret;
 
@@ -663,7 +857,9 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	 * established.
 	 */
 	bss = wpas_pasn_allowed(wpa_s, awork->peer_addr, awork->akmp,
-				awork->cipher);
+				awork->cipher, awork->auth_alg,
+				awork->group_cipher,
+				awork->group_mgmt_cipher);
 	if (!bss) {
 		wpa_printf(MSG_DEBUG, "PASN: auth_start_cb: Not allowed");
 		goto fail;
@@ -701,7 +897,8 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	pasn->corrupt_mic = wpa_s->conf->pasn_corrupt_mic;
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	capab |= BIT(WLAN_RSNX_CAPAB_SAE_H2E);
+	if (wpa_key_mgmt_sae(awork->akmp))
+		capab |= BIT(WLAN_RSNX_CAPAB_SAE_H2E);
 	if (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_LTF_STA)
 		capab |= BIT(WLAN_RSNX_CAPAB_SECURE_LTF);
 	if (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_RTT_STA)
@@ -730,21 +927,88 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	if ((wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SPP_AMSDU) &&
 	    ieee802_11_rsnx_capab(rsnxe, WLAN_RSNX_CAPAB_SPP_A_MSDU))
 		capab |= BIT(WLAN_RSNX_CAPAB_SPP_A_MSDU);
+	ssid = wpa_config_get_network(wpa_s->conf, awork->network_id);
+#ifdef CONFIG_ENC_ASSOC
+	if (awork->auth_alg == WLAN_AUTH_EPPKE) {
+		if (!ssid) {
+			wpa_printf(MSG_DEBUG,
+				   "EPPKE: No network profile found");
+			goto fail;
+		}
+		if (!ieee802_11_rsnx_capab(rsnxe, WLAN_RSNX_CAPAB_KEK_IN_PASN))
+		{
+			wpa_printf(MSG_INFO,
+				   "EPPKE: KEK_IN_PASN not set in AP RSNXE");
+			goto fail;
+		}
+		if (!ieee802_11_rsnx_capab(rsnxe,
+					   WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION)) {
+			wpa_printf(MSG_INFO,
+				   "EPPKE: ASSOC_FRAME_ENCRYPTION not set in AP RSNXE");
+			goto fail;
+		}
+		if (awork->akmp == WPA_KEY_MGMT_EPPKE &&
+		    !ieee802_11_rsnx_capab(rsnxe,
+					   WLAN_RSNX_CAPAB_UNAUTH_EPPKE)) {
+			wpa_printf(MSG_DEBUG,
+				   "EPPKE: AP does not support unauthenticated EPPKE");
+			goto fail;
+		}
+		if (wpa_s->drv_flags2 &
+		    WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION) {
+			capab |= BIT(WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION);
+			capab |= BIT(WLAN_RSNX_CAPAB_KEK_IN_PASN);
+			pasn->derive_kek = true;
+#ifdef CONFIG_SAE
+			/*
+			 * Advertise support for changing SAE password
+			 * identifiers if configured per network profile.
+			 */
+			if (ssid && ssid->sae_password_id &&
+			    ssid->sae_password_id_change &&
+			    wpa_key_mgmt_sae_ext_key(awork->akmp)) {
+				capab |= BIT_ULL(
+					WLAN_RSNX_CAPAB_SAE_PW_ID_CHANGE);
+				wpa_sm_set_param(wpa_s->wpa,
+						 WPA_PARAM_SAE_PW_ID_CHANGE, 1);
+			}
+#endif /* CONFIG_SAE */
+#ifdef CONFIG_PMKSA_PRIVACY
+			if ((wpa_s->drv_flags2 &
+			     WPA_DRIVER_FLAGS2_PMKSA_PRIVACY) &&
+			    ssid->pmksa_privacy &&
+			    ieee802_11_rsnx_capab(
+				    rsnxe,
+				    WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY))
+				capab |= BIT(
+					WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
+#endif /* CONFIG_PMKSA_PRIVACY */
+		}
+	}
+#endif /* CONFIG_ENC_ASSOC */
 
 	pasn_set_rsnxe_caps(pasn, capab);
 	pasn_register_callbacks(pasn, wpa_s, wpas_pasn_send_mlme, NULL, NULL,
 				NULL);
-	ssid = wpa_config_get_network(wpa_s->conf, awork->network_id);
 
 #ifdef CONFIG_SAE
 	if (awork->akmp == WPA_KEY_MGMT_SAE ||
 	    awork->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
+		struct sae_pt *pt = NULL;
+
 		if (!ssid) {
 			wpa_printf(MSG_DEBUG,
 				   "PASN: No network profile found for SAE");
 			goto fail;
 		}
-		pasn_set_pt(pasn, wpas_pasn_sae_derive_pt(ssid, awork->group));
+#ifdef CONFIG_ENC_ASSOC
+		if (awork->auth_alg == WLAN_AUTH_EPPKE)
+			pt = wpas_pasn_sae_derive_pt_for_eppke(ssid,
+							       awork->group);
+#endif /* CONFIG_ENC_ASSOC */
+		if (awork->auth_alg != WLAN_AUTH_EPPKE)
+			pt = wpas_pasn_sae_derive_pt(ssid, awork->group);
+		pasn_set_pt(pasn, pt);
 		if (!pasn->pt) {
 			wpa_printf(MSG_DEBUG, "PASN: Failed to derive PT");
 			goto fail;
@@ -798,6 +1062,27 @@ static void wpas_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 #endif /* CONFIG_IEEE80211R */
 	}
 
+#ifdef CONFIG_ENC_ASSOC
+	pasn->auth_alg = awork->auth_alg;
+	pasn->group_cipher = awork->group_cipher;
+	pasn->group_mgmt_cipher = awork->group_mgmt_cipher;
+	pasn->rsn_capab = awork->rsn_capab;
+	pasn_set_rsnxe_ie(pasn, awork->rsnxe_data);
+	pasn->is_ml_peer = awork->is_ml_peer;
+	/*
+	 * Set network_ctx so the PMKSA entry is stored with the correct
+	 * network context for lookup on reconnection.
+	 */
+	if (awork->auth_alg == WLAN_AUTH_EPPKE && ssid)
+		pasn->network_ctx = ssid;
+
+	/* Build RSNE for EPPKE Authentication in SME-in-driver mode */
+	if (awork->auth_alg == WLAN_AUTH_EPPKE &&
+	    wpas_eppke_set_rsne(wpa_s, pasn, awork) < 0) {
+		wpa_printf(MSG_DEBUG, "EPPKE: Failed to configure RSNE");
+		goto fail;
+	}
+#endif /* CONFIG_ENC_ASSOC */
 
 	ret = wpas_pasn_start(pasn, awork->own_addr, awork->peer_addr,
 			      awork->peer_addr, awork->akmp, awork->cipher,
@@ -827,7 +1112,10 @@ fail:
 int wpas_pasn_auth_start(struct wpa_supplicant *wpa_s,
 			 const u8 *own_addr, const u8 *peer_addr,
 			 int akmp, int cipher, u16 group, int network_id,
-			 const u8 *comeback, size_t comeback_len)
+			 const u8 *comeback, size_t comeback_len,
+			 unsigned int auth_alg, int group_cipher,
+			 int group_mgmt_cipher, u16 rsn_capab,
+			 const u8 *rsnxe_data, bool is_ml_peer)
 {
 	struct wpa_pasn_auth_work *awork;
 	struct wpa_bss *bss;
@@ -857,7 +1145,8 @@ int wpas_pasn_auth_start(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-	bss = wpas_pasn_allowed(wpa_s, peer_addr, akmp, cipher);
+	bss = wpas_pasn_allowed(wpa_s, peer_addr, akmp, cipher, auth_alg,
+				group_cipher, group_mgmt_cipher);
 	if (!bss)
 		return -1;
 
@@ -873,6 +1162,21 @@ int wpas_pasn_auth_start(struct wpa_supplicant *wpa_s,
 	awork->cipher = cipher;
 	awork->group = group;
 	awork->network_id = network_id;
+#ifdef CONFIG_ENC_ASSOC
+	awork->auth_alg = auth_alg;
+	awork->group_cipher = group_cipher;
+	awork->group_mgmt_cipher = group_mgmt_cipher;
+	awork->rsn_capab = rsn_capab;
+	awork->is_ml_peer = is_ml_peer;
+
+	if (rsnxe_data) {
+		awork->rsnxe_data = os_memdup(rsnxe_data, 2 + rsnxe_data[1]);
+		if (!awork->rsnxe_data) {
+			wpas_pasn_free_auth_work(awork);
+			return -1;
+		}
+	}
+#endif /* CONFIG_ENC_ASSOC */
 
 	if (comeback && comeback_len) {
 		awork->comeback = wpabuf_alloc_copy(comeback, comeback_len);
@@ -908,6 +1212,10 @@ void wpas_pasn_auth_stop(struct wpa_supplicant *wpa_s)
 			      pasn->comeback_after);
 
 	wpas_pasn_reset(wpa_s);
+
+	/* Reset rejected group state when authentication ends */
+	pasn->rejected_group_idx = 0;
+	os_memset(pasn->rejected_groups, 0, sizeof(pasn->rejected_groups));
 }
 
 
@@ -936,6 +1244,7 @@ static int wpas_pasn_immediate_retry(struct wpa_supplicant *wpa_s,
 	u8 own_addr[ETH_ALEN];
 	u8 peer_addr[ETH_ALEN];
 	int network_id;
+	unsigned int auth_alg;
 
 	wpa_printf(MSG_DEBUG, "PASN: Immediate retry");
 	os_memcpy(own_addr, pasn->own_addr, ETH_ALEN);
@@ -944,11 +1253,51 @@ static int wpas_pasn_immediate_retry(struct wpa_supplicant *wpa_s,
 	/* Hold network ID to avoid losing it in wpas_pasn_reset(). */
 	network_id = pasn->network_id;
 
+	/*
+	 * Cache auth_alg before reset as wpas_pasn_reset() clears the pasn
+	 * struct. This path is shared with EPPKE, so without preserving it,
+	 * a group rejection retry would incorrectly restart with PASN instead
+	 * of EPPKE.
+	 */
+	auth_alg = pasn->auth_alg;
+
 	wpas_pasn_reset(wpa_s);
 
 	return wpas_pasn_auth_start(wpa_s, own_addr, peer_addr, akmp, cipher,
 				    group, network_id, params->comeback,
-				    params->comeback_len);
+				    params->comeback_len, auth_alg,
+				    pasn->group_cipher,
+				    pasn->group_mgmt_cipher, pasn->rsn_capab,
+				    pasn->rsnxe_ie, pasn->is_ml_peer);
+}
+
+
+static int wpas_pasn_retry_with_next_group(struct wpa_supplicant *wpa_s,
+					   struct pasn_data *pasn)
+{
+	struct wpa_pasn_params_data params;
+	u16 next_group;
+	struct wpa_ssid *ssid = NULL;
+
+#ifdef CONFIG_ENC_ASSOC
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE)
+		ssid = wpa_s->current_ssid;
+#endif /* CONFIG_ENC_ASSOC */
+
+	next_group = (u16) wpas_pasn_get_group(wpa_s, ssid, pasn);
+	if (!next_group) {
+		wpa_printf(MSG_DEBUG,
+			   "PASN: No more groups to try after rejection");
+		return -1;
+	}
+
+	wpa_printf(MSG_DEBUG, "PASN: Retrying with group %u after rejection",
+		   next_group);
+
+	pasn->group = next_group;
+
+	os_memset(&params, 0, sizeof(params));
+	return wpas_pasn_immediate_retry(wpa_s, pasn, &params);
 }
 
 
@@ -1019,6 +1368,15 @@ int wpas_pasn_auth_rx(struct wpa_supplicant *wpa_s,
 
 		if (pasn->pmksa_entry)
 			wpa_sm_set_cur_pmksa(wpa_s->wpa, pasn->pmksa_entry);
+
+		if (pasn->auth_alg == WLAN_AUTH_EPPKE) {
+#ifdef CONFIG_SME
+			os_memcpy(wpa_s->sme.sae.pmkid, pasn->sae.pmkid,
+				  PMKID_LEN);
+#endif /* CONFIG_SME */
+			wpa_sm_set_pmk(wpa_s->wpa, pasn->pmk, pasn->pmk_len,
+				       pasn->sae.pmkid, NULL);
+		}
 	}
 
 	forced_memzero(pasn_get_ptk(pasn), sizeof(pasn->ptk));
@@ -1034,6 +1392,16 @@ int wpas_pasn_auth_rx(struct wpa_supplicant *wpa_s,
 
 	if (ret == 1)
 		ret = wpas_pasn_immediate_retry(wpa_s, pasn, &pasn_data);
+
+	if (ret == 2) {
+		ret = wpas_pasn_retry_with_next_group(wpa_s, pasn);
+		if (ret) {
+			wpa_printf(MSG_INFO,
+				   "PASN: Group rejection retry failed");
+			wpas_pasn_auth_stop(wpa_s);
+			wpas_pasn_auth_work_done(wpa_s, PASN_STATUS_FAILURE);
+		}
+	}
 
 	return ret;
 }
@@ -1117,12 +1485,64 @@ fail:
 }
 
 
+#ifdef CONFIG_SME
+#ifdef CONFIG_ENC_ASSOC
+static u16 wpas_eppke_external_auth_set_keys(struct wpa_supplicant *wpa_s,
+					     struct pasn_data *pasn, bool acked)
+{
+	static const u8 zero[WPA_TK_MAX_LEN] = { 0 };
+	enum wpa_alg alg;
+	struct ptksa_cache_entry *entry;
+
+	if (!acked) {
+		wpa_printf(MSG_DEBUG,
+			   "EPPKE: Authentication frame 3 TX was not ACKed");
+		return WLAN_STATUS_UNSPECIFIED_FAILURE;
+	}
+
+	alg = wpa_cipher_to_alg(pasn_get_cipher(pasn));
+	entry = ptksa_cache_get(wpa_s->ptksa, pasn->peer_addr,
+				pasn_get_cipher(pasn));
+	if (!entry) {
+		wpa_printf(MSG_INFO,
+			   "EPPKE: No PTKSA found to configure keys");
+		return WLAN_STATUS_UNSPECIFIED_FAILURE;
+	}
+
+	/* Install TK to driver. */
+	if (wpa_drv_set_key(wpa_s, -1, alg, pasn->peer_addr, 0, 1, zero, 6,
+			    entry->ptk.tk, entry->ptk.tk_len,
+			    KEY_FLAG_PAIRWISE_RX_TX)) {
+		wpa_printf(MSG_DEBUG,
+			   "EPPKE: Failed to install TK to driver");
+		return WLAN_STATUS_UNSPECIFIED_FAILURE;
+	}
+
+	/* Install LTF Keyseed to driver. */
+	if (pasn->secure_ltf &&
+	    wpa_drv_set_secure_ranging_ctx(wpa_s, pasn->own_addr,
+					   pasn->peer_addr,
+					   pasn_get_cipher(pasn), 0, NULL,
+					   entry->ptk.ltf_keyseed_len,
+					   entry->ptk.ltf_keyseed, 0)) {
+		wpa_printf(MSG_DEBUG,
+			   "EPPKE: Failed to install LTF Keyseed");
+		return WLAN_STATUS_UNSPECIFIED_FAILURE;
+	}
+
+	return WLAN_STATUS_SUCCESS;
+}
+#endif /* CONFIG_ENC_ASSOC */
+#endif /* CONFIG_SME */
+
+
 int wpas_pasn_auth_tx_status(struct wpa_supplicant *wpa_s,
 			     const u8 *data, size_t data_len, u8 acked)
 
 {
 	struct pasn_data *pasn = &wpa_s->pasn;
 	int ret;
+	enum pasn_status auth_status = PASN_STATUS_SUCCESS;
 
 	if (!wpa_s->pasn_auth_work) {
 		wpa_printf(MSG_DEBUG,
@@ -1134,6 +1554,22 @@ int wpas_pasn_auth_tx_status(struct wpa_supplicant *wpa_s,
 	if (ret != 1)
 		return ret;
 
+	if (pasn->auth_alg == WLAN_AUTH_EPPKE) {
+#ifdef CONFIG_SME
+#ifdef CONFIG_ENC_ASSOC
+		u16 status;
+
+		status = wpas_eppke_external_auth_set_keys(wpa_s, pasn, acked);
+		if (status != WLAN_STATUS_SUCCESS)
+			auth_status = PASN_STATUS_FAILURE;
+#ifdef CONFIG_SAE
+		sme_send_external_auth_status(wpa_s, status);
+#endif /* CONFIG_SAE */
+#endif /* CONFIG_ENC_ASSOC */
+#endif /* CONFIG_SME */
+		goto auth_done;
+	}
+
 	if (!wpa_s->pasn_params) {
 		wpas_pasn_auth_stop(wpa_s);
 		return 0;
@@ -1142,8 +1578,9 @@ int wpas_pasn_auth_tx_status(struct wpa_supplicant *wpa_s,
 	wpas_pasn_set_keys_from_cache(wpa_s, pasn->own_addr, pasn->peer_addr,
 				      pasn_get_cipher(pasn),
 				      pasn_get_akmp(pasn));
+auth_done:
 	wpas_pasn_auth_stop(wpa_s);
-	wpas_pasn_auth_work_done(wpa_s, PASN_STATUS_SUCCESS);
+	wpas_pasn_auth_work_done(wpa_s, auth_status);
 
 	return 0;
 }

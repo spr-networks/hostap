@@ -916,6 +916,15 @@ static inline bool hostapd_mld_is_first_bss(struct hostapd_data *hapd)
 
 u16 hostapd_get_punct_bitmap(struct hostapd_data *hapd);
 
+void hostapd_get_oper_chan_info_of_bss(struct hostapd_data *hapd,
+				       enum oper_chan_width *width,
+				       u8 *seg0, u8 *seg1);
+
+u8 hostapd_get_oper_class_of_bss(struct hostapd_data *hapd);
+
+enum oper_chan_width
+hostapd_get_oper_chan_width_of_bss(struct hostapd_data *hapd);
+
 static inline bool ap_pmf_enabled(struct hostapd_bss_config *conf)
 {
 	return conf->ieee80211w != NO_MGMT_FRAME_PROTECTION ||
@@ -954,6 +963,12 @@ static inline bool
 hostapd_is_eht_enabled(struct hostapd_data *hapd)
 {
 	return hapd->iconf->ieee80211be && !hapd->conf->disable_11be;
+}
+
+static inline bool
+hostapd_is_uhr_enabled(struct hostapd_data *hapd)
+{
+	return hapd->iconf->ieee80211bn && !hapd->conf->disable_11bn;
 }
 
 #endif /* HOSTAPD_H */

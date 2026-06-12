@@ -192,6 +192,13 @@ static const char * nl80211_command_to_string(enum nl80211_commands cmd)
 	C2S(NL80211_CMD_NAN_NEXT_DW_NOTIFICATION)
 	C2S(NL80211_CMD_NAN_CLUSTER_JOINED)
 	C2S(NL80211_CMD_INCUMBENT_SIGNAL_DETECT)
+	C2S(NL80211_CMD_NAN_SET_LOCAL_SCHED)
+	C2S(NL80211_CMD_NAN_SCHED_UPDATE_DONE)
+	C2S(NL80211_CMD_NAN_SET_PEER_SCHED)
+	C2S(NL80211_CMD_NAN_ULW_UPDATE)
+	C2S(NL80211_CMD_NAN_CHANNEL_EVAC)
+	C2S(NL80211_CMD_START_PD)
+	C2S(NL80211_CMD_STOP_PD)
 	C2S(__NL80211_CMD_AFTER_LAST)
 	}
 #undef C2S
@@ -983,7 +990,8 @@ static void mlme_event_connect(struct wpa_driver_nl80211_data *drv,
 			       struct nlattr *fils_erp_next_seq_num,
 			       struct nlattr *fils_pmk,
 			       struct nlattr *fils_pmkid,
-			       struct nlattr *mlo_links)
+			       struct nlattr *mlo_links,
+			       struct nlattr *assoc_encrypted)
 {
 	union wpa_event_data event;
 	const u8 *ssid = NULL;
@@ -1157,6 +1165,9 @@ static void mlme_event_connect(struct wpa_driver_nl80211_data *drv,
 
 	if (fils_pmkid)
 		event.assoc_info.fils_pmkid = nla_data(fils_pmkid);
+
+	if (assoc_encrypted)
+		event.assoc_info.assoc_encrypted = true;
 
 	wpa_supplicant_event(drv->ctx, EVENT_ASSOC, &event);
 
@@ -1460,6 +1471,23 @@ static void mlme_event_mgmt(struct i802_bss *bss,
 }
 
 
+static bool find_send_frame_cookie(struct wpa_driver_nl80211_data *drv,
+				   u64 cookie_val, unsigned int *idx)
+{
+	unsigned int i;
+
+	for (i = 0; i < drv->num_send_frame_cookies; i++) {
+		if (cookie_val == drv->send_frame_cookies[i]) {
+			if (idx)
+				*idx = i;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
 static void mlme_event_mgmt_tx_status(struct i802_bss *bss,
 				      struct nlattr *cookie, const u8 *frame,
 				      size_t len, struct nlattr *ack)
@@ -1495,15 +1523,42 @@ static void mlme_event_mgmt_tx_status(struct i802_bss *bss,
 
 	if (!is_ap_interface(drv->nlmode) &&
 	    WLAN_FC_GET_STYPE(fc) == WLAN_FC_STYPE_ACTION) {
+		bool known = false;
+		unsigned int i;
+
 		if (!cookie)
 			return;
+
+		if (cookie_val == drv->send_frame_cookie) {
+			known = true;
+			drv->send_frame_cookie = (u64) -1;
+		}
+
+		if ((drv->nlmode == NL80211_IFTYPE_NAN ||
+		     drv->nlmode == NL80211_IFTYPE_NAN_DATA) &&
+		    drv->num_send_frame_cookies > 0 &&
+		    find_send_frame_cookie(drv, cookie_val, &i)) {
+			/*
+			 * Check the cookie is stored for previously sent
+			 * frames. If it is found, remove it and in case of NAN
+			 * mark it as known.
+			 */
+			if (i + 1 < drv->num_send_frame_cookies)
+				os_memmove(&drv->send_frame_cookies[i],
+					   &drv->send_frame_cookies[i + 1],
+					   (drv->num_send_frame_cookies -
+					    (i + 1)) * sizeof(u64));
+
+			drv->num_send_frame_cookies--;
+			known = true;
+		}
 
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Frame TX status: cookie=0x%llx%s (ack=%d)",
 			   (long long unsigned int) cookie_val,
-			   cookie_val == drv->send_frame_cookie ?
-			   " (match)" : " (unknown)", ack != NULL);
-		if (cookie_val != drv->send_frame_cookie)
+			   known ? " (match)" : " (unknown)", ack != NULL);
+
+		if (!known)
 			return;
 	} else if (!is_ap_interface(drv->nlmode) &&
 		   WLAN_FC_GET_STYPE(fc) == WLAN_FC_STYPE_AUTH) {
@@ -1798,6 +1853,7 @@ static void mlme_event(struct i802_bss *bss,
 	size_t len;
 	int link_id = -1;
 	struct i802_link *mld_link = NULL;
+	const struct ieee80211_mgmt *mgmt = NULL;
 
 	if (timed_out && addr) {
 		mlme_timeout_event(drv, cmd, addr);
@@ -1838,9 +1894,11 @@ static void mlme_event(struct i802_bss *bss,
 
 	/* PASN Authentication frame can be received with a different source MAC
 	 * address. Allow NL80211_CMD_FRAME event with foreign addresses also.
+	 * NAN USD frames (Public Action/Vendor Specific with NAN SDF OUI) may
+	 * be addressed to the NAN Network ID or unicast to a forced address
+	 * (e.g., solicited publish replies, follow-ups), allow those, too.
 	 */
 	if (cmd == NL80211_CMD_FRAME && len >= 24) {
-		const struct ieee80211_mgmt *mgmt;
 		u16 fc;
 
 		mgmt = (const struct ieee80211_mgmt *) data;
@@ -1854,6 +1912,19 @@ static void mlme_event(struct i802_bss *bss,
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: %s: Allow PASN frame for foreign address",
 			   bss->ifname);
+#ifdef CONFIG_NAN_USD
+	} else if (cmd == NL80211_CMD_FRAME &&
+		   stype == WLAN_FC_STYPE_ACTION && mgmt &&
+		   len >= offsetof(struct ieee80211_mgmt,
+				   u.action.u.vs_public_action.variable) + 1 &&
+		   mgmt->u.action.category == WLAN_ACTION_PUBLIC &&
+		   mgmt->u.action.u.vs_public_action.action ==
+		   WLAN_PA_VENDOR_SPECIFIC &&
+		   WPA_GET_BE32(mgmt->u.action.u.vs_public_action.oui) ==
+		   NAN_SDF_VENDOR_TYPE) {
+		wpa_printf(MSG_DEBUG, "nl80211: %s: Allow NAN USD frame",
+			   bss->ifname);
+#endif /* CONFIG_NAN_USD */
 	} else if (cmd != NL80211_CMD_FRAME_TX_STATUS  &&
 		   !(data[4] & 0x01) &&
 		   !ether_addr_equal(bss->addr, data + 4) &&
@@ -3049,7 +3120,8 @@ static void qca_nl80211_key_mgmt_auth(struct wpa_driver_nl80211_data *drv,
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_FILS_ERP_NEXT_SEQ_NUM],
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_PMK],
 			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_PMKID],
-			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_MLO_LINKS]);
+			   tb[QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_MLO_LINKS],
+			   NULL);
 
 #ifdef ANDROID
 #ifdef ANDROID_LIB_EVENT
@@ -3457,6 +3529,115 @@ fail:
 
 #endif /* CONFIG_PASN */
 
+
+/* Converts nl80211_auth_type to WLAN_AUTH_* format */
+static int get_auth_algo(enum nl80211_auth_type auth_alg)
+{
+	switch (auth_alg) {
+	case NL80211_AUTHTYPE_OPEN_SYSTEM:
+		return WLAN_AUTH_OPEN;
+	case NL80211_AUTHTYPE_SHARED_KEY:
+		return WLAN_AUTH_SHARED_KEY;
+	case NL80211_AUTHTYPE_FT:
+		return WLAN_AUTH_FT;
+	case NL80211_AUTHTYPE_SAE:
+		return WLAN_AUTH_SAE;
+	case NL80211_AUTHTYPE_FILS_SK:
+		return WLAN_AUTH_FILS_SK;
+	case NL80211_AUTHTYPE_FILS_SK_PFS:
+		return WLAN_AUTH_FILS_SK_PFS;
+	case NL80211_AUTHTYPE_FILS_PK:
+		return WLAN_AUTH_FILS_PK;
+	case NL80211_AUTHTYPE_EPPKE:
+		return WLAN_AUTH_EPPKE;
+	case NL80211_AUTHTYPE_IEEE8021X:
+		return WLAN_AUTH_802_1X;
+	default:
+		return -1;
+	}
+}
+
+
+static void qca_nl80211_external_auth(struct wpa_driver_nl80211_data *drv,
+				      u8 *data, size_t len)
+{
+	union wpa_event_data event;
+	struct external_auth *ea;
+	enum qca_wlan_vendor_external_auth_action act;
+	char mld_addr[50];
+	struct nlattr *tb[QCA_WLAN_VENDOR_ATTR_MAX + 1];
+
+	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_MAX,
+		      (struct nlattr *) data, len, NULL) ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_AKM] ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_ACTION] ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_BSSID] ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_SSID] ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_ALGO])
+		return;
+
+	os_memset(&event, 0, sizeof(event));
+	ea = &event.external_auth;
+	act = nla_get_u32(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_ACTION]);
+	switch (act) {
+	case QCA_WLAN_VENDOR_EXTERNAL_AUTH_START:
+		ea->action = EXT_AUTH_START;
+		break;
+	case QCA_WLAN_VENDOR_EXTERNAL_AUTH_ABORT:
+		ea->action = EXT_AUTH_ABORT;
+		break;
+	default:
+		return;
+	}
+
+	ea->key_mgmt_suite =
+		nla_get_u32(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_AKM]);
+	ea->ssid_len = nla_len(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_SSID]);
+	if (ea->ssid_len > SSID_MAX_LEN)
+		return;
+	ea->ssid = nla_data(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_SSID]);
+	ea->bssid = nla_data(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_BSSID]);
+	ea->auth_alg = get_auth_algo(
+		nla_get_u32(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_ALGO]));
+	if (tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_PAIRWISE_CIPHER])
+		ea->pairwise_cipher = rsn_cipher_suite_to_wpa_cipher(
+			nla_get_u32(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_PAIRWISE_CIPHER]));
+	if (tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_GROUP_CIPHER])
+		ea->group_cipher = rsn_cipher_suite_to_wpa_cipher(
+			nla_get_u32(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_GROUP_CIPHER]));
+	if (tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_GROUP_MGMT_CIPHER])
+		ea->group_mgmt_cipher = rsn_cipher_suite_to_wpa_cipher(
+			nla_get_u32(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_GROUP_MGMT_CIPHER]));
+	if (tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_RSN_CAPAB])
+		ea->rsn_capab =
+			nla_get_u16(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_RSN_CAPAB]);
+	if (tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_RSNXE_DATA]) {
+		ea->rsnxe_data =
+			nla_data(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_RSNXE_DATA]);
+		ea->rsnxe_data_len =
+			nla_len(tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_RSNXE_DATA]);
+	}
+
+	mld_addr[0] = '\0';
+	if (tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_AP_MLD_ADDR]) {
+		ea->mld_addr = nla_data(
+			tb[QCA_WLAN_VENDOR_ATTR_EXTERNAL_AUTH_AP_MLD_ADDR]);
+		os_snprintf(mld_addr, sizeof(mld_addr), ", MLD ADDR=" MACSTR,
+			    MAC2STR(ea->mld_addr));
+	}
+
+	wpa_printf(MSG_DEBUG,
+		   "nl80211: %s: %u, AKM=0x%x, SSID=%s, auth algo=%d, pairwise_cipher=%u, group_cipher=%u, group_mgmt_cipher=%u, rsn_capab=0x%x, BSSID="
+		   MACSTR "%s",
+		   __func__, ea->action, ea->key_mgmt_suite,
+		   wpa_ssid_txt(ea->ssid, ea->ssid_len),
+		   ea->auth_alg, ea->pairwise_cipher, ea->group_cipher,
+		   ea->group_mgmt_cipher, ea->rsn_capab,
+		   MAC2STR(ea->bssid), mld_addr);
+	drv->qca_vendor_ext_auth = 1;
+	wpa_supplicant_event(drv->ctx, EVENT_EXTERNAL_AUTH, &event);
+}
+
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 
 
@@ -3504,6 +3685,9 @@ static void nl80211_vendor_event_qca(struct i802_bss *bss,
 	case QCA_NL80211_VENDOR_SUBCMD_LINK_RECONFIG:
 		qca_nl80211_link_reconfig_event(bss->drv, data, len);
 		break;
+	case QCA_NL80211_VENDOR_SUBCMD_EXTERNAL_AUTH:
+		qca_nl80211_external_auth(bss->drv, data, len);
+		break;
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 	default:
 		wpa_printf(MSG_DEBUG,
@@ -3541,7 +3725,7 @@ static void brcm_nl80211_acs_select_ch(struct wpa_driver_nl80211_data *drv,
 	if (tb[BRCM_VENDOR_ATTR_ACS_VHT_SEG0_CENTER_CHANNEL])
 		event.acs_selected_channels.vht_seg0_center_ch =
 			nla_get_u8(tb[BRCM_VENDOR_ATTR_ACS_VHT_SEG0_CENTER_CHANNEL]);
-	if (tb[BRCM_VENDOR_ATTR_ACS_VHT_SEG0_CENTER_CHANNEL])
+	if (tb[BRCM_VENDOR_ATTR_ACS_VHT_SEG1_CENTER_CHANNEL])
 		event.acs_selected_channels.vht_seg1_center_ch =
 			nla_get_u8(tb[BRCM_VENDOR_ATTR_ACS_VHT_SEG1_CENTER_CHANNEL]);
 	if (tb[BRCM_VENDOR_ATTR_ACS_CHWIDTH])
@@ -4082,6 +4266,283 @@ static void nl80211_assoc_comeback(struct wpa_driver_nl80211_data *drv,
 }
 
 
+#ifdef CONFIG_PR
+
+static void
+nl80211_parse_peer_ftm_result(struct peer_measurement_ftm_result *ftm,
+			      struct nlattr *ftm_data)
+{
+	struct nlattr *ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_MAX + 1];
+
+	if (nla_parse_nested(ftm_tb, NL80211_PMSR_FTM_RESP_ATTR_MAX,
+			     ftm_data, NULL))
+		return;
+
+	ftm->has_data = true;
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_FAIL_REASON]) {
+		ftm->fail = true;
+		ftm->fail_reason = nla_get_u32(
+			ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_FAIL_REASON]);
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Ranging failed with reason %u",
+			   ftm->fail_reason);
+		return;
+	}
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BURST_INDEX])
+		ftm->burst_index =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BURST_INDEX]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_FTMR_ATTEMPTS])
+		ftm->num_ftmr_attempts =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_FTMR_ATTEMPTS]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_FTMR_SUCCESSES])
+		ftm->num_ftmr_successes =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_FTMR_SUCCESSES]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BUSY_RETRY_TIME])
+		ftm->busy_retry_time =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BUSY_RETRY_TIME]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_BURSTS_EXP])
+		ftm->num_bursts_exp =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_BURSTS_EXP]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BURST_DURATION])
+		ftm->burst_duration =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BURST_DURATION]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_FTMS_PER_BURST])
+		ftm->ftms_per_burst =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_FTMS_PER_BURST]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RSSI_AVG])
+		ftm->rssi_avg =
+			nla_get_s32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RSSI_AVG]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RSSI_SPREAD])
+		ftm->rssi_spread =
+			nla_get_s32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RSSI_SPREAD]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RTT_AVG])
+		ftm->rtt_avg =
+			nla_get_s64(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RTT_AVG]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RTT_VARIANCE])
+		ftm->rtt_variance =
+			nla_get_u64(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RTT_VARIANCE]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RTT_SPREAD])
+		ftm->rtt_spread =
+			nla_get_u64(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RTT_SPREAD]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_DIST_AVG])
+		ftm->dist_avg =
+			nla_get_s64(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_DIST_AVG]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_DIST_VARIANCE])
+		ftm->dist_variance =
+			nla_get_u64(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_DIST_VARIANCE]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_DIST_SPREAD])
+		ftm->dist_spread =
+			nla_get_u64(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_DIST_SPREAD]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_LCI]) {
+		ftm->lci = os_memdup(
+			nla_data(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_LCI]),
+			nla_len(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_LCI]));
+		ftm->lci_len = nla_len(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_LCI]);
+	}
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_CIVICLOC]) {
+		ftm->civicloc = os_memdup(
+			nla_data(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_CIVICLOC]),
+			nla_len(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_CIVICLOC]));
+		ftm->civicloc_len =
+			nla_len(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_CIVICLOC]);
+	}
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BURST_PERIOD])
+		ftm->burst_period =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_BURST_PERIOD]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_TX_LTF_REPETITION_COUNT])
+		ftm->tx_ltf_repetition_count =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_TX_LTF_REPETITION_COUNT]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RX_LTF_REPETITION_COUNT])
+		ftm->rx_ltf_repetition_count =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_RX_LTF_REPETITION_COUNT]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_MAX_TIME_BETWEEN_MEASUREMENTS])
+		ftm->max_time_between_measurements =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_MAX_TIME_BETWEEN_MEASUREMENTS]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_MIN_TIME_BETWEEN_MEASUREMENTS])
+		ftm->min_time_between_measurements =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_MIN_TIME_BETWEEN_MEASUREMENTS]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_TX_SPATIAL_STREAMS])
+		ftm->num_tx_spatial_streams =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_TX_SPATIAL_STREAMS]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_RX_SPATIAL_STREAMS])
+		ftm->num_rx_spatial_streams =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NUM_RX_SPATIAL_STREAMS]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NOMINAL_TIME])
+		ftm->nominal_time =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_NOMINAL_TIME]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_AVAILABILITY_WINDOW])
+		ftm->availability_window =
+			nla_get_u8(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_AVAILABILITY_WINDOW]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_CHANNEL_WIDTH])
+		ftm->band_width =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_CHANNEL_WIDTH]);
+
+	if (ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_PREAMBLE])
+		ftm->preamble =
+			nla_get_u32(ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_PREAMBLE]);
+
+	ftm->is_delayed_lmr = ftm_tb[NL80211_PMSR_FTM_RESP_ATTR_IS_DELAYED_LMR];
+}
+
+
+static void nl80211_peer_measurement_complete_event(struct i802_bss *bss,
+						    struct nlattr **tb)
+{
+	union wpa_event_data data;
+	u64 cookie = 0;
+
+	os_memset(&data, 0, sizeof(data));
+
+	if (tb[NL80211_ATTR_COOKIE]) {
+		cookie = nla_get_u64(tb[NL80211_ATTR_COOKIE]);
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: PR: Peer measurement complete cookie: %llu",
+			   (unsigned long long) cookie);
+	} else {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: PR: Peer measurement complete (no cookie)");
+	}
+
+	data.peer_measurement_complete.cookie = cookie;
+	wpa_supplicant_event(bss->ctx, EVENT_PEER_MEASUREMENT_COMPLETE, &data);
+}
+
+
+static void nl80211_peer_measurement_result_event(struct i802_bss *bss,
+						  struct nlattr **tb)
+{
+	struct nlattr *pmsr[NL80211_PMSR_ATTR_MAX + 1];
+	struct nlattr *peer;
+	u64 cookie = 0;
+	int rem;
+	struct nla_policy pmsr_policy[NL80211_PMSR_ATTR_MAX + 1] = {
+		[NL80211_PMSR_ATTR_PEERS] = { .type = NLA_NESTED },
+	};
+	struct nla_policy peer_policy[NL80211_PMSR_PEER_ATTR_MAX + 1] = {
+		[NL80211_PMSR_PEER_ATTR_ADDR] = {
+			.minlen = ETH_ALEN,
+			.maxlen = ETH_ALEN,
+		},
+		[NL80211_PMSR_PEER_ATTR_RESP] = { .type = NLA_NESTED },
+	};
+	struct nla_policy resp_policy[NL80211_PMSR_RESP_ATTR_MAX + 1] = {
+		[NL80211_PMSR_RESP_ATTR_DATA] = { .type = NLA_NESTED },
+		[NL80211_PMSR_RESP_ATTR_STATUS] = { .type = NLA_U32 },
+		[NL80211_PMSR_RESP_ATTR_HOST_TIME] = { .type = NLA_U64 },
+		[NL80211_PMSR_RESP_ATTR_AP_TSF] = { .type = NLA_U64 },
+		[NL80211_PMSR_RESP_ATTR_FINAL] = { .type = NLA_FLAG },
+	};
+
+	if (tb[NL80211_ATTR_COOKIE]) {
+		cookie = nla_get_u64(tb[NL80211_ATTR_COOKIE]);
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: PR: Peer measurement cookie: %llu",
+			   (unsigned long long) cookie);
+	}
+
+	if (!tb[NL80211_ATTR_PEER_MEASUREMENTS] ||
+	    nla_parse_nested(pmsr, NL80211_PMSR_ATTR_MAX,
+			     tb[NL80211_ATTR_PEER_MEASUREMENTS], pmsr_policy))
+		return;
+
+	if (!pmsr[NL80211_PMSR_ATTR_PEERS])
+		return;
+
+	nla_for_each_nested(peer, pmsr[NL80211_PMSR_ATTR_PEERS], rem) {
+		struct nlattr *peer_tb[NL80211_PMSR_PEER_ATTR_MAX + 1];
+		struct nlattr *resp_tb[NL80211_PMSR_RESP_ATTR_MAX + 1];
+		union wpa_event_data data;
+
+		os_memset(&data, 0, sizeof(data));
+
+		if (nla_parse_nested(peer_tb, NL80211_PMSR_PEER_ATTR_MAX,
+				     peer, peer_policy))
+			continue;
+
+		if (!peer_tb[NL80211_PMSR_PEER_ATTR_ADDR] ||
+		    !peer_tb[NL80211_PMSR_PEER_ATTR_RESP])
+			continue;
+
+		data.peer_measurement_result.cookie = cookie;
+
+		os_memcpy(data.peer_measurement_result.addr,
+			  nla_data(peer_tb[NL80211_PMSR_PEER_ATTR_ADDR]),
+			  ETH_ALEN);
+
+		if (nla_parse_nested(resp_tb, NL80211_PMSR_RESP_ATTR_MAX,
+				     peer_tb[NL80211_PMSR_PEER_ATTR_RESP],
+				     resp_policy))
+			continue;
+
+		if (resp_tb[NL80211_PMSR_RESP_ATTR_STATUS])
+			data.peer_measurement_result.status =
+				nla_get_u32(resp_tb[NL80211_PMSR_RESP_ATTR_STATUS]);
+
+		if (resp_tb[NL80211_PMSR_RESP_ATTR_HOST_TIME])
+			data.peer_measurement_result.host_time =
+				nla_get_u64(resp_tb[NL80211_PMSR_RESP_ATTR_HOST_TIME]);
+
+		if (resp_tb[NL80211_PMSR_RESP_ATTR_AP_TSF])
+			data.peer_measurement_result.ap_tsf =
+				nla_get_u64(resp_tb[NL80211_PMSR_RESP_ATTR_AP_TSF]);
+
+		if (resp_tb[NL80211_PMSR_RESP_ATTR_FINAL])
+			data.peer_measurement_result.final = true;
+
+		if (resp_tb[NL80211_PMSR_RESP_ATTR_DATA]) {
+			struct nlattr *data_type_tb[NL80211_PMSR_TYPE_MAX + 1];
+
+			if (nla_parse_nested(data_type_tb,
+					     NL80211_PMSR_TYPE_MAX,
+					     resp_tb[NL80211_PMSR_RESP_ATTR_DATA],
+					     NULL))
+				continue;
+
+			if (data_type_tb[NL80211_PMSR_TYPE_FTM])
+				nl80211_parse_peer_ftm_result(
+					&data.peer_measurement_result.ftm,
+					data_type_tb[NL80211_PMSR_TYPE_FTM]);
+		}
+
+		wpa_supplicant_event(bss->ctx, EVENT_PEER_MEASUREMENT_RESULT,
+				     &data);
+		/* Free deep-copied LCI/civic location data */
+		os_free((void *) data.peer_measurement_result.ftm.lci);
+		os_free((void *) data.peer_measurement_result.ftm.civicloc);
+	}
+}
+
+#endif /* CONFIG_PR */
+
+
 #ifdef CONFIG_IEEE80211AX
 
 static void nl80211_obss_color_event(struct i802_bss *bss,
@@ -4183,6 +4644,89 @@ static void nl80211_nan_next_dw_event(struct wpa_driver_nl80211_data *drv,
 	data.nan_next_dw_info.freq =
 		nla_get_u32(tb[NL80211_ATTR_WIPHY_FREQ]);
 	wpa_supplicant_event(drv->ctx, EVENT_NAN_NEXT_DW, &data);
+}
+
+static void
+nl80211_nan_sched_update_done_event(struct wpa_driver_nl80211_data *drv,
+				    struct nlattr **tb)
+{
+	union wpa_event_data data;
+
+	wpa_printf(MSG_DEBUG, "nl80211: NAN schedule update done event");
+
+	os_memset(&data, 0, sizeof(data));
+	data.nan_sched_update_done_info.success =
+		!!tb[NL80211_ATTR_NAN_SCHED_UPDATE_SUCCESS];
+
+	wpa_supplicant_event(drv->ctx, EVENT_NAN_SCHED_UPDATE_DONE, &data);
+}
+
+
+static void nl80211_nan_ulw_update_event(struct wpa_driver_nl80211_data *drv,
+					 struct nlattr **tb)
+{
+	union wpa_event_data data;
+
+	wpa_printf(MSG_DEBUG, "nl80211: NAN ULW update event");
+
+	os_memset(&data, 0, sizeof(data));
+
+	if (tb[NL80211_ATTR_NAN_ULW]) {
+		data.nan_ulw_update_info.ulw =
+			nla_data(tb[NL80211_ATTR_NAN_ULW]);
+		data.nan_ulw_update_info.ulw_len =
+			nla_len(tb[NL80211_ATTR_NAN_ULW]);
+	}
+
+	wpa_supplicant_event(drv->ctx, EVENT_NAN_ULW_UPDATE, &data);
+}
+
+
+static void
+nl80211_nan_channel_evacuate_event(struct wpa_driver_nl80211_data *drv,
+				   struct nlattr **tb)
+{
+	union wpa_event_data data;
+	struct nlattr *attrs[NL80211_ATTR_MAX + 1];
+
+	wpa_printf(MSG_DEBUG, "nl80211: NAN channel evacuation event");
+
+	os_memset(&data, 0, sizeof(data));
+
+	if (!tb[NL80211_ATTR_NAN_CHANNEL] ||
+	    nla_parse_nested(attrs, NL80211_ATTR_MAX,
+			     tb[NL80211_ATTR_NAN_CHANNEL], NULL) ||
+	    !attrs[NL80211_ATTR_WIPHY_FREQ])
+		return;
+
+	data.nan_chan_evacuation_info.freq =
+		nla_get_u32(attrs[NL80211_ATTR_WIPHY_FREQ]);
+
+	wpa_printf(MSG_DEBUG, "nl80211: NAN channel evacuate: freq=%d",
+		   data.nan_chan_evacuation_info.freq);
+
+	wpa_supplicant_event(drv->ctx, EVENT_NAN_CHAN_EVACUATION, &data);
+}
+
+
+static void
+nl80211_nan_del_interface_event(struct i802_bss *bss, struct nlattr **tb)
+{
+	union wpa_event_data event;
+
+	os_memset(&event, 0, sizeof(event));
+
+	wpa_printf(MSG_DEBUG, "nl80211: NAN interface removed event for %s",
+		   bss->ifname);
+
+	os_strlcpy(event.interface_status.ifname, bss->ifname,
+		   sizeof(event.interface_status.ifname));
+
+	event.interface_status.ievent = EVENT_INTERFACE_REMOVED;
+
+	bss->drv->nan_started = false;
+
+	wpa_supplicant_event(bss->ctx, EVENT_INTERFACE_STATUS, &event);
 }
 
 #endif /* CONFIG_NAN */
@@ -4411,7 +4955,8 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 				   tb[NL80211_ATTR_FILS_ERP_NEXT_SEQ_NUM],
 				   tb[NL80211_ATTR_PMK],
 				   tb[NL80211_ATTR_PMKID],
-				   tb[NL80211_ATTR_MLO_LINKS]);
+				   tb[NL80211_ATTR_MLO_LINKS],
+				   tb[NL80211_ATTR_ASSOC_ENCRYPTED]);
 		break;
 	case NL80211_CMD_CH_SWITCH_STARTED_NOTIFY:
 		mlme_event_ch_switch(drv,
@@ -4556,15 +5101,53 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 	case NL80211_CMD_NAN_NEXT_DW_NOTIFICATION:
 		nl80211_nan_next_dw_event(drv, tb);
 		break;
+	case NL80211_CMD_NAN_SCHED_UPDATE_DONE:
+		nl80211_nan_sched_update_done_event(drv, tb);
+		break;
+	case NL80211_CMD_NAN_ULW_UPDATE:
+		nl80211_nan_ulw_update_event(drv, tb);
+		break;
+	case NL80211_CMD_NAN_CHANNEL_EVAC:
+		nl80211_nan_channel_evacuate_event(drv, tb);
+		break;
+	case NL80211_CMD_DEL_INTERFACE:
+		if (drv->nlmode == NL80211_IFTYPE_NAN)
+			nl80211_nan_del_interface_event(bss, tb);
+		break;
 #endif /* CONFIG_NAN */
 	case NL80211_CMD_INCUMBENT_SIGNAL_DETECT:
 		nl80211_incumbt_sig_intf_event(bss, tb);
 		break;
+#ifdef CONFIG_PR
+	case NL80211_CMD_PEER_MEASUREMENT_RESULT:
+		nl80211_peer_measurement_result_event(bss, tb);
+		break;
+	case NL80211_CMD_PEER_MEASUREMENT_COMPLETE:
+		nl80211_peer_measurement_complete_event(bss, tb);
+		break;
+#endif /* CONFIG_PR */
 	default:
 		wpa_dbg(drv->ctx, MSG_DEBUG, "nl80211: Ignored unknown event "
 			"(cmd=%d)", cmd);
 		break;
 	}
+}
+
+
+static bool nl80211_bss_in_drv(struct wpa_driver_nl80211_data *drv,
+			       struct i802_bss *bss)
+{
+	struct i802_bss *tbss;
+
+	if (!drv)
+		return false;
+
+	for (tbss = drv->first_bss; tbss; tbss = tbss->next) {
+		if (tbss == bss)
+			return true;
+	}
+
+	return false;
 }
 
 
@@ -4583,13 +5166,51 @@ static bool nl80211_drv_in_list(struct nl80211_global *global,
 }
 
 
+static struct i802_bss *
+nl80211_get_event_bss(struct wpa_driver_nl80211_data *drv, int ifidx,
+		      int wiphy_idx_rx, int wiphy_idx_set,
+		      u64 wdev_id, int wdev_id_set)
+{
+	struct i802_bss *bss;
+	int wiphy_idx = -1;
+
+	if (ifidx != -1) {
+		for (bss = drv->first_bss; bss; bss = bss->next) {
+			if (ifidx == bss->ifindex)
+				return bss;
+		}
+	}
+
+#ifdef CONFIG_PR
+	if (wdev_id_set && drv->pd_bss && drv->pd_bss->wdev_id_set &&
+	    wdev_id == drv->pd_bss->wdev_id)
+		return drv->pd_bss;
+#endif /* CONFIG_PR */
+
+	for (bss = drv->first_bss; bss; bss = bss->next) {
+		if (wiphy_idx_set)
+			wiphy_idx = nl80211_get_wiphy_index(bss);
+		if ((ifidx == -1 && !wiphy_idx_set && !wdev_id_set) ||
+		    (bss->br_ifindex > 0 &&
+		     nl80211_has_ifidx(drv, bss->br_ifindex, ifidx)) ||
+		    (!wdev_id_set && wiphy_idx_set &&
+		     wiphy_idx == wiphy_idx_rx) ||
+		    (wdev_id_set && bss->wdev_id_set &&
+		     wdev_id == bss->wdev_id))
+			return bss;
+	}
+
+	return NULL;
+}
+
+
 int process_global_event(struct nl_msg *msg, void *arg)
 {
 	struct nl80211_global *global = arg;
 	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
 	struct nlattr *tb[NL80211_ATTR_MAX + 1];
 	struct wpa_driver_nl80211_data *drv, *tmp;
-	int ifidx = -1, wiphy_idx = -1, wiphy_idx_rx = -1;
+	int ifidx = -1, wiphy_idx_rx = -1;
 	struct i802_bss *bss;
 	u64 wdev_id = 0;
 	int wdev_id_set = 0;
@@ -4642,50 +5263,31 @@ int process_global_event(struct nl_msg *msg, void *arg)
 			      struct wpa_driver_nl80211_data, list) {
 		unsigned int unique_drv_id = drv->unique_drv_id;
 
-		/* First pass: Check for exact ifindex match for events directed
-		 * to a specific interface to avoid incorrect selection based on
-		 * matching rules for bridged interfaces. */
-		if (ifidx != -1) {
-			for (bss = drv->first_bss; bss; bss = bss->next) {
-				if (ifidx == bss->ifindex) {
-					do_process_drv_event(bss, gnlh->cmd,
-							     tb);
-					return NL_SKIP;
-				}
-			}
-		}
+		bss = nl80211_get_event_bss(drv, ifidx, wiphy_idx_rx,
+					    wiphy_idx_set, wdev_id,
+					    wdev_id_set);
+		if (!bss)
+			continue;
 
-		/* Second pass: Check all other conditions including bridge */
-		for (bss = drv->first_bss; bss; bss = bss->next) {
-			if (wiphy_idx_set)
-				wiphy_idx = nl80211_get_wiphy_index(bss);
-			if ((ifidx == -1 && !wiphy_idx_set && !wdev_id_set) ||
-			    (bss->br_ifindex > 0 &&
-			     nl80211_has_ifidx(drv, bss->br_ifindex, ifidx)) ||
-			    (wiphy_idx_set && wiphy_idx == wiphy_idx_rx) ||
-			    (wdev_id_set && bss->wdev_id_set &&
-			     wdev_id == bss->wdev_id)) {
-				processed = true;
-				do_process_drv_event(bss, gnlh->cmd, tb);
-				/* There are two types of events that may need
-				 * to be delivered to multiple interfaces:
-				 * 1. Events for a wiphy, as it can have
-				 * multiple interfaces.
-				 * 2. "Global" events, like
-				 * NL80211_CMD_REG_CHANGE.
-				 *
-				 * Terminate early only if the event is directed
-				 * to a specific interface or wdev. */
-				if (ifidx != -1 || wdev_id_set)
-					return NL_SKIP;
-				/* The driver instance could have been removed,
-				 * e.g., due to NL80211_CMD_RADAR_DETECT event,
-				 * so need to stop the loop if that has
-				 * happened. */
-				if (!nl80211_drv_in_list(global, unique_drv_id))
-					break;
-			}
-		}
+		processed = true;
+		do_process_drv_event(bss, gnlh->cmd, tb);
+		/* There are two types of events that may need to be delivered
+		 * to multiple interfaces:
+		 * 1. Events for a wiphy, as it can have multiple interfaces.
+		 * 2. "Global" events, like NL80211_CMD_REG_CHANGE.
+		 *
+		 * Terminate early only if the event is directed to a specific
+		 * interface or wdev. */
+		if (ifidx != -1 || wdev_id_set)
+			return NL_SKIP;
+		/* The driver instance could have been removed, e.g., due to
+		 * NL80211_CMD_RADAR_DETECT event, so need to stop the loop if
+		 * that has happened. */
+		if (!nl80211_drv_in_list(global, unique_drv_id))
+			break;
+
+		if (!nl80211_bss_in_drv(drv, bss))
+			break;
 	}
 
 	if (processed)

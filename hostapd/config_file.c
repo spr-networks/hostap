@@ -4884,12 +4884,25 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		bss->disable_11ax = !!atoi(pos);
 	} else if (os_strcmp(buf, "disable_11be") == 0) {
 		bss->disable_11be = !!atoi(pos);
+	} else if (os_strcmp(buf, "disable_11bn") == 0) {
+		bss->disable_11bn = !!atoi(pos);
 #ifdef CONFIG_PASN
 #ifdef CONFIG_TESTING_OPTIONS
 	} else if (os_strcmp(buf, "force_kdk_derivation") == 0) {
 		bss->force_kdk_derivation = atoi(pos);
 	} else if (os_strcmp(buf, "pasn_corrupt_mic") == 0) {
 		bss->pasn_corrupt_mic = atoi(pos);
+	} else if (os_strcmp(buf, "pasn_test_groups") == 0) {
+		int *groups = NULL;
+
+		if (hostapd_parse_intlist(&groups, pos) < 0) {
+			wpa_printf(MSG_ERROR,
+				   "Line %d: Invalid pasn_test_groups value '%s'",
+				   line, pos);
+			return 1;
+		}
+		os_free(bss->pasn_test_groups);
+		bss->pasn_test_groups = groups;
 #endif /* CONFIG_TESTING_OPTIONS */
 	} else if (os_strcmp(buf, "pasn_groups") == 0) {
 		if (hostapd_parse_intlist(&bss->pasn_groups, pos)) {
@@ -4902,6 +4915,10 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		bss->pasn_comeback_after = atoi(pos);
 	} else if (os_strcmp(buf, "pasn_noauth") == 0) {
 		bss->pasn_noauth = atoi(pos);
+#ifdef CONFIG_ENC_ASSOC
+	} else if (os_strcmp(buf, "eppke_unauth") == 0) {
+		bss->eppke_unauth = atoi(pos);
+#endif /* CONFIG_ENC_ASSOC */
 	} else if (os_strcmp(buf, "urnm_mfpr") == 0) {
 		bss->urnm_mfpr = !!atoi(pos);
 	} else if (os_strcmp(buf, "urnm_mfpr_x20") == 0) {
@@ -4983,6 +5000,22 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		conf->disable_mcs15_rx = atoi(pos);
 #endif /* CONFIG_TESTING_OPTIONS */
 #endif /* CONFIG_IEEE80211BE */
+#ifdef CONFIG_IEEE80211BN
+	} else if (os_strcmp(buf, "ieee80211bn") == 0) {
+		conf->ieee80211bn = atoi(pos);
+	} else if (os_strcmp(buf, "require_uhr") == 0) {
+		conf->require_uhr = atoi(pos);
+	} else if (os_strcmp(buf, "dbe_bandwidth") == 0) {
+		int val = atoi(pos);
+
+		if (val < 0 || val > 5)
+			return 1;
+
+		conf->dbe_bandwidth = val;
+	} else if (os_strcmp(buf, "dbe_punct_bitmap") == 0) {
+		if (get_u16(pos, line, &conf->dbe_punct_bitmap))
+			return 1;
+#endif /* CONFIG_IEEE80211BN */
 	} else if (os_strcmp(buf, "i2r_lmr_policy") == 0) {
 		conf->i2r_lmr_policy = atoi(pos);
 	} else {

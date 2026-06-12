@@ -21,6 +21,9 @@
 extern "C" {
 #endif
 
+/* Maximum number of ECC groups supported for PASN */
+#define MAX_NUM_OF_PASN_GROUPS 10
+
 enum pasn_fils_state {
 	PASN_FILS_STATE_NONE = 0,
 	PASN_FILS_STATE_PENDING_AS,
@@ -52,19 +55,31 @@ struct pasn_data {
 	unsigned int auth_alg;
 	u8 mld_addr[ETH_ALEN];
 	bool is_ml_peer;
+	int group_cipher;
+	int group_mgmt_cipher;
+	u16 rsn_capab;
 
 #ifdef CONFIG_SAE
 	struct sae_pt *pt;
 #endif /* CONFIG_SAE */
 
 	/* Responder */
-	const char *password;
 	int wpa_key_mgmt;
 	int rsn_pairwise;
-	u32 rsnxe_capab;
+	u64 rsnxe_capab;
 	u8 *rsnxe_ie;
 	bool custom_pmkid_valid;
 	u8 custom_pmkid[PMKID_LEN];
+	enum mfp_options ieee80211w;
+
+	/* Counter from the decrypted password identifier blob (set when
+	 * get_pt_for_pw_id() resolves an encrypted identifier) */
+	unsigned int sae_pw_id_counter;
+	/* Decrypted (real) password identifier resolved from an encrypted
+	 * identifier blob; NULL for plaintext identifiers. Owned by pasn_data
+	 * and freed by pasn_data_deinit(). */
+	u8 *dec_pw_id;
+	size_t dec_pw_id_len;
 
 	/*
 	 * Extra elements to add into Authentication frames. These can be used,
@@ -77,6 +92,10 @@ struct pasn_data {
 	bool derive_kek;
 	size_t kek_len;
 	u16 group;
+	u16 rejected_groups[MAX_NUM_OF_PASN_GROUPS];
+	unsigned int rejected_group_idx;
+	u16 ap_supported_groups[MAX_NUM_OF_PASN_GROUPS];
+	unsigned int ap_supported_group_idx;
 	bool secure_ltf;
 	int freq;
 
@@ -121,14 +140,23 @@ struct pasn_data {
 	int fast_reauth;
 #ifdef CONFIG_TESTING_OPTIONS
 	int corrupt_mic;
+	/*
+	 * Override Supported Groups element in the second PASN Authentication
+	 * frame for group negotiation testing.
+	 */
+	const int *pasn_test_groups;
 #endif /* CONFIG_TESTING_OPTIONS */
 	int network_id;
+	void *network_ctx;
 
 	u8 wrapped_data_format;
 	struct wpabuf *secret;
 
 	/* Responder */
 	bool noauth; /* Whether PASN without mutual authentication is enabled */
+#ifdef CONFIG_ENC_ASSOC
+	bool eppke_unauth; /* Whether unauthenticated EPPKE is enabled */
+#endif /* CONFIG_ENC_ASSOC */
 	int disable_pmksa_caching;
 	int *pasn_groups;
 	int use_anti_clogging;
@@ -180,6 +208,36 @@ struct pasn_data {
 	struct rsn_pmksa_cache_entry *
 	(*pmksa_cache_search)(void *ctx, const u8 *spa, const u8 *pmkid,
 			      bool is_ml);
+#ifdef CONFIG_SAE
+	/**
+	 * get_pt_for_pw_id - Look up SAE PT for a given password identifier
+	 * @ctx: Callback context from cb_ctx
+	 * @pw_id: Password identifier received in the SAE commit frame
+	 * @pw_id_len: Length of the password identifier
+	 * @group: SAE group being used
+	 * @password: Output pointer to the matching password string
+	 * @counter: Output counter value from the decrypted identifier blob
+	 *	(set to 0 for plaintext identifiers)
+	 * @dec_pw_id: Output pointer to the decrypted (real) password
+	 *	identifier for encrypted blobs; set to NULL for plaintext
+	 *	identifiers. The caller takes ownership and must free with
+	 *	os_free().
+	 * @dec_pw_id_len: Output length of the decrypted password identifier
+	 * Returns: SAE PT on success, NULL if not found
+	 *
+	 * This callback is invoked by the PASN responder when processing an
+	 * SAE commit frame that contains a password identifier, allowing the
+	 * AP to look up the correct PT at commit-processing time rather than
+	 * at PASN-setup time.
+	 */
+	struct sae_pt * (*get_pt_for_pw_id)(void *ctx,
+					    const u8 *pw_id, size_t pw_id_len,
+					    int group,
+					    const char **password,
+					    unsigned int *counter,
+					    u8 **dec_pw_id,
+					    size_t *dec_pw_id_len);
+#endif /* CONFIG_SAE */
 };
 
 /* Initiator */
@@ -259,7 +317,7 @@ void pasn_initiator_pmksa_cache_deinit(struct rsn_pmksa_cache *pmksa);
 int pasn_initiator_pmksa_cache_add(struct rsn_pmksa_cache *pmksa,
 				   const u8 *own_addr, const u8 *bssid,
 				   const u8 *pmk, size_t pmk_len,
-				   const u8 *pmkid);
+				   const u8 *pmkid, int akmp);
 int pasn_initiator_pmksa_cache_get(struct rsn_pmksa_cache *pmksa,
 				   const u8 *bssid, u8 *pmkid, u8 *pmk,
 				   size_t *pmk_len);
@@ -269,21 +327,22 @@ void pasn_initiator_pmksa_cache_flush(struct rsn_pmksa_cache *pmksa);
 
 /* Responder */
 void pasn_set_noauth(struct pasn_data *pasn, bool noauth);
-void pasn_set_password(struct pasn_data *pasn, const char *password);
 void pasn_set_wpa_key_mgmt(struct pasn_data *pasn, int key_mgmt);
 void pasn_set_rsn_pairwise(struct pasn_data *pasn, int rsn_pairwise);
 void pasn_set_rsne(struct pasn_data *pasn, const u8 *rsne);
-void pasn_set_rsnxe_caps(struct pasn_data *pasn, u32 rsnxe_capab);
+void pasn_set_rsnxe_caps(struct pasn_data *pasn, u64 rsnxe_capab);
 void pasn_set_rsnxe_ie(struct pasn_data *pasn, const u8 *rsnxe_ie);
 void pasn_set_custom_pmkid(struct pasn_data *pasn, const u8 *pmkid);
 int pasn_set_extra_ies(struct pasn_data *pasn, const u8 *extra_ies,
 		       size_t extra_ies_len);
+void pasn_set_mfp(struct pasn_data *pasn, enum mfp_options mfp);
+
 struct rsn_pmksa_cache * pasn_responder_pmksa_cache_init(void);
 void pasn_responder_pmksa_cache_deinit(struct rsn_pmksa_cache *pmksa);
 int pasn_responder_pmksa_cache_add(struct rsn_pmksa_cache *pmksa,
 				   const u8 *own_addr, const u8 *bssid,
 				   const u8 *pmk, size_t pmk_len,
-				   const u8 *pmkid);
+				   const u8 *pmkid, int akmp);
 int pasn_responder_pmksa_cache_get(struct rsn_pmksa_cache *pmksa,
 				   const u8 *bssid, u8 *pmkid, u8 *pmk,
 				   size_t *pmk_len);

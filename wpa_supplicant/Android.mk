@@ -309,6 +309,10 @@ OBJS += src/nan/nan_ndp.c
 OBJS += src/nan/nan_ndl.c
 OBJS += src/nan/nan_crypto.c
 OBJS += src/nan/nan_sec.c
+OBJS += src/nan/nan_bootstrap.c
+ifdef CONFIG_PASN
+OBJS += src/nan/nan_pairing.c
+endif
 endif
 
 ifdef CONFIG_OWE
@@ -427,6 +431,7 @@ NEED_HMAC_SHA256_KDF=y
 NEED_HMAC_SHA384_KDF=y
 NEED_SHA256=y
 NEED_SHA384=y
+NEED_DRAGONFLY=y
 OBJS += src/pasn/pasn_initiator.c
 OBJS += src/pasn/pasn_common.c
 OBJS += pasn_supplicant.c
@@ -984,6 +989,9 @@ endif
 ifdef CONFIG_IEEE80211BE
 OBJS += src/ap/ieee802_11_eht.c
 endif
+ifdef CONFIG_IEEE80211BN
+OBJS += src/ap/ieee802_11_uhr.c
+endif
 ifdef CONFIG_WNM_AP
 L_CFLAGS += -DCONFIG_WNM_AP
 OBJS += src/ap/wnm_ap.c
@@ -1005,6 +1013,10 @@ OBJS += src/eap_server/eap_server_methods.c
 
 ifdef CONFIG_IEEE80211AC
 L_CFLAGS += -DCONFIG_IEEE80211AC
+endif
+ifdef CONFIG_IEEE80211BN
+CONFIG_IEEE80211BE=y
+L_CFLAGS += -DCONFIG_IEEE80211BN
 endif
 ifdef CONFIG_IEEE80211BE
 CONFIG_IEEE80211AX=y

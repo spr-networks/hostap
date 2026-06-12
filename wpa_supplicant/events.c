@@ -1064,6 +1064,18 @@ static int rate_match(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 				continue;
 			}
 
+			if (flagged && ((rate_ie[j] & 0x7f) ==
+					BSS_MEMBERSHIP_SELECTOR_UHR_PHY)) {
+				if (!uhr_supported(mode, IEEE80211_MODE_INFRA))
+				{
+					if (debug_print)
+						wpa_dbg(wpa_s, MSG_DEBUG,
+							"   hardware does not support UHR PHY");
+					return 0;
+				}
+				continue;
+			}
+
 #ifdef CONFIG_SAE
 			if (flagged && ((rate_ie[j] & 0x7f) ==
 					BSS_MEMBERSHIP_SELECTOR_SAE_H2E_ONLY)) {
@@ -3556,6 +3568,8 @@ static void wpas_parse_connection_info(struct wpa_supplicant *wpa_s,
 		resp_elems.eht_capabilities;
 	if (req_elems.rrm_enabled)
 		wpa_s->rrm.rrm_used = 1;
+	wpa_s->connection_uhr = req_elems.uhr_capabilities &&
+		resp_elems.uhr_capabilities;
 
 #ifdef CONFIG_PMKSA_PRIVACY
 	if (wpa_s->assoc_resp_encrypted && resp_elems.nonce) {
@@ -3564,6 +3578,13 @@ static void wpas_parse_connection_info(struct wpa_supplicant *wpa_s,
 		wpa_hexdump(MSG_DEBUG,
 			    "PMKID privacy: ANonce in Assoc Response",
 			    wpa_s->pmkid_anonce, NONCE_LEN);
+	}
+	if (wpa_s->assoc_resp_encrypted && req_elems.nonce) {
+		os_memcpy(wpa_s->pmkid_snonce, req_elems.nonce, NONCE_LEN);
+		wpa_s->pmkid_snonce_set = true;
+		wpa_hexdump(MSG_DEBUG,
+			    "PMKID privacy: SNonce in Assoc Request",
+			    wpa_s->pmkid_snonce, NONCE_LEN);
 	}
 #endif /* CONFIG_PMKSA_PRIVACY */
 
@@ -3716,9 +3737,16 @@ static int wpa_supplicant_event_associnfo(struct wpa_supplicant *wpa_s,
 	wpa_s->ssid_verified = false;
 	wpa_s->bigtk_set = false;
 #ifdef CONFIG_ENC_ASSOC
-	if (data->assoc_info.resp_frame &&
-	    data->assoc_info.resp_frame_len >= 2 &&
-	    (WPA_GET_LE16(data->assoc_info.resp_frame) & WLAN_FC_PROTECTED)) {
+	/*
+	 * For SME-in-wpa_supplicant, check the Protected bit in the frame
+	 * header. For SME-in-driver, the full frame is not available, so use
+	 * the assoc_encrypted flag indicated by the driver instead.
+	 */
+	if ((data->assoc_info.resp_frame &&
+	     data->assoc_info.resp_frame_len >= 2 &&
+	     (WPA_GET_LE16(data->assoc_info.resp_frame) & WLAN_FC_PROTECTED)) ||
+	    (!(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME) &&
+	     data->assoc_info.assoc_encrypted)) {
 		wpa_printf(MSG_INFO, "Association Response frame is encrypted");
 		wpa_s->assoc_resp_encrypted = true;
 	} else {
@@ -4306,6 +4334,13 @@ static unsigned int wpas_ml_parse_assoc(struct wpa_supplicant *wpa_s,
 		goto out;
 	}
 
+	if (sizeof(*ml) + common_info->len > ml_len) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Truncated common info (common_info->len=%u ml_len=%zu)",
+			   common_info->len, ml_len);
+		goto out;
+	}
+
 	wpa_printf(MSG_DEBUG, "MLD: address: " MACSTR,
 		   MAC2STR(common_info->mld_addr));
 
@@ -4318,7 +4353,12 @@ static unsigned int wpas_ml_parse_assoc(struct wpa_supplicant *wpa_s,
 	pos = common_info->variable;
 
 	/* Store the information for the association link */
-	ml_info[i].link_id = *pos;
+	ml_info[i].link_id = *pos & EHT_ML_LINK_ID_MSK;
+	if (ml_info[i].link_id >= MAX_NUM_MLD_LINKS) {
+		wpa_printf(MSG_DEBUG,
+			   "MLD: Invalid Link ID value for assoc link");
+		goto out;
+	}
 	pos++;
 
 	/* Skip the BSS Parameters Change Count */
@@ -4474,6 +4514,10 @@ static unsigned int wpas_ml_parse_assoc(struct wpa_supplicant *wpa_s,
 			   MAC2STR(pos + 1), nstr_bitmap_len);
 
 		ml_info[i].link_id = ctrl & BASIC_MLE_STA_CTRL_LINK_ID_MASK;
+		if (ml_info[i].link_id >= MAX_NUM_MLD_LINKS) {
+			wpa_printf(MSG_DEBUG, "MLD: Invalid Link ID value");
+			goto out;
+		}
 		os_memcpy(ml_info[i].bssid, pos + 1, ETH_ALEN);
 
 		pos += sta_info_len;
@@ -4760,7 +4804,9 @@ static void wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 	    wpa_s->assoc_resp_encrypted &&
 	    wpa_sm_pmksa_privacy_supported(wpa_s->wpa) &&
 	    (wpa_s->drv_flags2 &
-	     WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION)) {
+	     WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION) &&
+	    ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME) ||
+	     (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_PMKSA_PRIVACY))) {
 		struct rsn_pmksa_cache *t = wpa_sm_get_pmksa_cache(wpa_s->wpa);
 		const u8 *addr = wpa_s->valid_links ?
 			wpa_s->ap_mld_addr : wpa_s->bssid;
@@ -5310,6 +5356,7 @@ wpa_supplicant_event_interface_status(struct wpa_supplicant *wpa_s,
 		if (!wpa_s->global->p2p &&
 		    !wpa_s->global->p2p_disabled &&
 		    !wpa_s->conf->p2p_disabled &&
+		    !wpas_is_nan_iface(wpa_s) &&
 		    (wpa_s->drv_flags &
 		     WPA_DRIVER_FLAGS_DEDICATED_P2P_DEVICE) &&
 		    wpas_p2p_add_p2pdev_interface(
@@ -5342,6 +5389,30 @@ wpa_supplicant_event_interface_status(struct wpa_supplicant *wpa_s,
 			wpa_s->global->p2p_init_wpa_s = NULL;
 		}
 #endif /* CONFIG_P2P */
+
+#ifdef CONFIG_NAN
+		if (wpa_s->nan_data) {
+			wpa_printf(MSG_DEBUG, "%s: NAN data interface removed",
+				   wpa_s->ifname);
+
+			wpas_nan_data_interface_removed(wpa_s);
+			wpa_supplicant_remove_iface(wpa_s->global, wpa_s, 0);
+			break;
+		}
+
+		if (wpa_s->nan_mgmt) {
+			wpa_printf(MSG_DEBUG,
+				   "%s: NAN management interface removed",
+				   wpa_s->ifname);
+
+			/*
+			 * Note: NAN is stopped when the interface is
+			 * disabled.
+			 */
+			wpa_supplicant_remove_iface(wpa_s->global, wpa_s, 0);
+			break;
+		}
+#endif /* CONFIG_NAN */
 
 #ifdef CONFIG_MATCH_IFACE
 		if (wpa_s->matched) {
@@ -5948,14 +6019,27 @@ static void wpas_event_rx_mgmt_action(struct wpa_supplicant *wpa_s,
 	}
 #endif /* CONFIG_FST */
 
-	if (category == WLAN_ACTION_PUBLIC && plen >= 5 &&
-	    payload[0] == WLAN_PA_VENDOR_SPECIFIC &&
-	    WPA_GET_BE32(&payload[1]) == NAN_SDF_VENDOR_TYPE) {
-		payload += 5;
-		plen -= 5;
-		wpas_nan_de_rx_sdf(wpa_s, mgmt->sa, mgmt->bssid, freq,
-				   payload, plen, rssi);
-		return;
+	if ((category == WLAN_ACTION_PUBLIC ||
+	     category == WLAN_ACTION_PROTECTED_DUAL) &&
+	    plen >= 5 && payload[0] == WLAN_PA_VENDOR_SPECIFIC) {
+		/* Drop unprotected unicast NAN frames from paired peers */
+		if (category == WLAN_ACTION_PUBLIC &&
+		    !is_multicast_ether_addr(mgmt->da) &&
+		    wpas_nan_is_peer_paired(wpa_s, mgmt->sa))
+			return;
+
+		if  (WPA_GET_BE32(&payload[1]) == NAN_SDF_VENDOR_TYPE) {
+			payload += 5;
+			plen -= 5;
+			wpas_nan_de_rx_sdf(wpa_s, mgmt->sa, mgmt->bssid, freq,
+					   payload, plen, rssi);
+			return;
+		}
+
+		if (WPA_GET_BE32(&payload[1]) == NAN_NAF_VENDOR_TYPE) {
+			wpas_nan_rx_naf(wpa_s, mgmt, len);
+			return;
+		}
 	}
 
 #ifdef CONFIG_DPP
@@ -6269,7 +6353,7 @@ static void wpas_event_assoc_reject(struct wpa_supplicant *wpa_s,
 #ifdef CONFIG_DPP2
 	/* Try to follow AP's PFS policy. WLAN_STATUS_ASSOC_DENIED_UNSPEC is
 	 * the status code defined in the DPP R2 tech spec.
-	 * WLAN_STATUS_AKMP_NOT_VALID is addressed in the same manner as an
+	 * WLAN_STATUS_INVALID_AKMP is addressed in the same manner as an
 	 * interoperability workaround with older hostapd implementation. */
 	if (DPP_VERSION > 1 && wpa_s->current_ssid &&
 	    (wpa_s->current_ssid->key_mgmt == WPA_KEY_MGMT_DPP ||
@@ -6278,7 +6362,7 @@ static void wpas_event_assoc_reject(struct wpa_supplicant *wpa_s,
 	    wpa_s->current_ssid->dpp_pfs == 0 &&
 	    (data->assoc_reject.status_code ==
 	     WLAN_STATUS_ASSOC_DENIED_UNSPEC ||
-	     data->assoc_reject.status_code == WLAN_STATUS_AKMP_NOT_VALID)) {
+	     data->assoc_reject.status_code == WLAN_STATUS_INVALID_AKMP)) {
 		struct wpa_ssid *ssid = wpa_s->current_ssid;
 		struct wpa_bss *bss = wpa_s->current_bss;
 
@@ -6621,6 +6705,10 @@ static int wpas_pasn_auth(struct wpa_supplicant *wpa_s,
 	if (elems.proximity_ranging && elems.proximity_ranging_len)
 		return wpas_pr_pasn_auth_rx(wpa_s, mgmt, len, freq);
 #endif /* CONFIG_PR */
+#ifdef CONFIG_NAN
+	if (wpa_s->nan_mgmt && elems.nan_ie && elems.nan_len)
+		return wpas_nan_pasn_auth_rx(wpa_s, mgmt, len);
+#endif /* CONFIG_NAN */
 
 	return wpas_pasn_auth_rx(wpa_s, mgmt, len);
 }
@@ -6885,6 +6973,16 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 						data->tx_status.ack) == 0)
 			break;
 #endif /* CONFIG_PR */
+#ifdef CONFIG_NAN
+		if (wpa_s->nan_mgmt &&
+		    data->tx_status.type == WLAN_FC_TYPE_MGMT &&
+		    data->tx_status.stype == WLAN_FC_STYPE_AUTH &&
+		    !wpa_s->pasn_auth_work &&
+		    wpas_nan_pasn_auth_tx_status(wpa_s, data->tx_status.data,
+						 data->tx_status.data_len,
+						 data->tx_status.ack) == 0)
+			break;
+#endif /* CONFIG_NAN */
 		if (data->tx_status.type == WLAN_FC_TYPE_MGMT &&
 		    data->tx_status.stype == WLAN_FC_STYPE_AUTH &&
 		    wpas_pasn_auth_tx_status(wpa_s, data->tx_status.data,
@@ -6892,6 +6990,15 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 					     data->tx_status.ack) == 0)
 			break;
 #endif /* CONFIG_PASN */
+
+		if (wpas_is_nan_iface(wpa_s) &&
+		    data->tx_status.type == WLAN_FC_TYPE_MGMT &&
+		    data->tx_status.stype == WLAN_FC_STYPE_ACTION &&
+		    wpas_nan_tx_status(wpa_s, data->tx_status.data,
+				       data->tx_status.data_len,
+				       data->tx_status.ack) == 0)
+			break;
+
 #ifdef CONFIG_AP
 		if (wpa_s->ap_iface == NULL) {
 #ifdef CONFIG_OFFCHANNEL
@@ -7170,7 +7277,8 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 #ifdef CONFIG_SAE
 			if (stype == WLAN_FC_STYPE_AUTH &&
 			    !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME) &&
-			    (wpa_s->drv_flags & WPA_DRIVER_FLAGS_SAE)) {
+			    ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_SAE) ||
+			    (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_EPPKE))) {
 				sme_external_auth_mgmt_rx(
 					wpa_s, data->rx_mgmt.frame,
 					data->rx_mgmt.frame_len);
@@ -7255,6 +7363,10 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 #endif /* CONFIG_DPP */
 		wpas_nan_usd_cancel_remain_on_channel_cb(
 			wpa_s, data->remain_on_channel.freq);
+#ifdef CONFIG_PR
+		wpas_pr_cancel_remain_on_channel_cb(
+			wpa_s, data->remain_on_channel.freq);
+#endif /* CONFIG_PR */
 		break;
 	case EVENT_EAPOL_RX:
 		wpa_supplicant_rx_eapol(wpa_s, data->eapol_rx.src,
@@ -7537,13 +7649,12 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		bgscan_notify_beacon_loss(wpa_s);
 		break;
 	case EVENT_EXTERNAL_AUTH:
-#ifdef CONFIG_SAE
 		if (!wpa_s->current_ssid) {
-			wpa_printf(MSG_DEBUG, "SAE: current_ssid is NULL");
+			wpa_printf(MSG_DEBUG,
+				   "EXTERNAL_AUTH: current_ssid is NULL");
 			break;
 		}
-		sme_external_auth_trigger(wpa_s, data);
-#endif /* CONFIG_SAE */
+		sme_external_auth_trigger(wpa_s, &data->external_auth);
 		break;
 #ifdef CONFIG_PASN
 	case EVENT_PASN_AUTH:
@@ -7606,6 +7717,16 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		if (data)
 			wpas_setup_link_reconfig(wpa_s, &data->reconfig_info);
 		break;
+#ifdef CONFIG_PR
+	case EVENT_PEER_MEASUREMENT_RESULT:
+		wpas_pr_measurement_result(wpa_s,
+					   &data->peer_measurement_result);
+		break;
+	case EVENT_PEER_MEASUREMENT_COMPLETE:
+		wpas_pr_measurement_complete(wpa_s,
+					     &data->peer_measurement_complete);
+		break;
+#endif /* CONFIG_PR */
 #ifdef CONFIG_NAN
 	case EVENT_NAN_CLUSTER_JOIN:
 		wpas_nan_cluster_join(wpa_s, data->nan_cluster_join_info.bssid,
@@ -7613,6 +7734,17 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 		break;
 	case EVENT_NAN_NEXT_DW:
 		wpas_nan_next_dw(wpa_s, data->nan_next_dw_info.freq);
+		break;
+	case EVENT_NAN_SCHED_UPDATE_DONE:
+		wpas_nan_sched_update_done(wpa_s, data);
+		break;
+	case EVENT_NAN_ULW_UPDATE:
+		wpas_nan_ulw_update(wpa_s, data->nan_ulw_update_info.ulw,
+				    data->nan_ulw_update_info.ulw_len);
+		break;
+	case EVENT_NAN_CHAN_EVACUATION:
+		wpas_nan_chan_evacuation(wpa_s,
+					 &data->nan_chan_evacuation_info);
 		break;
 #endif /* CONFIG_NAN */
 	default:

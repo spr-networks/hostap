@@ -1398,7 +1398,7 @@ static int hostapd_bss_radius_init(struct hostapd_data *hapd)
 /**
  * hostapd_setup_bss - Per-BSS setup (initialization)
  * @hapd: Pointer to BSS data
- * @first: Whether this BSS is the first BSS of an interface; -1 = not first,
+ * @first: Whether this BSS is the first BSS of an interface; false = not first,
  *	but interface may exist
  * @start_beacon: Whether Beacon frame template should be configured and
  *	transmission of Beaconf rames started at this time. This is used when
@@ -1412,7 +1412,7 @@ static int hostapd_bss_radius_init(struct hostapd_data *hapd)
  * initialized. Most of the modules that are initialized here will be
  * deinitialized in hostapd_cleanup().
  */
-static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
+static int hostapd_setup_bss(struct hostapd_data *hapd, bool first,
 			     bool start_beacon)
 {
 	struct hostapd_bss_config *conf = hapd->conf;
@@ -1453,7 +1453,7 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
 	}
 	hapd->started = 1;
 
-	if (!first || first == -1) {
+	if (!first) {
 		u8 *addr = hapd->own_addr;
 
 		if (!is_zero_ether_addr(conf->bssid)) {
@@ -1498,7 +1498,7 @@ static int hostapd_setup_bss(struct hostapd_data *hapd, int first,
 				   conf->iface, addr, hapd,
 				   &hapd->drv_priv, force_ifname, if_addr,
 				   conf->bridge[0] ? conf->bridge : NULL,
-				   first == -1)) {
+				   1)) {
 			wpa_printf(MSG_ERROR, "Failed to add BSS (BSSID="
 				   MACSTR ")", MAC2STR(hapd->own_addr));
 			hapd->interface_added = 0;
@@ -3910,7 +3910,7 @@ int hostapd_add_iface(struct hapd_interfaces *interfaces, char *buf)
 
 			if (start_ctrl_iface_bss(hapd) < 0 ||
 			    (hapd_iface->state == HAPD_IFACE_ENABLED &&
-			     hostapd_setup_bss(hapd, -1, true))) {
+			     hostapd_setup_bss(hapd, false, true))) {
 				hostapd_bss_link_deinit(hapd);
 				hostapd_cleanup(hapd);
 				hapd_iface->bss[hapd_iface->num_bss - 1] = NULL;
@@ -4522,23 +4522,34 @@ int hostapd_change_config_freq(struct hostapd_data *hapd,
 	mode = hapd->iface->current_mode;
 
 	/* if a pointer to old_params is provided we save previous state */
-	if (old_params &&
-	    hostapd_set_freq_params(old_params, conf->hw_mode,
-				    hostapd_hw_get_freq(hapd, conf->channel),
-				    conf->channel, conf->enable_edmg,
-				    conf->edmg_channel, conf->ieee80211n,
-				    conf->ieee80211ac, conf->ieee80211ax,
-				    conf->ieee80211be, conf->secondary_channel,
-				    hostapd_get_oper_chwidth(conf),
-				    hostapd_get_oper_centr_freq_seg0_idx(conf),
-				    hostapd_get_oper_centr_freq_seg1_idx(conf),
-				    conf->vht_capab,
-				    mode ? &mode->he_capab[IEEE80211_MODE_AP] :
-				    NULL,
-				    mode ? &mode->eht_capab[IEEE80211_MODE_AP] :
-				    NULL,
-				    hostapd_get_punct_bitmap(hapd)))
-		return -1;
+	if (old_params) {
+		struct hostapd_channel_info info = {
+			.mode = conf->hw_mode,
+			.freq = hostapd_hw_get_freq(hapd, conf->channel),
+			.channel = conf->channel,
+			.edmg.enabled = conf->enable_edmg,
+			.edmg.channel = conf->edmg_channel,
+			.ht.enabled = conf->ieee80211n,
+			.vht.enabled = conf->ieee80211ac,
+			.he.enabled = conf->ieee80211ax,
+			.eht.enabled = conf->ieee80211be,
+			.ht.sec_channel_offset = conf->secondary_channel,
+			.oper_chwidth = hostapd_get_oper_chwidth(conf),
+			.center_segment0 =
+			hostapd_get_oper_centr_freq_seg0_idx(conf),
+			.center_segment1 =
+			hostapd_get_oper_centr_freq_seg1_idx(conf),
+			.vht.caps = conf->vht_capab,
+			.he.cap = mode ? &mode->he_capab[IEEE80211_MODE_AP] :
+			NULL,
+			.eht.cap = mode ? &mode->eht_capab[IEEE80211_MODE_AP] :
+			NULL,
+			.eht.punct_bitmap = hostapd_get_punct_bitmap(hapd),
+		};
+
+		if (hostapd_set_freq_params(old_params, &info))
+			return -1;
+	}
 
 	switch (params->bandwidth) {
 	case 0:
@@ -4676,8 +4687,10 @@ static int hostapd_fill_csa_settings(struct hostapd_data *hapd,
 	ret = hostapd_build_beacon_data(hapd, &settings->beacon_after);
 
 	/* change back the configuration */
-	hostapd_change_config_freq(iface->bss[0], iface->conf,
-				   &old_freq, NULL);
+	if (hostapd_change_config_freq(iface->bss[0], iface->conf,
+				       &old_freq, NULL) < 0)
+		wpa_printf(MSG_INFO,
+			   "Failed to switch back to old frequency after preparing beacon data for CSA");
 
 	if (ret)
 		return ret;
@@ -5395,4 +5408,86 @@ bool hostapd_acceptable_sta_addr(struct hostapd_data *hapd, const u8 *addr,
 		return false;
 
 	return true;
+}
+
+
+void hostapd_get_oper_chan_info_of_bss(struct hostapd_data *hapd,
+				       enum oper_chan_width *width,
+				       u8 *seg0, u8 *seg1)
+{
+	*width = hostapd_get_oper_chwidth(hapd->iconf);
+	*seg0 = hostapd_get_oper_centr_freq_seg0_idx(hapd->iconf);
+	*seg1 = hostapd_get_oper_centr_freq_seg1_idx(hapd->iconf);
+
+#ifdef CONFIG_IEEE80211BE
+	/* Re-derive the legacy channel width for EHT disabled BSS on an EHT
+	 * capable interface for punctured channel and 320 MHz bandwidth cases.
+	 */
+	if (hapd->iconf->ieee80211be && !hostapd_is_eht_enabled(hapd)) {
+		u16 punct_bitmap = hostapd_get_punct_bitmap(hapd);
+
+		if (punct_bitmap)
+			punct_update_legacy_bw(punct_bitmap,
+					       hapd->iconf->channel,
+					       width, seg0, seg1);
+
+		if (*width == CONF_OPER_CHWIDTH_320MHZ)
+			*width = CONF_OPER_CHWIDTH_160MHZ;
+	}
+#endif /* CONFIG_IEEE80211BE */
+}
+
+
+enum oper_chan_width
+hostapd_get_oper_chan_width_of_bss(struct hostapd_data *hapd)
+{
+	enum oper_chan_width width;
+	u8 seg0, seg1;
+
+	hostapd_get_oper_chan_info_of_bss(hapd, &width, &seg0, &seg1);
+
+	return width;
+}
+
+
+u8 hostapd_get_oper_class_of_bss(struct hostapd_data *hapd)
+{
+	u8 op_class = hapd->iconf->op_class;
+
+#ifdef CONFIG_IEEE80211BE
+	/* For EHT disabled BSS, re-derive the legacy operating class from
+	 * operating frequency parameters as the bandwidth that it advertises
+	 * in VHT/HE Operation element can be lower than EHT enabled BSS of the
+	 * interface.
+	 *
+	 * If EHT is not disabled on the BSS, interface's operating class is
+	 * returned without recomputation against operating frequency parameters
+	 * as operating channel information is expected to be aligned with the
+	 * interface's operating class configuration.
+	 */
+	if (hapd->iconf->ieee80211be && !hostapd_is_eht_enabled(hapd) &&
+	    hapd->iface->freq) {
+		enum oper_chan_width bss_chwidth, iface_chwidth;
+		u8 chan;
+
+		iface_chwidth = hostapd_get_oper_chwidth(hapd->iconf);
+		bss_chwidth = hostapd_get_oper_chan_width_of_bss(hapd);
+
+		/* If the BSS channel width is different from the interface
+		 * channel width, re-compute the operating class as per the BSS
+		 * channel width.
+		 */
+		if (bss_chwidth != iface_chwidth) {
+			if (ieee80211_freq_to_channel_ext(
+				    hapd->iface->freq,
+				    hapd->iconf->secondary_channel,
+				    bss_chwidth, &op_class,
+				    &chan) == NUM_HOSTAPD_MODES ||
+			    chan != hapd->iconf->channel)
+				return hapd->iconf->op_class;
+		}
+	}
+#endif /* CONFIG_IEEE80211BE */
+
+	return op_class;
 }

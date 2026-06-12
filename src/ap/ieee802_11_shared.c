@@ -1115,7 +1115,7 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 {
 	u8 *pos = eid;
 	bool sae_pk = false;
-	u32 capab = 0, tmp;
+	u64 capab = 0, tmp;
 	size_t flen;
 
 	if (!(hapd->conf->wpa & WPA_PROTO_RSN))
@@ -1170,6 +1170,8 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 		capab |= BIT(WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
 	if (hapd->conf->eap_using_authentication_frames)
 		capab |= BIT(WLAN_RSNX_CAPAB_802_1X_IN_AUTH_FRAMES);
+	if (hapd->conf->eppke_unauth)
+		capab |= BIT_ULL(WLAN_RSNX_CAPAB_UNAUTH_EPPKE);
 #endif /* CONFIG_ENC_ASSOC */
 
 	if (!capab)

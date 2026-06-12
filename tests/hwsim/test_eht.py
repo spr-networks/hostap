@@ -1617,7 +1617,7 @@ def _6ghz_op_class_to_bw(op):
         137: "320",
     }.get(op, "20")
 
-def _test_eht_6ghz(dev, apdev, channel, op_class, ccfs1):
+def _test_eht_6ghz(dev, apdev, channel, op_class, ccfs1, stop=True):
     check_sae_capab(dev[0])
 
     # CA enables 320 MHz channels without NO-IR restriction
@@ -1677,14 +1677,18 @@ def _test_eht_6ghz(dev, apdev, channel, op_class, ccfs1):
         if op_class not in supp_op_classes:
             raise Exception("STA did not indicate support for opclass %d" % op_class)
         hwsim_utils.test_connectivity(dev[0], hapd)
-        dev[0].request("DISCONNECT")
-        dev[0].wait_disconnected()
-        hapd.wait_sta_disconnect()
-        hapd.disable()
+        if stop:
+            dev[0].request("DISCONNECT")
+            dev[0].wait_disconnected()
+            hapd.wait_sta_disconnect()
+            hapd.disable()
+        else:
+            return hapd
     finally:
-        dev[0].set("sae_pwe", "0")
-        dev[0].cmd_execute(['iw', 'reg', 'set', '00'])
-        wait_regdom_changes(dev[0])
+        if stop:
+            dev[0].set("sae_pwe", "0")
+            dev[0].cmd_execute(['iw', 'reg', 'set', '00'])
+            wait_regdom_changes(dev[0])
 
 def test_eht_6ghz_20mhz(dev, apdev):
     """EHT with 20 MHz channel width on 6 GHz"""
@@ -1713,6 +1717,41 @@ def test_eht_6ghz_320mhz_2(dev, apdev):
 def test_eht_6ghz_320mhz_3(dev, apdev):
     """EHT with 320 MHz channel width on 6 GHz center 31 primary 37"""
     _test_eht_6ghz(dev, apdev, 37, 137, 31)
+
+def test_eht_6ghz_320mhz_cs(dev, apdev):
+    """EHT with 320 MHz channel width on 6 GHz and CSA"""
+    try:
+        hapd = _test_eht_6ghz(dev, apdev, 5, 137, 31, stop=False)
+
+        if "FAIL" in hapd.request("CHAN_SWITCH 8 6135 blocktx he eht bandwidth=320 center_freq1=6265"):
+            raise Exception("CHAN_SWITCH failed")
+
+        ev = hapd.wait_event(["CTRL-EVENT-CHANNEL-SWITCH"], timeout=5)
+        if ev is None:
+            raise Exception("Channel switch event not received (AP)")
+        if "freq=6135" not in ev or \
+           "ch_width=320 MHz" not in ev or \
+           "cf1=6265" not in ev:
+            raise Exception("Unexpected event contents (AP): " + ev)
+
+        ev = dev[0].wait_event(["CTRL-EVENT-CHANNEL-SWITCH"], timeout=5)
+        if ev is None:
+            raise Exception("Channel switch event not received (STA)")
+        if "freq=6135" not in ev or \
+           "ch_width=320 MHz" not in ev or \
+           "cf1=6265" not in ev:
+            raise Exception("Unexpected event contents (STA): " + ev)
+
+        hwsim_utils.test_connectivity(dev[0], hapd)
+
+        dev[0].request("DISCONNECT")
+        dev[0].wait_disconnected()
+        hapd.wait_sta_disconnect()
+        hapd.disable()
+    finally:
+        dev[0].set("sae_pwe", "0")
+        dev[0].cmd_execute(['iw', 'reg', 'set', '00'])
+        wait_regdom_changes(dev[0])
 
 def check_anqp(dev, bssid):
     if "OK" not in dev.request("ANQP_GET " + bssid + " 258"):

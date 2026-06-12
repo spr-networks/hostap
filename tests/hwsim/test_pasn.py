@@ -179,7 +179,15 @@ def test_pasn_group_mismatch(dev, apdev):
     params = pasn_ap_params("PASN", "CCMP", "20")
     hapd = start_pasn_ap(apdev[0], params)
 
-    check_pasn_akmp_cipher(dev[0], hapd, "PASN", "CCMP", status=77)
+    # Restrict the station to group 19 only so that when the AP rejects it
+    # (AP supports group 20 only), there is no fallback group to retry with.
+    # The final PASN-AUTH-STATUS reports status=1 (failure after retry
+    # exhaustion) rather than the AP's status=77 rejection code.
+    dev[0].set("pasn_groups", "19")
+    try:
+        check_pasn_akmp_cipher(dev[0], hapd, "PASN", "CCMP", status=1)
+    finally:
+        dev[0].set("pasn_groups", "")
 
 @remote_compatible
 def test_pasn_channel_mismatch(dev, apdev):
@@ -1311,3 +1319,117 @@ def test_pasn_sae_driver_comeback_0(dev, apdev):
 
     finally:
         dev[0].set("sae_pwe", "0")
+
+def check_pasn_sta_groups(dev, hapd, akmp="PASN", cipher="CCMP",
+                          expected_status=0):
+    """Trigger PASN via PASN_DRIVER and verify result"""
+    dev.flush_scan_cache()
+    dev.scan(type="ONLY", freq=2412)
+    bssid = hapd.own_addr()
+
+    cmd = "PASN_DRIVER auth bssid=%s akmp=%s cipher=%s" % (bssid, akmp, cipher)
+    resp = dev.request(cmd)
+    if "OK" not in resp:
+        raise Exception("Failed to start PASN authentication")
+
+    ev = dev.wait_event(["PASN-AUTH-STATUS"], 10)
+    if not ev:
+        raise Exception("PASN: PASN-AUTH-STATUS not seen")
+
+    if bssid + " akmp=" + akmp + ", status=" + str(expected_status) not in ev:
+        raise Exception("PASN: unexpected status: " + ev)
+
+    if expected_status == 0:
+        time.sleep(0.1)
+        check_pasn_ptk(dev, hapd, cipher)
+
+def run_pasn_sta_group(dev, apdev, group):
+    check_pasn_capab(dev[0])
+
+    params = pasn_ap_params("PASN", "CCMP", "19 20 21")
+    hapd = start_pasn_ap(apdev[0], params)
+
+    dev[0].set("pasn_groups", str(group))
+    try:
+        check_pasn_sta_groups(dev[0], hapd)
+    finally:
+        dev[0].set("pasn_groups", "")
+
+@remote_compatible
+def test_pasn_sta_groups_20(dev, apdev):
+    """PASN authentication with station pasn_groups configured to group 20"""
+    run_pasn_sta_group(dev, apdev, 20)
+
+@remote_compatible
+def test_pasn_sta_groups_21(dev, apdev):
+    """PASN authentication with station pasn_groups configured to group 21"""
+    run_pasn_sta_group(dev, apdev, 21)
+
+@remote_compatible
+def test_pasn_sta_groups_skip_unsuitable(dev, apdev):
+    """PASN authentication: station skips unsuitable group and uses next valid one"""
+    # Group 1 (MODP-768) is not a suitable ECC group; wpas_pasn_get_group()
+    # skips it and uses group 20 from the list.
+    run_pasn_sta_group(dev, apdev, "1 20")
+
+@remote_compatible
+def test_pasn_sta_groups_all_unsuitable(dev, apdev):
+    """PASN authentication: all configured groups unsuitable, authentication fails"""
+    check_pasn_capab(dev[0])
+
+    params = pasn_ap_params("PASN", "CCMP", "19")
+    hapd = start_pasn_ap(apdev[0], params)
+
+    # Groups 1 and 2 are not suitable ECC groups. When the user explicitly
+    # configures only unsuitable groups, wpas_pasn_get_group() returns
+    # failure without any fallback to default groups.
+    dev[0].set("pasn_groups", "1 2")
+    try:
+        dev[0].flush_scan_cache()
+        dev[0].scan(type="ONLY", freq=2412)
+        bssid = hapd.own_addr()
+
+        cmd = "PASN_DRIVER auth bssid=%s akmp=PASN cipher=CCMP" % bssid
+        resp = dev[0].request(cmd)
+        if "OK" not in resp:
+            raise Exception("Failed to queue PASN authentication")
+
+        # Authentication fails before any frame exchange (no suitable group
+        # found), so no PASN-AUTH-STATUS event is expected.
+        ev = dev[0].wait_event(["PASN-AUTH-STATUS"], 2)
+        if ev:
+            raise Exception("Unexpected PASN-AUTH-STATUS event: " + ev)
+    finally:
+        dev[0].set("pasn_groups", "")
+
+@remote_compatible
+def test_pasn_group_negotiation_success(dev, apdev):
+    """PASN group negotiation: AP rejects group 19, station retries with group 20 and succeeds"""
+    check_pasn_capab(dev[0])
+
+    # AP supports only groups 20 and 21, not 19.
+    # Station uses default groups {19, 20, 21}: tries 19 first, AP rejects
+    # (advertises {20, 21}), station retries with 20 and succeeds.
+    params = pasn_ap_params("PASN", "CCMP", "20 21")
+    hapd = start_pasn_ap(apdev[0], params)
+
+    check_pasn_sta_groups(dev[0], hapd)
+
+@remote_compatible
+def test_pasn_group_negotiation_downgrade_attack(dev, apdev):
+    """PASN group negotiation: downgrade attack - rejected group reappears in success frame"""
+    check_pasn_capab(dev[0])
+
+    # AP actually supports groups 19, 20, and 21.
+    # Inject a reduced group list {20, 21} into the rejection frame to simulate
+    # a downgrade attack: the attacker removes group 19 from the rejection
+    # frame's Supported Groups element, forcing the station to use group 20.
+    params = pasn_ap_params("PASN", "CCMP", "19 20 21")
+    params['pasn_test_groups'] = "20 21"
+    hapd = start_pasn_ap(apdev[0], params)
+
+    # Station tries group 19, receives rejection frame with injected {20, 21}
+    # (group 19 absent), retries with 20. The success frame (MIC-protected)
+    # carries the real supported groups {19, 20, 21}. The station detects that
+    # the previously rejected group 19 reappears and aborts.
+    check_pasn_sta_groups(dev[0], hapd, expected_status=1)

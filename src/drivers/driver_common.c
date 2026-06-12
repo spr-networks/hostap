@@ -105,6 +105,11 @@ const char * event_to_string(enum wpa_event_type event)
 	E2S(NAN_CLUSTER_JOIN);
 	E2S(NAN_NEXT_DW);
 	E2S(INCUMBT_SIG_INTF_DETECTED);
+	E2S(NAN_SCHED_UPDATE_DONE);
+	E2S(NAN_ULW_UPDATE);
+	E2S(NAN_CHAN_EVACUATION);
+	E2S(PEER_MEASUREMENT_RESULT);
+	E2S(PEER_MEASUREMENT_COMPLETE);
 	}
 
 	return "UNKNOWN";
@@ -219,6 +224,13 @@ bool eht_supported(const struct hostapd_hw_modes *hw_mode,
 	}
 
 	return hw_mode->eht_capab[op_mode].eht_supported;
+}
+
+
+bool uhr_supported(const struct hostapd_hw_modes *hw_mode,
+		   enum ieee80211_op_mode op_mode)
+{
+	return hw_mode->uhr_capab[op_mode].uhr_supported;
 }
 
 

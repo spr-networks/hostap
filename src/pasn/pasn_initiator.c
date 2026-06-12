@@ -42,10 +42,10 @@ void pasn_initiator_pmksa_cache_deinit(struct rsn_pmksa_cache *pmksa)
 int pasn_initiator_pmksa_cache_add(struct rsn_pmksa_cache *pmksa,
 				   const u8 *own_addr, const u8 *bssid,
 				   const u8 *pmk,
-				   size_t pmk_len, const u8 *pmkid)
+				   size_t pmk_len, const u8 *pmkid, int akmp)
 {
 	if (pmksa_cache_add(pmksa, pmk, pmk_len, pmkid, NULL, 0, bssid,
-			    own_addr, NULL, WPA_KEY_MGMT_SAE, NULL, 0))
+			    own_addr, NULL, akmp, NULL, 0))
 		return 0;
 	return -1;
 }
@@ -101,6 +101,8 @@ static struct wpabuf * wpas_pasn_wd_sae_commit(struct pasn_data *pasn)
 {
 	struct wpabuf *buf = NULL;
 	int ret;
+	const u8 *pw_id = NULL;
+	size_t pw_id_len = 0;
 
 	ret = sae_set_group(&pasn->sae, pasn->group);
 	if (ret) {
@@ -128,7 +130,12 @@ static struct wpabuf * wpas_pasn_wd_sae_commit(struct pasn_data *pasn)
 	wpabuf_put_le16(buf, 1);
 	wpabuf_put_le16(buf, WLAN_STATUS_SAE_HASH_TO_ELEMENT);
 
-	sae_write_commit(&pasn->sae, buf, NULL, NULL, 0);
+	/* Include the password identifier if the PT was derived with one */
+	if (pasn->pt && pasn->pt->password_id) {
+		pw_id = wpabuf_head(pasn->pt->password_id);
+		pw_id_len = wpabuf_len(pasn->pt->password_id);
+	}
+	sae_write_commit(&pasn->sae, buf, NULL, pw_id, pw_id_len);
 	pasn->sae.state = SAE_COMMITTED;
 
 	return buf;
@@ -519,6 +526,12 @@ static struct wpabuf * wpas_pasn_get_wrapped_data(struct pasn_data *pasn)
 	case WPA_KEY_MGMT_PASN:
 		/* no wrapped data */
 		return NULL;
+#ifdef CONFIG_ENC_ASSOC
+	case WPA_KEY_MGMT_EPPKE:
+		/* EPPKE without base AKM: no wrapped data per
+		 * IEEE P802.11bi/D4.0, 12.16.9.1 */
+		return NULL;
+#endif /* CONFIG_ENC_ASSOC */
 	case WPA_KEY_MGMT_SAE:
 	case WPA_KEY_MGMT_SAE_EXT_KEY:
 #ifdef CONFIG_SAE
@@ -660,11 +673,15 @@ struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
 #else /* CONFIG_IEEE80211R */
 		goto fail;
 #endif /* CONFIG_IEEE80211R */
-	} else if (wrapped_data != WPA_PASN_WRAPPED_DATA_NO) {
+	} else {
 		struct rsn_pmksa_cache_entry *pmksa;
 
 		pmksa = pmksa_cache_get(pasn->pmksa, pasn->peer_addr,
 					pasn->own_addr, NULL, NULL, pasn->akmp);
+
+		wpa_printf(MSG_DEBUG, "PASN: PMKSA: akmp=0x%x, found=0x%x",
+			   pasn->akmp, pmksa ? pmksa->akmp : 0);
+
 		if (pmksa && pasn->custom_pmkid_valid)
 			pmkid = pasn->custom_pmkid;
 		else if (pmksa)
@@ -674,7 +691,7 @@ struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
 		 * Note: Even when PMKSA is available, also add wrapped data as
 		 * it is possible that the PMKID is no longer valid at the AP.
 		 */
-		if (!verify)
+		if (wrapped_data != WPA_PASN_WRAPPED_DATA_NO && !verify)
 			wrapped_data_buf = wpas_pasn_get_wrapped_data(pasn);
 	}
 
@@ -862,7 +879,10 @@ void wpa_pasn_reset(struct pasn_data *pasn)
 	crypto_ecdh_deinit(pasn->ecdh);
 	pasn->ecdh = NULL;
 
-
+	pasn->derive_kdk = false;
+	pasn->kdk_len = 0;
+	pasn->derive_kek = false;
+	pasn->kek_len = 0;
 	pasn->akmp = 0;
 	pasn->cipher = 0;
 	pasn->group = 0;
@@ -903,6 +923,9 @@ void wpa_pasn_reset(struct pasn_data *pasn)
 #endif /* CONFIG_IEEE80211R */
 	pasn->status = WLAN_STATUS_UNSPECIFIED_FAILURE;
 	pasn->pmksa_entry = NULL;
+	os_memset(pasn->ap_supported_groups, 0,
+		  sizeof(pasn->ap_supported_groups));
+	pasn->ap_supported_group_idx = 0;
 #ifdef CONFIG_TESTING_OPTIONS
 	pasn->corrupt_mic = 0;
 #endif /* CONFIG_TESTING_OPTIONS */
@@ -938,8 +961,9 @@ static int wpas_pasn_set_pmk(struct pasn_data *pasn,
 	os_memset(pasn->pmk, 0, sizeof(pasn->pmk));
 	pasn->pmk_len = 0;
 
-	if (pasn->akmp == WPA_KEY_MGMT_PASN) {
-		wpa_printf(MSG_DEBUG, "PASN: Using default PMK");
+	if ((pasn->akmp == WPA_KEY_MGMT_PASN ||
+	     pasn->akmp == WPA_KEY_MGMT_EPPKE) && !rsn_data->num_pmkid) {
+		wpa_printf(MSG_DEBUG, "PASN/EPPKE: Using default PMK");
 
 		pasn->pmk_len = WPA_PASN_PMK_LEN;
 		os_memcpy(pasn->pmk, pasn_default_pmk,
@@ -1013,7 +1037,8 @@ static int wpas_pasn_set_pmk(struct pasn_data *pasn,
 						    pasn->pmk_len,
 						    pasn->sae.pmkid,
 						    NULL, 0, pasn->peer_addr,
-						    pasn->own_addr, NULL,
+						    pasn->own_addr,
+						    pasn->network_ctx,
 						    pasn->akmp, NULL,
 						    pasn->auth_alg);
 		return 0;
@@ -1135,6 +1160,10 @@ int wpas_pasn_start(struct pasn_data *pasn, const u8 *own_addr,
 	switch (akmp) {
 	case WPA_KEY_MGMT_PASN:
 		break;
+#ifdef CONFIG_ENC_ASSOC
+	case WPA_KEY_MGMT_EPPKE:
+		break;
+#endif /* CONFIG_ENC_ASSOC */
 #ifdef CONFIG_SAE
 	case WPA_KEY_MGMT_SAE:
 	case WPA_KEY_MGMT_SAE_EXT_KEY:
@@ -1226,11 +1255,106 @@ static bool is_pasn_auth_frame(struct pasn_data *pasn,
 		    !ether_addr_equal(mgmt->da, pasn->peer_addr)))
 		return false;
 
-	/* Not PASN; do nothing */
-	if (mgmt->u.auth.auth_alg != host_to_le16(WLAN_AUTH_PASN))
+	/* Not PASN/EPPKE; do nothing */
+	if (mgmt->u.auth.auth_alg != host_to_le16(WLAN_AUTH_PASN) &&
+	    mgmt->u.auth.auth_alg != host_to_le16(WLAN_AUTH_EPPKE))
 		return false;
 
 	return true;
+}
+
+
+static void
+wpas_pasn_store_ap_supported_groups(struct pasn_data *pasn,
+				    const struct ieee802_11_elems *elems)
+{
+	unsigned int i, num_groups;
+
+	pasn->ap_supported_group_idx = 0;
+
+	if (!elems->supported_groups || elems->supported_groups_len < 2)
+		return;
+
+	num_groups = elems->supported_groups_len / 2;
+	if (num_groups > MAX_NUM_OF_PASN_GROUPS) {
+		wpa_printf(MSG_DEBUG,
+			   "PASN: AP supported groups count %u exceeds max %u - ignoring",
+			   num_groups, MAX_NUM_OF_PASN_GROUPS);
+		return;
+	}
+
+	wpa_hexdump(MSG_DEBUG, "PASN: Supported groups advertised by responder",
+		    elems->supported_groups, elems->supported_groups_len);
+
+	for (i = 0; i < num_groups; i++)
+		pasn->ap_supported_groups[pasn->ap_supported_group_idx++] =
+			WPA_GET_LE16(elems->supported_groups + i * 2);
+
+	wpa_printf(MSG_DEBUG, "PASN: Stored %u AP supported groups",
+		   num_groups);
+}
+
+
+static int
+wpas_pasn_validate_supported_groups_rejection(struct pasn_data *pasn)
+{
+	unsigned int i;
+
+	if (!pasn->ap_supported_group_idx) {
+		wpa_printf(MSG_DEBUG,
+			   "PASN: Supported Groups element not present - skipping validation");
+		return 0;
+	}
+
+	for (i = 0; i < pasn->ap_supported_group_idx; i++) {
+		if (pasn->ap_supported_groups[i] == pasn->group) {
+			wpa_printf(MSG_INFO,
+				   "PASN: Rejected group %u is listed as supported by responder - aborting PASN",
+				   pasn->group);
+			return -1;
+		}
+	}
+
+	return 0;
+}
+
+
+static int
+wpas_pasn_validate_supported_groups(struct pasn_data *pasn)
+{
+	unsigned int i, j;
+	bool current_group_found = false;
+
+	if (!pasn->ap_supported_group_idx) {
+		wpa_printf(MSG_DEBUG,
+			   "PASN: Supported Groups element not present - skipping validation");
+		return 0;
+	}
+
+	for (i = 0; i < pasn->ap_supported_group_idx; i++) {
+		u16 group = pasn->ap_supported_groups[i];
+
+		if (group == pasn->group)
+			current_group_found = true;
+
+		for (j = 0; j < pasn->rejected_group_idx; j++) {
+			if (group == pasn->rejected_groups[j]) {
+				wpa_printf(MSG_INFO,
+					   "PASN: Previously rejected group %u found in responder supported list",
+					   group);
+				return -1;
+			}
+		}
+	}
+
+	if (!current_group_found) {
+		wpa_printf(MSG_INFO,
+			   "PASN: Negotiated group %u not found in responder supported list - aborting PASN",
+			   pasn->group);
+		return -1;
+	}
+
+	return 0;
 }
 
 
@@ -1256,6 +1380,7 @@ int wpas_parse_pasn_frame(struct pasn_data *pasn, u16 auth_type,
 	}
 
 	if (status != WLAN_STATUS_SUCCESS &&
+	    status != WLAN_STATUS_FINITE_CYCLIC_GROUP_NOT_SUPPORTED &&
 	    status != WLAN_STATUS_ASSOC_REJECTED_TEMPORARILY) {
 		wpa_printf(MSG_DEBUG,
 			   "PASN: Authentication rejected - status=%u", status);
@@ -1267,6 +1392,23 @@ int wpas_parse_pasn_frame(struct pasn_data *pasn, u16 auth_type,
 		wpa_printf(MSG_DEBUG,
 			   "PASN: Failed parsing Authentication frame");
 		goto fail;
+	}
+
+	wpas_pasn_store_ap_supported_groups(pasn, &elems);
+
+	if (status == WLAN_STATUS_FINITE_CYCLIC_GROUP_NOT_SUPPORTED) {
+		wpa_printf(MSG_DEBUG,
+			   "PASN: AP rejected group %u", pasn->group);
+
+		if (wpas_pasn_validate_supported_groups_rejection(pasn) < 0)
+			goto fail;
+
+		if (pasn->rejected_group_idx <
+		    ARRAY_SIZE(pasn->rejected_groups))
+			pasn->rejected_groups[pasn->rejected_group_idx++] =
+				pasn->group;
+
+		return 2;
 	}
 
 	if (!elems.pasn_params || !elems.pasn_params_len) {
@@ -1387,7 +1529,9 @@ int wpas_parse_pasn_frame(struct pasn_data *pasn, u16 auth_type,
 
 	if (pasn->derive_kek) {
 		wpa_printf(MSG_DEBUG, "PASN: Derive PTK-KEK");
-		pasn->kek_len = wpa_kek_len(pasn->akmp, pasn->pmk_len);
+		if (!pasn->kek_len)
+			pasn->kek_len = wpa_kek_len(pasn->akmp,
+						    pasn->pmk_len);
 		wpa_printf(MSG_DEBUG, "PASN: kek_len=%zu", pasn->kek_len);
 	}
 
@@ -1503,6 +1647,9 @@ int wpas_parse_pasn_frame(struct pasn_data *pasn, u16 auth_type,
 		goto fail;
 	}
 
+	if (wpas_pasn_validate_supported_groups(pasn) < 0)
+		goto fail;
+
 	pasn->trans_seq++;
 
 	wpa_printf(MSG_DEBUG, "PASN: Success verifying Authentication frame");
@@ -1554,6 +1701,13 @@ int wpa_pasn_auth_rx(struct pasn_data *pasn, const u8 *data, size_t len,
 	if (ret == 1) {
 		wpa_printf(MSG_DEBUG, "PASN: Temporary rejection, Retry");
 		return 1;
+	}
+
+	if (ret == 2) {
+		wpa_printf(MSG_DEBUG,
+			   "PASN: Group %u rejected - retry with next group",
+			   pasn->group);
+		return 2;
 	}
 
 	frame = wpas_pasn_build_auth_3(pasn, true);

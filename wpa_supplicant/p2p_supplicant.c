@@ -3214,6 +3214,20 @@ static void wpas_p2p_listen_work_done(struct wpa_supplicant *wpa_s)
 }
 
 
+static void wpas_stop_started_listen_work(struct wpa_radio_work *work)
+{
+	struct wpa_supplicant *wpa_s = work->wpa_s;
+
+	wpa_s->p2p_listen_work = NULL;
+	work->ctx = NULL;
+
+	/* Prevent recursive p2p-listen work removal while handling deinit. */
+	wpa_s->p2p_removing_listen_work = true;
+	wpas_stop_listen(wpa_s);
+	wpa_s->p2p_removing_listen_work = false;
+}
+
+
 static void wpas_start_listen_cb(struct wpa_radio_work *work, int deinit)
 {
 	struct wpa_supplicant *wpa_s = work->wpa_s;
@@ -3221,10 +3235,8 @@ static void wpas_start_listen_cb(struct wpa_radio_work *work, int deinit)
 	unsigned int duration;
 
 	if (deinit) {
-		if (work->started && !wpa_s->p2p_removing_listen_work) {
-			wpa_s->p2p_listen_work = NULL;
-			wpas_stop_listen(wpa_s);
-		}
+		if (work->started && !wpa_s->p2p_removing_listen_work)
+			wpas_stop_started_listen_work(work);
 		wpas_p2p_listen_work_free(lwork);
 		return;
 	}
@@ -3253,7 +3265,7 @@ static void wpas_start_listen_cb(struct wpa_radio_work *work, int deinit)
 	}
 #endif /* CONFIG_TESTING_OPTIONS */
 
-	if (wpa_drv_remain_on_channel(wpa_s, lwork->freq, duration) < 0) {
+	if (wpa_drv_remain_on_channel(wpa_s, lwork->freq, duration, NULL) < 0) {
 		wpa_printf(MSG_DEBUG, "P2P: Failed to request the driver "
 			   "to remain on channel (%u MHz) for Listen "
 			   "state", lwork->freq);

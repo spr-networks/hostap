@@ -1881,6 +1881,32 @@ int pbkdf2_sha1(const char *passphrase, const u8 *ssid, size_t ssid_len,
 }
 
 
+#ifdef CONFIG_SHA256
+int pbkdf2_sha256(const char *passphrase, const u8 *salt, size_t salt_len,
+		  int iterations, u8 *buf, size_t buflen)
+{
+	if (PKCS5_PBKDF2_HMAC(passphrase, os_strlen(passphrase), salt,
+			      salt_len, iterations, EVP_sha256(), buflen,
+			      buf) != 1)
+		return -1;
+	return 0;
+}
+#endif /* CONFIG_SHA256 */
+
+
+#ifdef CONFIG_SHA384
+int pbkdf2_sha384(const char *passphrase, const u8 *salt, size_t salt_len,
+		  int iterations, u8 *buf, size_t buflen)
+{
+	if (PKCS5_PBKDF2_HMAC(passphrase, os_strlen(passphrase), salt,
+			      salt_len, iterations, EVP_sha384(), buflen,
+			      buf) != 1)
+		return -1;
+	return 0;
+}
+#endif /* CONFIG_SHA384 */
+
+
 int crypto_get_random(void *buf, size_t len)
 {
 	if (RAND_bytes(buf, len) != 1)
@@ -4405,6 +4431,7 @@ int crypto_csr_set_name(struct crypto_csr *csr, enum crypto_csr_name type,
 {
 	X509_NAME *n;
 	int nid;
+	int ret = -1;
 
 	switch (type) {
 	case CSR_NAME_CN:
@@ -4426,7 +4453,7 @@ int crypto_csr_set_name(struct crypto_csr *csr, enum crypto_csr_name type,
 		return -1;
 	}
 
-	n = X509_REQ_get_subject_name((X509_REQ *) csr);
+	n = X509_NAME_new();
 	if (!n)
 		return -1;
 
@@ -4434,15 +4461,21 @@ int crypto_csr_set_name(struct crypto_csr *csr, enum crypto_csr_name type,
 	if (!X509_NAME_add_entry_by_NID(n, nid, MBSTRING_UTF8,
 					(unsigned char *) name,
 					os_strlen(name), -1, 0))
-		return -1;
+		goto fail;
 #else
 	if (!X509_NAME_add_entry_by_NID(n, nid, MBSTRING_UTF8,
 					(const unsigned char *) name,
 					os_strlen(name), -1, 0))
-		return -1;
+		goto fail;
 #endif
 
-	return 0;
+	if (X509_REQ_set_subject_name((X509_REQ *) csr, n) != 1)
+		goto fail;
+
+	ret = 0;
+fail:
+	X509_NAME_free(n);
+	return ret;
 }
 
 
@@ -4472,8 +4505,8 @@ const u8 * crypto_csr_get_attribute(struct crypto_csr *csr,
 				    size_t *len, int *type)
 {
 	X509_ATTRIBUTE *attrib;
-	ASN1_TYPE *attrib_type;
-	ASN1_STRING *data;
+	const ASN1_TYPE *attrib_type;
+	const ASN1_STRING *data;
 	int loc;
 	int nid;
 

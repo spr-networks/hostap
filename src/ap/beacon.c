@@ -263,11 +263,14 @@ static u8 * hostapd_eid_country(struct hostapd_data *hapd, u8 *eid,
 {
 	u8 *pos = eid;
 	u8 *end = eid + max_len;
+	u8 op_class;
 	bool force_global;
 
 	if (!hapd->iconf->ieee80211d || max_len < 6 ||
 	    hapd->iface->current_mode == NULL)
 		return eid;
+
+	op_class = hostapd_get_oper_class_of_bss(hapd);
 
 	*pos++ = WLAN_EID_COUNTRY;
 	pos++; /* length will be set later */
@@ -275,7 +278,7 @@ static u8 * hostapd_eid_country(struct hostapd_data *hapd, u8 *eid,
 	pos += 3;
 
 	/* The 6 GHz band uses global operating classes */
-	force_global = is_6ghz_op_class(hapd->iconf->op_class);
+	force_global = is_6ghz_op_class(op_class);
 
 #ifdef CONFIG_MBO
 	/* Wi-Fi Agile Muiltiband AP is required to use a global operating
@@ -290,18 +293,17 @@ static u8 * hostapd_eid_country(struct hostapd_data *hapd, u8 *eid,
 		eid[4] = 0x04;
 	}
 
-	if (is_6ghz_op_class(hapd->iconf->op_class)) {
+	if (is_6ghz_op_class(op_class)) {
 		/* Operating Triplet field */
 		/* Operating Extension Identifier (>= 201 to indicate this is
 		 * not a Subband Triplet field) */
 		*pos++ = 201;
 		/* Operating Class */
-		*pos++ = hapd->iconf->op_class;
+		*pos++ = op_class;
 		/* Coverage Class */
 		*pos++ = 0;
 		/* Subband Triplets are required only for the 20 MHz case */
-		if (hapd->iconf->op_class == 131 ||
-		    hapd->iconf->op_class == 136)
+		if (op_class == 131 || op_class == 136)
 			pos = hostapd_fill_subband_triplets(hapd, pos, end);
 	} else {
 		pos = hostapd_fill_subband_triplets(hapd, pos, end);
@@ -552,14 +554,16 @@ static u8 * hostapd_eid_max_cs_time(struct hostapd_data *hapd, u8 *eid)
 static u8 * hostapd_eid_supported_op_classes(struct hostapd_data *hapd, u8 *eid)
 {
 	u8 op_class, channel;
+	enum oper_chan_width chwidth;
 
 	if (!(hapd->iface->drv_flags & WPA_DRIVER_FLAGS_AP_CSA) ||
 	    !hapd->iface->freq)
 		return eid;
 
+	chwidth = hostapd_get_oper_chan_width_of_bss(hapd);
 	if (ieee80211_freq_to_channel_ext(hapd->iface->freq,
 					  hapd->iconf->secondary_channel,
-					  hostapd_get_oper_chwidth(hapd->iconf),
+					  chwidth,
 					  &op_class, &channel) ==
 	    NUM_HOSTAPD_MODES)
 		return eid;
@@ -810,6 +814,14 @@ static size_t hostapd_probe_resp_elems_len(struct hostapd_data *hapd,
 					 params->known_bss,
 					 params->known_bss_len, NULL);
 	buflen += hostapd_eid_rnr_len(hapd, WLAN_FC_STYPE_PROBE_RESP, true);
+
+#ifdef CONFIG_IEEE80211BN
+	if (hostapd_is_uhr_enabled(hapd)) {
+		buflen += hostapd_eid_uhr_capab_len(hapd, IEEE80211_MODE_AP);
+		buflen += 3 + IEEE80211_UHR_OPER_MAX_SIZE;
+	}
+#endif /* CONFIG_IEEE80211BN */
+
 	buflen += hostapd_mbo_ie_len(hapd);
 	buflen += hostapd_eid_owe_trans_len(hapd);
 	buflen += hostapd_eid_dpp_cc_len(hapd);
@@ -976,6 +988,13 @@ static u8 * hostapd_probe_resp_fill_elems(struct hostapd_data *hapd,
 			pos = hostapd_eid_eht_ml_tid_to_link_map(hapd, pos);
 	}
 #endif /* CONFIG_IEEE80211BE */
+
+#ifdef CONFIG_IEEE80211BN
+	if (hostapd_is_uhr_enabled(hapd)) {
+		pos = hostapd_eid_uhr_capab(hapd, pos, IEEE80211_MODE_AP);
+		pos = hostapd_eid_uhr_operation(hapd, pos, false);
+	}
+#endif /* CONFIG_IEEE80211BN */
 
 #ifdef CONFIG_IEEE80211AC
 	if (hapd->conf->vendor_vht)
@@ -1411,6 +1430,7 @@ static bool parse_ml_probe_req(const struct ieee80211_eht_ml *ml, size_t ml_len,
 	for_each_element_id(sub, 0, pos, len) {
 		const struct ieee80211_eht_per_sta_profile *sta;
 		u16 sta_control;
+		u8 link_id;
 
 		if (*links == 0xffff)
 			*links = 0;
@@ -1430,7 +1450,9 @@ static bool parse_ml_probe_req(const struct ieee80211_eht_ml *ml, size_t ml_len,
 		 * partial profile was requested.
 		 */
 		sta_control = le_to_host16(sta->sta_control);
-		*links |= BIT(sta_control & BASIC_MLE_STA_CTRL_LINK_ID_MASK);
+		link_id = sta_control & BASIC_MLE_STA_CTRL_LINK_ID_MASK;
+		if (link_id < MAX_NUM_MLD_LINKS)
+			*links |= BIT(link_id);
 	}
 
 	if (!for_each_element_completed(sub, pos, len)) {
@@ -2299,6 +2321,12 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 	    hapd == hostapd_mbssid_get_tx_bss(hapd))
 		tail_len += 5; /* Multiple BSSID Configuration element */
 	tail_len += hostapd_eid_rnr_len(hapd, WLAN_FC_STYPE_BEACON, true);
+
+#ifdef CONFIG_IEEE80211BN
+	if (hostapd_is_uhr_enabled(hapd))
+		tail_len += 3 + sizeof(struct ieee80211_uhr_operation);
+#endif /* CONFIG_IEEE80211BN */
+
 	tail_len += hostapd_mbo_ie_len(hapd);
 	tail_len += hostapd_eid_owe_trans_len(hapd);
 	tail_len += hostapd_eid_dpp_cc_len(hapd);
@@ -2385,7 +2413,11 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 	tailpos = hostapd_eid_ht_capabilities(hapd, tailpos);
 	tailpos = hostapd_eid_ht_operation(hapd, tailpos);
 
-	if (hapd->iconf->mbssid && hapd->iconf->num_bss > 1) {
+	/*
+	 * Include the Multiple BSSID element whenever MBSSID is enabled. The
+	 * element may include zero or more nontransmitted BSSID profiles.
+	 */
+	if (hapd->iconf->mbssid) {
 		if (ieee802_11_build_ap_params_mbssid(hapd, params)) {
 			wpa_printf(MSG_ERROR,
 				   "MBSSID: Failed to set beacon data");
@@ -2476,6 +2508,25 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 								     tailpos);
 	}
 #endif /* CONFIG_IEEE80211BE */
+
+#ifdef CONFIG_IEEE80211BN
+	if (hostapd_is_uhr_enabled(hapd)) {
+		u8 *uhr_oper;
+
+		tailpos = hostapd_eid_uhr_operation(hapd, tailpos, true);
+		params->uhr_oper = os_zalloc(3 + IEEE80211_UHR_OPER_MAX_SIZE);
+		if (!params->uhr_oper)
+			goto error;
+
+		uhr_oper = hostapd_eid_uhr_operation(hapd, params->uhr_oper,
+						     false);
+		/* check that it was filled */
+		if (uhr_oper == params->uhr_oper) {
+			os_free(params->uhr_oper);
+			params->uhr_oper = NULL;
+		}
+	}
+#endif /* CONFIG_IEEE80211BN */
 
 #ifdef CONFIG_IEEE80211AC
 	if (hapd->conf->vendor_vht)
@@ -2684,6 +2735,8 @@ error:
 	os_free(head);
 	os_free(tail);
 	os_free(resp);
+	os_free(params->uhr_oper);
+	params->uhr_oper = NULL;
 	return -1;
 #endif /* CONFIG_SAE || NEED_AP_MLME */
 }
@@ -2715,6 +2768,8 @@ void ieee802_11_free_ap_params(struct wpa_driver_ap_params *params)
 #endif /* CONFIG_IEEE80211AX */
 	os_free(params->allowed_freqs);
 	params->allowed_freqs = NULL;
+	os_free(params->uhr_oper);
+	params->uhr_oper = NULL;
 }
 
 
@@ -2729,6 +2784,7 @@ static int __ieee802_11_set_beacon(struct hostapd_data *hapd)
 	bool twt_he_responder = false;
 	int res, ret = -1, i;
 	struct hostapd_hw_modes *mode;
+	struct hostapd_channel_info info;
 
 	if (!hapd->drv_priv) {
 		wpa_printf(MSG_ERROR, "Interface is disabled");
@@ -2798,20 +2854,33 @@ static int __ieee802_11_set_beacon(struct hostapd_data *hapd)
 	params.punct_bitmap = iconf->punct_bitmap;
 #endif /* CONFIG_IEEE80211BE */
 
-	if (cmode &&
-	    hostapd_set_freq_params(&freq, iconf->hw_mode, iface->freq,
-				    iconf->channel, iconf->enable_edmg,
-				    iconf->edmg_channel, iconf->ieee80211n,
-				    iconf->ieee80211ac, iconf->ieee80211ax,
-				    iconf->ieee80211be,
-				    iconf->secondary_channel,
-				    hostapd_get_oper_chwidth(iconf),
-				    hostapd_get_oper_centr_freq_seg0_idx(iconf),
-				    hostapd_get_oper_centr_freq_seg1_idx(iconf),
-				    cmode->vht_capab,
-				    &cmode->he_capab[IEEE80211_MODE_AP],
-				    &cmode->eht_capab[IEEE80211_MODE_AP],
-				    hostapd_get_punct_bitmap(hapd)) == 0) {
+	info = (struct hostapd_channel_info) {
+		.mode = iconf->hw_mode,
+		.freq = iface->freq,
+		.channel = iconf->channel,
+		.edmg.enabled = iconf->enable_edmg,
+		.edmg.channel = iconf->edmg_channel,
+		.ht.enabled = iconf->ieee80211n,
+		.vht.enabled = iconf->ieee80211ac,
+		.he.enabled = iconf->ieee80211ax,
+		.eht.enabled = iconf->ieee80211be,
+		.ht.sec_channel_offset = iconf->secondary_channel,
+		.oper_chwidth = hostapd_get_oper_chwidth(iconf),
+		.center_segment0 = hostapd_get_oper_centr_freq_seg0_idx(iconf),
+		.center_segment1 = hostapd_get_oper_centr_freq_seg1_idx(iconf),
+		.vht.caps = cmode ? cmode->vht_capab : 0,
+		.he.cap = cmode ? &cmode->he_capab[IEEE80211_MODE_AP] : NULL,
+		.eht.cap = cmode ? &cmode->eht_capab[IEEE80211_MODE_AP] : NULL,
+		.eht.punct_bitmap = hostapd_get_punct_bitmap(hapd),
+#ifdef CONFIG_IEEE80211BN
+		.uhr.enabled = iconf->ieee80211bn,
+		.uhr.dbe_bandwidth = iconf->dbe_bandwidth,
+		.uhr.cap = cmode ? &cmode->uhr_capab[IEEE80211_MODE_AP] : NULL,
+		.uhr.dbe_punct_bitmap = iconf->dbe_punct_bitmap,
+#endif /* CONFIG_IEEE80211BN */
+	};
+
+	if (cmode && hostapd_set_freq_params(&freq, &info) == 0) {
 		freq.link_id = -1;
 #ifdef CONFIG_IEEE80211BE
 		if (hapd->conf->mld_ap)

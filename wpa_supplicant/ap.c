@@ -328,6 +328,9 @@ int wpa_supplicant_conf_ap_ht(struct wpa_supplicant *wpa_s,
 			ssid->he = 0;
 #endif /* CONFIG_HE_OVERRIDES */
 
+		if (ssid->disable_eht)
+			ssid->eht = 0;
+
 		if (!ssid->ht) {
 			wpa_printf(MSG_DEBUG,
 				   "HT not enabled in network profile");

@@ -336,6 +336,9 @@ static void hostapd_wpa_auth_conf(struct hostapd_iface *iface,
 	wconf->dpp_pfs = conf->dpp_pfs;
 #endif /* CONFIG_DPP2 */
 #ifdef CONFIG_PASN
+#ifdef CONFIG_ENC_ASSOC
+	wconf->eppke_unauth = conf->eppke_unauth;
+#endif /* CONFIG_ENC_ASSOC */
 #ifdef CONFIG_TESTING_OPTIONS
 	wconf->force_kdk_derivation = conf->force_kdk_derivation;
 #endif /* CONFIG_TESTING_OPTIONS */

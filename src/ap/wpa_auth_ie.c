@@ -510,9 +510,45 @@ int wpa_write_802_1x_rsne(struct wpa_authenticator *wpa_auth, u8 *buf,
 #endif /* CONFIG_IEEE8021X_AUTH */
 
 
-static u32 rsnxe_capab(struct wpa_auth_config *conf, int key_mgmt)
+#ifdef CONFIG_ENC_ASSOC
+int wpa_write_eppke_rsne(const u8 *wpa_ie, size_t wpa_ie_len,
+			 u8 *buf, size_t len,
+			 const u8 *pmkid, int akmp,
+			 int pairwise_cipher, enum mfp_options mfp)
 {
-	u32 capab = 0;
+	struct rsn_ie_hdr *hdr;
+	struct wpa_ie_data data;
+	const u8 *rsne;
+	u8 *pos;
+
+	hdr = (struct rsn_ie_hdr *) buf;
+	hdr->elem_id = WLAN_EID_RSN;
+	WPA_PUT_LE16(hdr->version, RSN_VERSION);
+	pos = (u8 *) (hdr + 1);
+
+	os_memset(&data, 0, sizeof(data));
+	rsne = get_ie(wpa_ie, wpa_ie_len, WLAN_EID_RSN);
+	if (!rsne || wpa_parse_wpa_ie_rsn(rsne, 2 + rsne[1], &data) < 0) {
+		wpa_printf(MSG_INFO,
+			   "EPPKE: No valid AP RSNE as a starting point");
+		return -1;
+	}
+	pos = rsne_write_data(buf, len, pos, data.group_cipher, pairwise_cipher,
+			      akmp, data.capabilities, pmkid, mfp,
+			      data.mgmt_group_cipher);
+	if (!pos)
+		return -1;
+
+	hdr->len = pos - buf - 2;
+
+	return pos - buf;
+}
+#endif /* CONFIG_ENC_ASSOC */
+
+
+static u64 rsnxe_capab(struct wpa_auth_config *conf, int key_mgmt)
+{
+	u64 capab = 0;
 
 	if (wpa_key_mgmt_sae(key_mgmt) &&
 	    (conf->sae_pwe == SAE_PWE_HASH_TO_ELEMENT ||
@@ -554,6 +590,8 @@ static u32 rsnxe_capab(struct wpa_auth_config *conf, int key_mgmt)
 		capab |= BIT(WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
 	if (conf->eap_using_authentication_frames)
 		capab |= BIT(WLAN_RSNX_CAPAB_802_1X_IN_AUTH_FRAMES);
+	if (conf->eppke_unauth)
+		capab |= BIT_ULL(WLAN_RSNX_CAPAB_UNAUTH_EPPKE);
 #endif /* CONFIG_ENC_ASSOC */
 
 	return capab;
@@ -563,7 +601,7 @@ static u32 rsnxe_capab(struct wpa_auth_config *conf, int key_mgmt)
 int wpa_write_rsnxe(struct wpa_auth_config *conf, u8 *buf, size_t len)
 {
 	u8 *pos = buf;
-	u32 capab = 0, tmp;
+	u64 capab, tmp;
 	size_t flen;
 
 	capab = rsnxe_capab(conf, conf->wpa_key_mgmt);
@@ -595,7 +633,7 @@ static int wpa_write_rsnxe_override(struct wpa_auth_config *conf, u8 *buf,
 				    size_t len)
 {
 	u8 *pos = buf;
-	u32 capab, tmp;
+	u64 capab, tmp;
 	size_t flen;
 
 	capab = rsnxe_capab(conf, conf->rsn_override_key_mgmt |
@@ -983,6 +1021,10 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 		else if (data.key_mgmt & WPA_KEY_MGMT_IEEE8021X_SHA384)
 			selector = RSN_AUTH_KEY_MGMT_802_1X_SHA384;
 #endif /* CONFIG_SHA384 */
+#ifdef CONFIG_ENC_ASSOC
+		else if (data.key_mgmt & WPA_KEY_MGMT_EPPKE)
+			selector = RSN_AUTH_KEY_MGMT_EPPKE;
+#endif /* CONFIG_ENC_ASSOC */
 		wpa_auth->dot11RSNAAuthenticationSuiteSelected = selector;
 
 		selector = wpa_cipher_to_suite(WPA_PROTO_RSN,
@@ -1099,6 +1141,10 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 	else if (key_mgmt & WPA_KEY_MGMT_DPP)
 		sm->wpa_key_mgmt = WPA_KEY_MGMT_DPP;
 #endif /* CONFIG_DPP */
+#ifdef CONFIG_ENC_ASSOC
+	else if (key_mgmt & WPA_KEY_MGMT_EPPKE)
+		sm->wpa_key_mgmt = WPA_KEY_MGMT_EPPKE;
+#endif /* CONFIG_ENC_ASSOC */
 	else
 		sm->wpa_key_mgmt = WPA_KEY_MGMT_PSK;
 

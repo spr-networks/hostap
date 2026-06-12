@@ -98,6 +98,7 @@ enum edca_format_and_bw_value {
 	EDCA_FORMAT_AND_BW_VHT80P80 = 14,
 	EDCA_FORMAT_AND_BW_VHT160_DUAL_LO = 15,
 	EDCA_FORMAT_AND_BW_VHT160_SINGLE_LO = 16,
+	EDCA_FORMAT_AND_BW_INVALID
 };
 
 /**
@@ -114,6 +115,7 @@ enum ntb_format_and_bw_value {
 	NTB_FORMAT_AND_BW_HE80P80 = 3,
 	NTB_FORMAT_AND_BW_HE160_DUAL_LO = 4,
 	NTB_FORMAT_AND_BW_HE160_SINGLE_LO = 5,
+	NTB_FORMAT_AND_BW_INVALID
 };
 
 struct pr_capabilities {
@@ -256,6 +258,114 @@ enum pr_attr_id {
 #define PR_PASN_AUTH_MODE_SAE    1
 #define PR_PASN_AUTH_MODE_PMK    2
 
+/* Peer discovery type */
+#define PR_DISCOVERY_TYPE_USD    0
+#define PR_DISCOVERY_TYPE_OOB    1
+
+/**
+ * struct pr_pasn_ranging_params - Peer parameters to be used in PASN to trigger
+ * ranging in case PR PASN is successful.
+ */
+struct pr_pasn_ranging_params {
+	enum {
+		PR_PASN_AND_RANGING,
+		PR_STOP_RANGING,
+	} action;
+	u8 peer_addr[ETH_ALEN];
+	u8 ranging_type;
+	u8 ranging_role;
+	u8 pr_pasn_status;
+	u8 auth_mode;
+	int freq;
+	u32 ranging_timeout;
+	u8 src_addr[ETH_ALEN];
+	enum pr_pasn_role pasn_role;
+
+	/**
+	 * EDCA based ranging specific parameters
+	 *
+	 * @burst_period: Burst period in units of 100 milliseconds
+	 * @num_bursts_exp: Number of bursts exponent
+	 * @ftms_per_burst: Number of FTM frames per burst
+	 * @ftmr_retries: Number of retries for FTM Request frame
+	 * @burst_duration: Burst duration as defined in IEEE Std 802.11-2024,
+	 *  Table 9-322 (Burst Duration subfield encoding).
+	 */
+	u16 burst_period;
+	u8 num_bursts_exp;
+	u8 ftms_per_burst;
+	u8 ftmr_retries;
+	u8 burst_duration;
+
+	/**
+	 * NTB ranging specific parameters
+	 *
+	 * @min_time_between_measurements: Minimum time between two consecutive
+	 *  range measurements in units of 100 microseconds.
+	 * @max_time_between_measurements: Maximum time between two consecutive
+	 *  range measurements in units of 10 milliseconds, to avoid FTM
+	 *  negotiation.
+	 * @availability_window: Duration of the Availability Window (AW) in
+	 *  units of 1 millisecond (0-255 ms).
+	 * @nominal_time: Nominal duration between adjacent Availability Windows
+	 *  in units of milliseconds.
+	 */
+	u32 min_time_between_measurements;
+	u32 max_time_between_measurements;
+	u8 availability_window;
+	u32 nominal_time;
+
+	/**
+	 * @request_lci: Whether to request LCI
+	 * @request_civicloc: Whether to request civic location
+	 */
+	bool request_lci;
+	bool request_civicloc;
+
+	/**
+	 * @lmr_feedback: Negotiate LMR feedback for NTB ranging.
+	 * Only valid when NTB ranging type is set. Required for RSTA
+	 * to report measurement results back to the initiator.
+	 */
+	bool lmr_feedback;
+
+	/**
+	 * @ingress_threshold: Ingress range threshold in millimeters.
+	 * The kernel reports a measurement result when the device
+	 * moves into this range.
+	 */
+	u64 ingress_threshold;
+
+	/**
+	 * @egress_threshold: Egress range threshold in millimeters.
+	 * The kernel reports a measurement result when the device
+	 * moves out of this range.
+	 */
+	u64 egress_threshold;
+
+	/**
+	 * @pr_suppress_results: Suppress ranging results for PD requests.
+	 * Cannot be used with range_report or lmr_feedback.
+	 */
+	bool pr_suppress_results;
+
+	u32 continuous_ranging_session_time;
+
+	int forced_pr_freq;
+	u8 ranging_op_class;
+	u16 channel_width; /* channel width in MHz (20/40/80/160/320) */
+	u8 format_bw;
+	u32 center_freq1;
+	u32 center_freq2;
+	u64 cookie;
+
+	/* Per-session credentials - if set, used instead of stored ones */
+	char password[100];
+	bool password_valid;
+	u8 pmk[PMK_LEN_MAX];
+	size_t pmk_len;
+};
+
 struct pr_dev_ik {
 	struct dl_list list;
 	u8 dik[DEVICE_IDENTITY_KEY_LEN];
@@ -296,6 +406,13 @@ struct pr_device {
 	size_t pmk_len;
 	bool pmk_valid;
 
+	/* DevIK of the peer resolved via DIRA verification.
+	 * Set to the matched dev_ik->dik when pr_validate_dira() succeeds.
+	 * Cleared by pr_clear_dev_iks().
+	 */
+	u8 dik[DEVICE_IDENTITY_KEY_LEN];
+	bool dik_valid;
+
 #ifdef CONFIG_PASN
 	/* PASN data structure */
 	struct pasn_data *pasn;
@@ -307,6 +424,7 @@ struct pr_device {
 	u8 protocol_type;
 	u8 final_op_class;
 	u8 final_op_channel;
+	u8 discovery_type;
 };
 
 
@@ -356,7 +474,10 @@ struct pr_config {
 
 	bool edca_rsta_support;
 
+	/* Best single format_bw value derived from pd_format_bw_bitmap */
 	u8 edca_format_and_bw;
+
+	u32 edca_min_ranging_interval;
 
 	u8 max_tx_antenna;
 
@@ -367,6 +488,16 @@ struct pr_config {
 	bool ntb_ista_support;
 
 	bool ntb_rsta_support;
+
+	bool concurrent_ista_rsta;
+
+	u32 pmsr_max_peers;
+
+	u32 pr_max_peer_ista_role;
+
+	u32 pr_max_peer_rsta_role;
+
+	u8 max_ftms_per_burst;
 
 	bool secure_he_ltf;
 
@@ -386,7 +517,14 @@ struct pr_config {
 
 	u8 max_tx_sts_gt_80;
 
+	/* PD ranging preamble and bandwidth bitmaps (shared by EDCA and NTB) */
+	u32 pd_preamble_bitmap;
+	u32 pd_format_bw_bitmap;
+
+	/* Best single format_bw value derived from pd_format_bw_bitmap */
 	u8 ntb_format_and_bw;
+
+	u32 ntb_min_ranging_interval;
 
 	struct pr_channels ntb_channels;
 
@@ -427,11 +565,24 @@ struct pr_config {
 	int (*pasn_send_mgmt)(void *ctx, const u8 *data, size_t data_len,
 			      int noack, unsigned int freq, unsigned int wait);
 
+	/**
+	 * negotiation_started - Called when PASN negotiation begins
+	 * @ctx: Callback context from cb_ctx
+	 * @peer_addr: MAC address of the peer
+	 * @role: Ranging role (initiator or responder)
+	 * @protocol_type: Ranging protocol type
+	 *
+	 * Fired on the initiator after Auth frame 1 (M1) is sent, and on the
+	 * responder after Auth frame 1 (M1) is received and M2 is sent back.
+	 */
+	void (*negotiation_started)(void *ctx, const u8 *peer_addr, u8 role,
+				    u8 protocol_type);
+
 	void (*pasn_result)(void *ctx, u8 role, u8 protocol_type, u8 op_class,
 			    u8 op_channel, const char *country);
 
-	void (*set_keys)(void *ctx, const u8 *own_addr, const u8 *peer_addr,
-			 int cipher, int akmp, struct wpa_ptk *ptk);
+	int (*set_keys)(void *ctx, const u8 *own_addr, const u8 *peer_addr,
+			int cipher, int akmp, struct wpa_ptk *ptk);
 
 	void (*clear_keys)(void *ctx, const u8 *own_addr, const u8 *peer_addr);
 
@@ -457,6 +608,13 @@ struct pr_data {
 	/* PMKSA cache for PASN-PMK authentication */
 	struct rsn_pmksa_cache *initiator_pmksa;
 	struct rsn_pmksa_cache *responder_pmksa;
+
+	/* PR PASN request tracking - similar to pasn_params in wpa_supplicant
+	 */
+	struct pr_pasn_ranging_params *pr_pasn_params;
+
+	/* Set when final measurement result received; blocks further results */
+	bool ranging_final_received;
 };
 
 /* PR Device Identity Resolution Attribute parameters */
@@ -492,9 +650,13 @@ void pr_set_dev_addr(struct pr_data *pr, const u8 *addr);
 void pr_clear_dev_iks(struct pr_data *pr);
 void pr_add_dev_ik(struct pr_data *pr, const u8 *dik, const char *password,
 		   const u8 *pmk, size_t pmk_len, bool own);
-struct wpabuf * pr_prepare_usd_elems(struct pr_data *pr);
+int pr_set_peer_credentials(struct pr_data *pr, const u8 *addr,
+			    const u8 *pmk, size_t pmk_len,
+			    const char *password);
+struct wpabuf * pr_prepare_usd_elems(struct pr_data *pr, const u8 *src_addr);
 void pr_process_usd_elems(struct pr_data *pr, const u8 *ies, u16 ies_len,
 			  const u8 *peer_addr, unsigned int freq);
+int pr_ensure_oob_peer(struct pr_data *pr, const u8 *addr, int freq);
 int pr_initiate_pasn_auth(struct pr_data *pr, const u8 *addr, int freq,
 			  u8 auth_mode, u8 ranging_role, u8 ranging_type,
 			  int forced_pr_freq);

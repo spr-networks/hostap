@@ -1301,6 +1301,14 @@ struct wpa_ssid {
 	int disable_eht;
 
 	/**
+	 * disable_uhr - Disable UHR (IEEE 802.11bn) for this network
+	 *
+	 * By default, use it if it is available, but this can be configured
+	 * to 1 to have it disabled.
+	 */
+	int disable_uhr;
+
+	/**
 	 * enable_4addr_mode - Set 4addr mode after association
 	 * 0 = Do not attempt to set 4addr mode
 	 * 1 = Try to set 4addr mode after association
@@ -1381,6 +1389,23 @@ struct wpa_ssid {
 	 * 2 = always enable
 	 */
 	int always_use_proxy_arp;
+
+#ifdef CONFIG_PASN
+	/**
+	 * pasn_groups - Preference list of enabled groups for PASN
+	 *
+	 * As per IEEE Std 802.11-2024, 12.13.1, both STAs must have at least
+	 * one cyclic group in common from the dot11RSNAConfigDLCGroupTable for
+	 * ephemeral key exchange. For interoperability, a STA shall support
+	 * group 19 (ECC group defined over a 256-bit prime order field), which
+	 * is used as the default if this parameter is not set. Only suitable
+	 * ECC groups (e.g., 19, 20, 21) are accepted.
+	 *
+	 * If this per-network parameter is not configured, the global
+	 * pasn_groups parameter is used. If neither is set, group 19 is used.
+	 */
+	int *pasn_groups;
+#endif /* CONFIG_PASN */
 };
 
 #endif /* CONFIG_SSID_H */

@@ -24,8 +24,8 @@ static bool valid_country_ch(char c)
 
 static void pr_device_free(struct pr_data *pr, struct pr_device *dev)
 {
-	wpabuf_free(dev->ranging_wrapper);
 #ifdef CONFIG_PASN
+	wpabuf_free(dev->ranging_wrapper);
 	if (dev->pasn) {
 		wpa_pasn_reset(dev->pasn);
 		pasn_data_deinit(dev->pasn);
@@ -149,6 +149,10 @@ void pr_deinit(struct pr_data *pr)
 	pr_deinit_dev_iks(pr);
 
 #ifdef CONFIG_PASN
+	os_free(pr->pr_pasn_params);
+	pr->pr_pasn_params = NULL;
+	pr->ranging_final_received = false;
+
 	pasn_initiator_pmksa_cache_deinit(pr->initiator_pmksa);
 	pasn_responder_pmksa_cache_deinit(pr->responder_pmksa);
 #endif /* CONFIG_PASN */
@@ -178,6 +182,8 @@ void pr_clear_dev_iks(struct pr_data *pr)
 	dl_list_for_each(dev, &pr->devices, struct pr_device, list) {
 		dev->password_valid = false;
 		os_memset(dev->password, 0, sizeof(dev->password));
+		dev->dik_valid = false;
+		os_memset(dev->dik, 0, DEVICE_IDENTITY_KEY_LEN);
 	}
 
 	pr_deinit_dev_iks(pr);
@@ -231,6 +237,44 @@ void pr_add_dev_ik(struct pr_data *pr, const u8 *dik, const char *password,
 	}
 
 	wpa_printf(MSG_DEBUG, "PR: New Device Identity added to list");
+}
+
+
+int pr_set_peer_credentials(struct pr_data *pr, const u8 *addr,
+			    const u8 *pmk, size_t pmk_len,
+			    const char *password)
+{
+	struct pr_device *dev;
+
+	if (!pr || !addr)
+		return -1;
+
+	dev = pr_get_device(pr, addr);
+	if (!dev) {
+		wpa_printf(MSG_DEBUG, "PR: set_peer_credentials: " MACSTR
+			   " not found", MAC2STR(addr));
+		return -1;
+	}
+
+	if (pmk && pmk_len) {
+		if (pmk_len > PMK_LEN_MAX)
+			return -1;
+		os_memcpy(dev->pmk, pmk, pmk_len);
+		dev->pmk_len = pmk_len;
+		dev->pmk_valid = true;
+		wpa_printf(MSG_DEBUG, "PR: PMK set for " MACSTR, MAC2STR(addr));
+	}
+
+	if (password) {
+		if (os_strlen(password) >= sizeof(dev->password))
+			return -1;
+		os_strlcpy(dev->password, password, sizeof(dev->password));
+		dev->password_valid = true;
+		wpa_printf(MSG_DEBUG, "PR: password set for " MACSTR,
+			   MAC2STR(addr));
+	}
+
+	return 0;
 }
 
 
@@ -345,12 +389,13 @@ static void pr_get_ntb_capabilities(struct pr_data *pr,
 		MAX_TX_STS_GT_80;
 
 	capab->ntb_hw_caps = ntb_hw_caps;
-	os_memcpy(&capab->channels, &pr->cfg->edca_channels,
+	os_memcpy(&capab->channels, &pr->cfg->ntb_channels,
 		  sizeof(struct pr_channels));
 }
 
 
-static int pr_derive_dira(struct pr_data *pr, struct pr_dira *dira)
+static int pr_derive_dira(struct pr_data *pr, const u8 *src_addr,
+			  struct pr_dira *dira)
 {
 	u8 nonce[DEVICE_IDENTITY_NONCE_LEN];
 	u8 tag[DEVICE_MAX_HASH_LEN];
@@ -379,7 +424,7 @@ static int pr_derive_dira(struct pr_data *pr, struct pr_dira *dira)
 	 *                                Nonce))
 	 */
 	os_memcpy(data, "DIR", DIR_STR_LEN);
-	os_memcpy(&data[DIR_STR_LEN], pr->cfg->dev_addr, ETH_ALEN);
+	os_memcpy(&data[DIR_STR_LEN], src_addr, ETH_ALEN);
 	os_memcpy(&data[DIR_STR_LEN + ETH_ALEN], nonce,
 		  DEVICE_IDENTITY_NONCE_LEN);
 
@@ -415,6 +460,10 @@ static int pr_validate_dira(struct pr_data *pr, struct pr_device *dev,
 	u8 tag[DEVICE_MAX_HASH_LEN];
 	const char *label = "DIR";
 	const u8 *dira_nonce, *dira_tag;
+
+	/* Reset DevIK state - set only if DIRA verification succeeds */
+	os_memset(dev->dik, 0, DEVICE_IDENTITY_KEY_LEN);
+	dev->dik_valid = false;
 
 	if (dira_len < 1 + DEVICE_IDENTITY_NONCE_LEN + DEVICE_IDENTITY_TAG_LEN)
 	{
@@ -467,6 +516,9 @@ static int pr_validate_dira(struct pr_data *pr, struct pr_device *dev,
 				dev->pmk_len = dev_ik->pmk_len;
 				dev->pmk_valid = true;
 			}
+			os_memcpy(dev->dik, dev_ik->dik,
+				  DEVICE_IDENTITY_KEY_LEN);
+			dev->dik_valid = true;
 			return 0;
 		}
 	}
@@ -701,7 +753,7 @@ static void pr_buf_add_dira(struct wpabuf *buf, const struct pr_dira *dira)
 }
 
 
-struct wpabuf * pr_prepare_usd_elems(struct pr_data *pr)
+struct wpabuf * pr_prepare_usd_elems(struct pr_data *pr, const u8 *src_addr)
 {
 	u32 ie_type;
 	struct wpabuf *buf, *buf2;
@@ -729,7 +781,7 @@ struct wpabuf * pr_prepare_usd_elems(struct pr_data *pr)
 		pr_buf_add_ntb_capa_info(buf, &ntb_caps);
 	}
 
-	if (!pr_derive_dira(pr, &dira))
+	if (!pr_derive_dira(pr, src_addr, &dira))
 		pr_buf_add_dira(buf, &dira);
 
 	ie_type = (OUI_WFA << 8) | PR_OUI_TYPE;
@@ -1136,6 +1188,7 @@ void pr_process_usd_elems(struct pr_data *pr, const u8 *ies, u16 ies_len,
 
 	os_get_reltime(&dev->last_seen);
 	dev->listen_freq = freq;
+	dev->discovery_type = PR_DISCOVERY_TYPE_USD;
 
 	pr_process_ranging_capabilities(msg.pr_capability,
 					msg.pr_capability_len, &dev->pr_caps);
@@ -1158,11 +1211,45 @@ void pr_process_usd_elems(struct pr_data *pr, const u8 *ies, u16 ies_len,
 }
 
 
+/**
+ * pr_ensure_oob_peer - Add a minimal OOB peer entry if not already present
+ */
+int pr_ensure_oob_peer(struct pr_data *pr, const u8 *addr, int freq)
+{
+	struct pr_device *dev;
+
+	if (!pr || !addr)
+		return -1;
+
+	dev = pr_get_device(pr, addr);
+	if (dev)
+		return 0;
+
+	dev = pr_create_device(pr, addr);
+	if (!dev) {
+		wpa_printf(MSG_INFO, "PR: Failed to create OOB peer " MACSTR,
+			   MAC2STR(addr));
+		return -1;
+	}
+
+	dev->discovery_type = PR_DISCOVERY_TYPE_OOB;
+	if (freq)
+		dev->listen_freq = freq;
+
+	wpa_printf(MSG_DEBUG, "PR: OOB peer " MACSTR " created at PASN_START",
+		   MAC2STR(addr));
+	return 0;
+}
+
+
 #ifdef CONFIG_PASN
 
 static bool pr_eq_ranging_capa_params(const struct pr_device *dev,
 				     const struct pr_capabilities *caps)
 {
+	if (dev->discovery_type == PR_DISCOVERY_TYPE_OOB)
+		return true;
+
 	return dev->pr_caps.edca_support == caps->edca_support &&
 		dev->pr_caps.ntb_support == caps->ntb_support &&
 		dev->pr_caps.pasn_type == caps->pasn_type &&
@@ -1175,6 +1262,9 @@ static bool pr_eq_ranging_capa_params(const struct pr_device *dev,
 static bool pr_eq_edca_params(const struct pr_device *dev,
 			      const struct edca_capabilities *edca_caps)
 {
+	if (dev->discovery_type == PR_DISCOVERY_TYPE_OOB)
+		return true;
+
 	return dev->edca_caps.ista_support == edca_caps->ista_support &&
 		dev->edca_caps.rsta_support == edca_caps->rsta_support &&
 		dev->edca_caps.edca_hw_caps == edca_caps->edca_hw_caps &&
@@ -1185,6 +1275,9 @@ static bool pr_eq_edca_params(const struct pr_device *dev,
 static bool pr_eq_ntb_params(const struct pr_device *dev,
 			     const struct ntb_capabilities *ntb_caps)
 {
+	if (dev->discovery_type == PR_DISCOVERY_TYPE_OOB)
+		return true;
+
 	return dev->ntb_caps.ista_support == ntb_caps->ista_support &&
 		dev->ntb_caps.rsta_support == ntb_caps->rsta_support &&
 		dev->ntb_caps.ntb_hw_caps == ntb_caps->ntb_hw_caps &&
@@ -1599,7 +1692,7 @@ static int pr_prepare_pasn_pr_elem(struct pr_data *pr, struct wpabuf *extra_ies,
 	pr_buf_add_operation_mode(buf, &op_mode);
 
 	/* PR Device Identity Resolution attribute */
-	if (!pr_derive_dira(pr, &dira))
+	if (!pr_derive_dira(pr, pr->cfg->dev_addr, &dira))
 		pr_buf_add_dira(buf, &dira);
 
 	ie_type = (OUI_WFA << 8) | PR_OUI_TYPE;
@@ -1679,8 +1772,6 @@ static void pr_pasn_set_password(struct pasn_data *pasn, u8 pasn_type,
 	pasn->pt = sae_derive_pt(pasn_groups, (const u8 *) PR_PASN_SSID,
 				 os_strlen(PR_PASN_SSID),
 				 (const u8 *) passphrase, len, NULL, 0);
-	/* Set passphrase for PASN responder to validate Auth 1 frame */
-	pasn->password = passphrase;
 }
 
 
@@ -1715,9 +1806,12 @@ static int pr_pasn_initialize(struct pr_data *pr, struct pr_device *dev,
 
 	/* As specified in Proximity Ranging Implementation Considerations for
 	 * P2P Operation D1.8, unauthenticated mode PASN with DH group 19
-	 * should be supported by all P2P proximity ranging devices. */
-	if (!(pr->cfg->pasn_type & BIT(0)) ||
-	    !(dev->pr_caps.pasn_type & BIT(0))) {
+	 * should be supported by all P2P proximity ranging devices. Skip
+	 * this check for OOB peers whose capabilities are not known.
+	 */
+	if (dev->discovery_type != PR_DISCOVERY_TYPE_OOB &&
+	    (!(pr->cfg->pasn_type & BIT(0)) ||
+	     !(dev->pr_caps.pasn_type & BIT(0)))) {
 		wpa_printf(MSG_DEBUG,
 			   "PR PASN: Unauthenticated DH group 19 NOT supported, PASN type of self 0x%x, peer 0x%x",
 			   pr->cfg->pasn_type, dev->pr_caps.pasn_type);
@@ -1768,14 +1862,16 @@ static int pr_pasn_initialize(struct pr_data *pr, struct pr_device *dev,
 						       pasn->peer_addr,
 						       dev->pmk,
 						       dev->pmk_len,
-						       pmkid);
+						       pmkid,
+						       WPA_KEY_MGMT_SAE);
 		else
 			pasn_responder_pmksa_cache_add(pr->responder_pmksa,
 						       pasn->own_addr,
 						       pasn->peer_addr,
 						       dev->pmk,
 						       dev->pmk_len,
-						       pmkid);
+						       pmkid,
+						       WPA_KEY_MGMT_SAE);
 		pasn->akmp = WPA_KEY_MGMT_SAE;
 	} else {
 		pasn->akmp = WPA_KEY_MGMT_PASN;
@@ -1923,7 +2019,8 @@ int pr_initiate_pasn_auth(struct pr_data *pr, const u8 *addr, int freq,
 		return -1;
 	}
 
-	if (pr_validate_pasn_request(pr, dev, auth_mode, ranging_role,
+	if (dev->discovery_type != PR_DISCOVERY_TYPE_OOB &&
+	    pr_validate_pasn_request(pr, dev, auth_mode, ranging_role,
 				     ranging_type) < 0) {
 		wpa_printf(MSG_INFO,
 			   "PR PASN: Invalid parameters to initiate authentication");
@@ -1972,8 +2069,15 @@ int pr_initiate_pasn_auth(struct pr_data *pr, const u8 *addr, int freq,
 				      pasn->group, pasn->freq, NULL, 0, NULL, 0,
 				      NULL);
 	}
-	if (ret)
+	if (ret) {
 		wpa_printf(MSG_INFO, "PR PASN: Failed to start PASN");
+	} else {
+		/* M1 sent successfully - notify that negotiation has started */
+		if (pr->cfg->negotiation_started)
+			pr->cfg->negotiation_started(pr->cfg->cb_ctx, addr,
+						     ranging_role,
+						     ranging_type);
+	}
 
 out:
 	wpabuf_free(extra_ies);
@@ -2037,6 +2141,7 @@ int pr_pasn_auth_tx_status(struct pr_data *pr, const u8 *data, size_t data_len,
 					    dev->final_op_channel,
 					    self_format_bw,
 					    peer_format_bw);
+		pr_flush(pr);
 	}
 
 out:
@@ -2387,10 +2492,20 @@ static int pr_pasn_handle_auth_1(struct pr_data *pr, struct pr_device *dev,
 		goto fail;
 	}
 
-	if (pr->cfg->set_keys)
-		pr->cfg->set_keys(pr->cfg->cb_ctx, pr->cfg->dev_addr,
-				  dev->pr_device_addr, dev->pasn->cipher,
-				  dev->pasn->akmp, &dev->pasn->ptk);
+	if (!(dev->protocol_type & PR_EDCA_BASED_RANGING) &&
+	    pr->cfg->set_keys &&
+	    pr->cfg->set_keys(pr->cfg->cb_ctx, pr->cfg->dev_addr,
+			      dev->pr_device_addr, dev->pasn->cipher,
+			      dev->pasn->akmp, &dev->pasn->ptk) < 0) {
+		wpa_printf(MSG_INFO, "PR PASN: Key configuration failed");
+		goto fail;
+	}
+
+	/* M1 received and M2 sent - notify that negotiation has started */
+	if (pr->cfg->negotiation_started)
+		pr->cfg->negotiation_started(pr->cfg->cb_ctx, mgmt->sa,
+					     dev->ranging_role,
+					     dev->protocol_type);
 	ret = 0;
 
 fail:
@@ -2430,10 +2545,14 @@ static int pr_pasn_handle_auth_2(struct pr_data *pr, struct pr_device *dev,
 		goto fail;
 	}
 
-	if (pr->cfg->set_keys)
-		pr->cfg->set_keys(pr->cfg->cb_ctx, pr->cfg->dev_addr,
-				  dev->pr_device_addr, dev->pasn->cipher,
-				  dev->pasn->akmp, &dev->pasn->ptk);
+	if (!(dev->protocol_type & PR_EDCA_BASED_RANGING) &&
+	    pr->cfg->set_keys &&
+	    pr->cfg->set_keys(pr->cfg->cb_ctx, pr->cfg->dev_addr,
+			      dev->pr_device_addr, dev->pasn->cipher,
+			      dev->pasn->akmp, &dev->pasn->ptk) < 0) {
+		wpa_printf(MSG_INFO, "PR PASN: Key configuration failed");
+		goto fail;
+	}
 	ret = 0;
 
 fail:
@@ -2499,6 +2618,7 @@ static int pr_pasn_handle_auth_3(struct pr_data *pr, struct pr_device *dev,
 					    dev->final_op_channel,
 					    self_format_bw,
 					    peer_format_bw);
+	pr_flush(pr);
 	return 0;
 
 fail:

@@ -203,13 +203,11 @@ void hostapd_free_neighbor_db(struct hostapd_data *hapd)
 
 
 #ifdef NEED_AP_MLME
-static enum nr_chan_width hostapd_get_nr_chan_width(struct hostapd_data *hapd,
-						    int ht, int vht, int he)
+static enum nr_chan_width
+hostapd_get_nr_chan_width(struct hostapd_data *hapd,
+			  int ht, int vht, int he,
+			  enum oper_chan_width oper_chwidth)
 {
-	enum oper_chan_width oper_chwidth;
-
-	oper_chwidth = hostapd_get_oper_chwidth(hapd->iconf);
-
 	if (!ht && !vht && !he)
 		return NR_CHAN_WIDTH_20;
 	if (!hapd->iconf->secondary_channel)
@@ -238,6 +236,7 @@ void hostapd_neighbor_set_own_report(struct hostapd_data *hapd)
 	struct wpa_ssid_value ssid;
 	u8 channel, op_class;
 	u8 center_freq1_idx = 0, center_freq2_idx = 0;
+	enum oper_chan_width oper_chwidth;
 	enum nr_chan_width width;
 	u32 bssid_info;
 	struct wpabuf *nr;
@@ -275,21 +274,22 @@ void hostapd_neighbor_set_own_report(struct hostapd_data *hapd)
 		bssid_info |= NEI_REP_BSSID_INFO_EHT;
 	/* TODO: Set NEI_REP_BSSID_INFO_MOBILITY_DOMAIN if MDE is set */
 
+	hostapd_get_oper_chan_info_of_bss(hapd, &oper_chwidth,
+					  &center_freq1_idx, &center_freq2_idx);
+
 	if (ieee80211_freq_to_channel_ext(hapd->iface->freq,
 					  hapd->iconf->secondary_channel,
-					  hostapd_get_oper_chwidth(hapd->iconf),
+					  oper_chwidth,
 					  &op_class, &channel) ==
 	    NUM_HOSTAPD_MODES)
 		return;
-	width = hostapd_get_nr_chan_width(hapd, ht, vht, he);
-	if (vht) {
-		center_freq1_idx = hostapd_get_oper_centr_freq_seg0_idx(
-			hapd->iconf);
-		if (width == NR_CHAN_WIDTH_80P80)
-			center_freq2_idx =
-				hostapd_get_oper_centr_freq_seg1_idx(
-					hapd->iconf);
-	} else if (ht) {
+	width = hostapd_get_nr_chan_width(hapd, ht, vht, he, oper_chwidth);
+
+	if (width != NR_CHAN_WIDTH_80P80)
+		center_freq2_idx = 0;
+
+	if (!vht && ht) {
+		center_freq1_idx = 0;
 		ieee80211_freq_to_chan(hapd->iface->freq +
 				       10 * hapd->iconf->secondary_channel,
 				       &center_freq1_idx);

@@ -21,6 +21,7 @@
 #include "config_ssid.h"
 #include "wmm_ac.h"
 #include "pasn/pasn_common.h"
+#include "nan/nan.h"
 
 extern const char *const wpa_supplicant_version;
 extern const char *const wpa_supplicant_license;
@@ -140,6 +141,11 @@ struct wpa_interface {
 	 * nan_mgmt - Interface used for NAN management (NAN Device operations)
 	 */
 	bool nan_mgmt;
+
+	/**
+	 * nan_data - Interface used for NAN data path operations
+	 */
+	bool nan_data;
 };
 
 /**
@@ -1049,6 +1055,7 @@ struct wpa_supplicant {
 	unsigned int connection_vht:1;
 	unsigned int connection_he:1;
 	unsigned int connection_eht:1;
+	unsigned int connection_uhr:1;
 	unsigned int disable_mbo_oce:1;
 	u8 connection_max_nss_rx;
 	u8 connection_max_nss_tx;
@@ -1104,16 +1111,24 @@ struct wpa_supplicant {
 		int sae_group_index;
 		unsigned int sae_pmksa_caching:1;
 		u16 seq_num;
+		int *sae_rejected_groups;
+#endif /* CONFIG_SAE */
 		u8 ext_auth_bssid[ETH_ALEN];
+		unsigned int ext_auth_freq;
 		struct wpa_ssid *ext_auth_wpa_ssid;
 		u8 ext_auth_ssid[SSID_MAX_LEN];
 		size_t ext_auth_ssid_len;
 		int ext_auth_key_mgmt;
 		u8 ext_auth_ap_mld_addr[ETH_ALEN];
 		bool ext_ml_auth;
-		int *sae_rejected_groups;
-#endif /* CONFIG_SAE */
 		u16 assoc_auth_type;
+		int ext_auth_alg;
+		int ext_pairwise_cipher;
+		int ext_group_cipher;
+		int ext_mgmt_group_cipher;
+		u16 ext_rsn_capab;
+		u8 ext_rsnxe[257];
+		size_t ext_rsnxe_len;
 	} sme;
 #endif /* CONFIG_SME */
 
@@ -1675,6 +1690,7 @@ struct wpa_supplicant {
 	struct wpa_radio_work *p2p_pasn_auth_work;
 #endif /* CONFIG_P2P */
 	struct wpa_radio_work *pr_pasn_auth_work;
+	struct wpa_radio_work *pr_roc_work;
 #endif /* CONFIG_PASN */
 
 	bool is_6ghz_enabled;
@@ -1720,11 +1736,29 @@ struct wpa_supplicant {
 				    * we are already associated with. */
 
 	bool nan_mgmt;
+	bool nan_data;
 
 #ifdef CONFIG_NAN
-	u32 nan_drv_flags;
+#define MAX_NAN_RADIOS 2
+	struct nan_capa nan_capa;
 	struct nan_data *nan;
-	struct nan_cluster_config nan_config;
+	struct nan_cluster_config nan_cluster_config;
+	u8 schedule_sequence_id;
+	struct nan_schedule_config nan_sched[MAX_NAN_RADIOS];
+	u16 nan_supported_csids;
+	struct nan_schedule_update {
+		struct nan_schedule_config sched;
+		u8 map_id;
+	} nan_sched_update;
+	struct wpabuf *nan_ulw_attr;
+	struct wpa_freq_range_list nan_disallowed_freqs;
+	u16 nan_max_bw;
+	struct nan_channels nan_override_potential_avail;
+	unsigned int nan_ndi_ndp_refcount; /* Active NDP count on this NDI */
+	struct nan_gtk ndi_gtk;
+#ifdef CONFIG_TESTING_OPTIONS
+	bool nan_force_conditional_sched;
+#endif /* CONFIG_TESTING_OPTIONS */
 #endif /* CONFIG_NAN */
 #ifdef CONFIG_ENC_ASSOC
 	bool assoc_resp_encrypted; /* Whether (Re)Association Response frame
@@ -1736,6 +1770,24 @@ struct wpa_supplicant {
 	u8 pmkid_anonce[NONCE_LEN];
 	bool pmkid_anonce_set;
 #endif /* CONFIG_PMKSA_PRIVACY */
+	u8 pd_addr[ETH_ALEN];
+
+	/**
+	 * pr_responder_mode - Waiting for PASN M1 as responder
+	 *
+	 * Set when ROC has been started on this interface to listen for an
+	 * incoming PASN Auth1 frame. Cleared once the dedicated PR interface
+	 * is created on M1 reception.
+	 */
+	bool pr_responder_mode;
+
+	/**
+	 * pr_responder_src_addr - Source MAC address used for responder ROC
+	 *
+	 * Stored when responder mode is activated so that the dedicated PR
+	 * interface can be created with the same address when M1 arrives.
+	 */
+	u8 pr_responder_src_addr[ETH_ALEN];
 };
 
 
@@ -1750,6 +1802,9 @@ void wpa_supplicant_apply_he_overrides(
 	struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 	struct wpa_driver_associate_params *params);
 void wpa_supplicant_apply_eht_overrides(
+	struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
+	struct wpa_driver_associate_params *params);
+void wpa_supplicant_apply_uhr_overrides(
 	struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 	struct wpa_driver_associate_params *params);
 
@@ -2131,19 +2186,26 @@ int wpas_send_dscp_query(struct wpa_supplicant *wpa_s, const char *domain_name,
 int wpas_pasn_auth_start(struct wpa_supplicant *wpa_s, const u8 *own_addr,
 			 const u8 *bssid, int akmp, int cipher,
 			 u16 group, int network_id,
-			 const u8 *comeback, size_t comeback_len);
+			 const u8 *comeback, size_t comeback_len,
+			 unsigned int auth_alg, int group_cipher,
+			 int group_mgmt_cipher, u16 rsn_capab,
+			 const u8 *rsnxe_data, bool is_ml_peer);
 void wpas_pasn_auth_stop(struct wpa_supplicant *wpa_s);
 void wpas_pasn_free_params(struct wpa_supplicant *wpa_s);
 int wpas_pasn_auth_tx_status(struct wpa_supplicant *wpa_s,
 			     const u8 *data, size_t data_len, u8 acked);
 int wpas_pasn_auth_rx(struct wpa_supplicant *wpa_s,
 		      const struct ieee80211_mgmt *mgmt, size_t len);
+int wpas_pasn_get_group(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
+			struct pasn_data *pasn);
 
 int wpas_pasn_deauthenticate(struct wpa_supplicant *wpa_s, const u8 *own_addr,
 			     const u8 *bssid);
 void wpas_pasn_auth_trigger(struct wpa_supplicant *wpa_s,
 			    struct pasn_auth *pasn_auth);
 void wpas_pasn_auth_work_done(struct wpa_supplicant *wpa_s, int status);
+struct sae_pt * wpas_pasn_sae_derive_pt_for_eppke(struct wpa_ssid *ssid,
+						  int group);
 bool wpas_is_6ghz_supported(struct wpa_supplicant *wpa_s, bool only_enabled);
 
 bool wpa_is_non_eht_scs_traffic_desc_supported(struct wpa_bss *bss);
@@ -2158,5 +2220,14 @@ void wpas_update_dfs_ap_info(struct wpa_supplicant *wpa_s, int freq,
 			     enum chan_width ap_ch_width,
 			     bool disconnect_evt);
 void wpas_configure_frame_filters(struct wpa_supplicant *wpa_s);
+
+static inline bool wpas_is_nan_iface(struct wpa_supplicant *wpa_s)
+{
+#ifdef CONFIG_NAN
+	return wpa_s->nan_mgmt || wpa_s->nan_data;
+#else /* CONFIG_NAN */
+	return false;
+#endif /* CONFIG_NAN */
+}
 
 #endif /* WPA_SUPPLICANT_I_H */

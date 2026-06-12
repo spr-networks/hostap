@@ -37,6 +37,7 @@ void pasn_data_deinit(struct pasn_data *pasn)
 	wpabuf_free(pasn->frame);
 	os_free(pasn->pasn_groups);
 	wpabuf_free(pasn->auth1);
+	os_free(pasn->dec_pw_id);
 	bin_clear_free(pasn, sizeof(struct pasn_data));
 }
 
@@ -151,19 +152,18 @@ int pasn_set_pt(struct pasn_data *pasn, struct sae_pt *pt)
 }
 
 
-void pasn_set_password(struct pasn_data *pasn, const char *password)
-{
-	if (!pasn)
-		return;
-	pasn->password = password;
-}
-
-
 void pasn_set_wpa_key_mgmt(struct pasn_data *pasn, int key_mgmt)
 {
 	if (!pasn)
 		return;
 	pasn->wpa_key_mgmt = key_mgmt;
+}
+
+
+void pasn_set_mfp(struct pasn_data *pasn, enum mfp_options mfp)
+{
+	if (pasn)
+		pasn->ieee80211w = mfp;
 }
 
 
@@ -175,7 +175,7 @@ void pasn_set_rsn_pairwise(struct pasn_data *pasn, int rsn_pairwise)
 }
 
 
-void pasn_set_rsnxe_caps(struct pasn_data *pasn, u32 rsnxe_capab)
+void pasn_set_rsnxe_caps(struct pasn_data *pasn, u64 rsnxe_capab)
 {
 	if (!pasn)
 		return;

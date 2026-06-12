@@ -1217,6 +1217,16 @@ static int hostapd_ctrl_iface_set(struct hostapd_data *hapd, char *cmd)
 		hapd->ext_mgmt_frame_handling = atoi(value);
 	} else if (os_strcasecmp(cmd, "ext_eapol_frame_io") == 0) {
 		hapd->ext_eapol_frame_io = atoi(value);
+	} else if (os_strcasecmp(cmd, "association_response_status_code") == 0)
+	{
+		if (os_strcasecmp(value, "disable") == 0)
+			hapd->conf->association_response_status_code = -1;
+		else
+			hapd->conf->association_response_status_code =
+				atoi(value);
+		wpa_printf(MSG_DEBUG,
+			   "TESTING: association_response_status_code=%d",
+			   hapd->conf->association_response_status_code);
 	} else if (os_strcasecmp(cmd, "force_backlog_bytes") == 0) {
 		hapd->force_backlog_bytes = atoi(value);
 #ifdef CONFIG_DPP
@@ -1290,7 +1300,6 @@ static int hostapd_ctrl_iface_set(struct hostapd_data *hapd, char *cmd)
 			hostapd_neighbor_sync_own_report(hapd);
 		} else if (os_strncmp(cmd, "wme_ac_", 7) == 0 ||
 			   os_strncmp(cmd, "wmm_ac_", 7) == 0) {
-			hapd->parameter_set_count++;
 			if (ieee802_11_update_beacons(hapd->iface))
 				wpa_printf(MSG_DEBUG,
 					   "Failed to update beacons with WMM parameters");
@@ -4620,7 +4629,7 @@ static void hostapd_ctrl_iface_receive(int sock, void *eloop_ctx,
 	struct sockaddr_storage from;
 	socklen_t fromlen = sizeof(from);
 	char *reply, *pos = buf;
-	const int reply_size = 4096;
+	const int reply_size = 8192;
 	int reply_len;
 	int level = MSG_DEBUG;
 #ifdef CONFIG_CTRL_IFACE_UDP
@@ -4799,7 +4808,7 @@ static void hostapd_mld_ctrl_iface_receive(int sock, void *eloop_ctx,
 	struct sockaddr_storage from;
 	socklen_t fromlen = sizeof(from);
 	char *reply, *pos = buf;
-	const size_t reply_size = 4096;
+	const size_t reply_size = 8192;
 	int reply_len;
 	int level = MSG_DEBUG;
 
@@ -5727,7 +5736,7 @@ static void hostapd_global_ctrl_iface_receive(int sock, void *eloop_ctx,
 	socklen_t fromlen = sizeof(from);
 	char *reply;
 	int reply_len;
-	const int reply_size = 4096;
+	const int reply_size = 8192;
 #ifdef CONFIG_CTRL_IFACE_UDP
 	unsigned char lcookie[CTRL_IFACE_COOKIE_LEN];
 #endif /* CONFIG_CTRL_IFACE_UDP */

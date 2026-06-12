@@ -24,6 +24,36 @@ void wpas_nan_cluster_join(struct wpa_supplicant *wpa_s,
 			   const u8 *cluster_id,
 			   bool new_cluster);
 void wpas_nan_next_dw(struct wpa_supplicant *wpa_s, u32 freq);
+void wpas_nan_sched_update_done(struct wpa_supplicant *wpa_s,
+				const union wpa_event_data *data);
+void wpas_nan_ulw_update(struct wpa_supplicant *wpa_s,
+			 const u8 *ulw, size_t ulw_len);
+void wpas_nan_chan_evacuation(struct wpa_supplicant *wpa_s,
+			      const struct nan_chan_evacuation_info *info);
+int wpas_nan_sched_config_map(struct wpa_supplicant *wpa_s, const char *cmd);
+int wpas_nan_ndp_request(struct wpa_supplicant *wpa_s, char *cmd);
+void wpas_nan_rx_naf(struct wpa_supplicant *wpa_s,
+		     const struct ieee80211_mgmt *mgmt, size_t len);
+int wpas_nan_ndp_response(struct wpa_supplicant *wpa_s, char *cmd);
+int wpas_nan_ndp_terminate(struct wpa_supplicant *wpa_s, char *cmd);
+int wpas_nan_peer_info(struct wpa_supplicant *wpa_s, const char *cmd,
+		       char *reply, size_t reply_size);
+int wpas_nan_status(struct wpa_supplicant *wpa_s, char *reply,
+		    size_t reply_size);
+int wpas_nan_bootstrap_request(struct wpa_supplicant *wpa_s, char *cmd);
+int wpas_nan_bootstrap_reset(struct wpa_supplicant *wpa_s, char *cmd);
+bool wpas_nan_is_peer_paired(struct wpa_supplicant *wpa_s, const u8 *peer_addr);
+void wpas_nan_data_interface_removed(struct wpa_supplicant *wpa_s);
+
+int wpas_nan_pair(struct wpa_supplicant *wpa_s, const u8 *peer_addr,
+		  u8 auth_mode, int cipher, int handle, u8 peer_instance_id,
+		  bool responder, const char *password);
+int wpas_nan_pairing_start(struct wpa_supplicant *wpa_s, char *cmd);
+int wpas_nan_pairing_abort(struct wpa_supplicant *wpa_s, const char *cmd);
+int wpas_nan_pasn_auth_tx_status(struct wpa_supplicant *wpa_s, const u8 *data,
+				 size_t data_len, bool acked);
+int wpas_nan_pasn_auth_rx(struct wpa_supplicant *wpa_s,
+			  const struct ieee80211_mgmt *mgmt, size_t len);
 
 #else /* CONFIG_NAN */
 
@@ -66,6 +96,30 @@ static inline void wpas_nan_cluster_join(struct wpa_supplicant *wpa_s,
 static inline void wpas_nan_next_dw(struct wpa_supplicant *wpa_s, u32 freq)
 {}
 
+static inline void wpas_nan_sched_update_done(struct wpa_supplicant *wpa_s,
+					      const union wpa_event_data *data)
+{}
+
+static inline void wpas_nan_ulw_update(struct wpa_supplicant *wpa_s,
+				       const u8 *ulw, size_t ulw_len)
+{}
+
+static inline void wpas_nan_rx_naf(struct wpa_supplicant *wpa_s,
+				   const struct ieee80211_mgmt *mgmt,
+				   size_t len)
+{}
+
+static inline bool wpas_nan_is_peer_paired(struct wpa_supplicant *wpa_s,
+					  const u8 *peer_addr)
+{
+	return false;
+}
+
+static inline void
+wpas_nan_chan_evacuation(struct wpa_supplicant *wpa_s,
+			 union wpa_event_data *data)
+{}
+
 #endif /* CONFIG_NAN */
 
 struct nan_subscribe_params;
@@ -97,7 +151,9 @@ void wpas_nan_cancel_subscribe(struct wpa_supplicant *wpa_s,
 			       int subscribe_id);
 int wpas_nan_transmit(struct wpa_supplicant *wpa_s, int handle,
 		      const struct wpabuf *ssi, const struct wpabuf *elems,
-		      const u8 *peer_addr, u8 req_instance_id);
+		      const u8 *peer_addr, u8 req_instance_id, u32 *cookie);
+int wpas_nan_tx_status(struct wpa_supplicant *wpa_s,
+		       const u8 *data, size_t data_len, int acked);
 
 #else /* CONFIG_NAN_USD || CONFIG_NAN */
 
@@ -117,6 +173,13 @@ void wpas_nan_de_rx_sdf(struct wpa_supplicant *wpa_s, const u8 *src,
 
 static inline void wpas_nan_de_flush(struct wpa_supplicant *wpa_s)
 {}
+
+static inline int wpas_nan_tx_status(struct wpa_supplicant *wpa_s,
+				     const u8 *data, size_t data_len,
+				     u8 acked)
+{
+	return -1;
+}
 
 #endif /* CONFIG_NAN_USD || CONFIG_NAN */
 

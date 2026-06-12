@@ -19,6 +19,7 @@
 #include "ieee802_11_defs.h"
 #include "ieee802_11_common.h"
 #include "defs.h"
+#include "common/nan_defs.h"
 #include "wpa_common.h"
 
 
@@ -1558,8 +1559,9 @@ void wpa_ft_parse_ies_free(struct wpa_ft_ies *parse)
  */
 static bool pasn_use_sha384(int akmp, int cipher)
 {
-	return (akmp == WPA_KEY_MGMT_PASN && (cipher == WPA_CIPHER_CCMP_256 ||
-					      cipher == WPA_CIPHER_GCMP_256)) ||
+	return ((akmp == WPA_KEY_MGMT_PASN || akmp == WPA_KEY_MGMT_EPPKE) &&
+		(cipher == WPA_CIPHER_CCMP_256 ||
+		 cipher == WPA_CIPHER_GCMP_256)) ||
 		wpa_key_mgmt_sha384(akmp);
 }
 
@@ -1908,8 +1910,11 @@ int wpa_auth_8021x_mic(int akmp, const u8 *kck, size_t kck_len, const u8 *addr1,
 
 	wpa_hexdump_key(MSG_DEBUG, "MIC: KCK", kck, kck_len);
 
-	wpa_hexdump_key(MSG_MSGDUMP, "802.1X: MIC: frame", frame, frame_len);
-	os_memcpy(buf + 2 * ETH_ALEN + data_len, frame, frame_len);
+	if (frame) {
+		wpa_hexdump_key(MSG_MSGDUMP, "802.1X: MIC: frame",
+				frame, frame_len);
+		os_memcpy(buf + 2 * ETH_ALEN + data_len, frame, frame_len);
+	}
 
 	wpa_hexdump_key(MSG_DEBUG, "MIC: buf", buf, buf_len);
 	if (wpa_key_mgmt_sha384(akmp)) {
@@ -4039,6 +4044,27 @@ static int wpa_parse_generic(const u8 *pos, struct wpa_eapol_ie_parse *ie)
 		return 0;
 	}
 
+#if defined(CONFIG_NAN) || defined(CONFIG_PASN)
+	if (left >= sizeof(struct nan_nik_kde) &&
+	    selector == NAN_KEY_DATA_NIK) {
+		ie->nan_nik = p;
+		ie->nan_nik_len = left;
+		wpa_hexdump_key(MSG_DEBUG, "RSN: NAN NIK KDE in EAPOL-Key",
+				ie->nan_nik, ie->nan_nik_len);
+		return 0;
+	}
+
+	if (left >= sizeof(struct nan_key_lifetime_kde) &&
+	    selector == NAN_KEY_DATA_LIFETIME) {
+		ie->nan_key_lifetime = p;
+		ie->nan_key_lifetime_len = left;
+		wpa_hexdump(MSG_DEBUG,
+			    "RSN: NAN Key Lifetime KDE in EAPOL-Key",
+			    ie->nan_key_lifetime, ie->nan_key_lifetime_len);
+		return 0;
+	}
+#endif /* CONFIG_NAN || CONFIG_PASN */
+
 	return 2;
 }
 
@@ -4282,6 +4308,13 @@ int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid, int akmp, int cipher)
 	case WPA_KEY_MGMT_PASN:
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_PASN);
 		break;
+#ifdef CONFIG_ENC_ASSOC
+	case WPA_KEY_MGMT_EPPKE:
+		/* EPPKE without base AKM: EPPKE AKMP is used as the selected
+		 * AKMP per IEEE P802.11bi/D4.0, 12.16.9.1. */
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_EPPKE);
+		break;
+#endif /* CONFIG_ENC_ASSOC */
 #ifdef CONFIG_SAE
 	case WPA_KEY_MGMT_SAE:
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_SAE);
@@ -4524,6 +4557,18 @@ int wpa_pasn_validate_rsne(const struct wpa_ie_data *data, bool is_eppke)
 #endif /* CONFIG_IEEE80211R */
 	case WPA_KEY_MGMT_PASN:
 		break;
+#ifdef CONFIG_ENC_ASSOC
+	case WPA_KEY_MGMT_EPPKE:
+		/* EPPKE AKMP is used when EPPKE is performed without a base
+		 * AKM (no mutual authentication). This is only valid for EPPKE
+		 * authentication per IEEE P802.11bi/D4.0, 12.16.9.1. */
+		if (!is_eppke) {
+			wpa_printf(MSG_INFO,
+				   "PASN: EPPKE AKM not allowed for PASN");
+			return -1;
+		}
+		break;
+#endif /* CONFIG_ENC_ASSOC */
 	default:
 		wpa_printf(MSG_ERROR, "%s: invalid key_mgmt: 0x%0x",
 			   is_eppke ? "EPPKE" : "PASN", data->key_mgmt);
@@ -4643,7 +4688,7 @@ int wpa_pasn_parse_parameter_ie(const u8 *data, u8 len, bool from_ap,
 }
 
 
-void wpa_pasn_add_rsnxe(struct wpabuf *buf, u32 capab)
+void wpa_pasn_add_rsnxe(struct wpabuf *buf, u64 capab)
 {
 	size_t flen;
 
@@ -4651,7 +4696,15 @@ void wpa_pasn_add_rsnxe(struct wpabuf *buf, u32 capab)
 		return; /* no supported extended RSN capabilities */
 
 	/* Determine how many octets are needed to represent capab */
-	if (capab & 0xFF000000)
+	if (capab & 0xFF00000000000000ULL)
+		flen = 8;
+	else if (capab & 0x00FF000000000000ULL)
+		flen = 7;
+	else if (capab & 0x0000FF0000000000ULL)
+		flen = 6;
+	else if (capab & 0x000000FF00000000ULL)
+		flen = 5;
+	else if (capab & 0xFF000000)
 		flen = 4;
 	else if (capab & 0x00FF0000)
 		flen = 3;
@@ -4675,6 +4728,14 @@ void wpa_pasn_add_rsnxe(struct wpabuf *buf, u32 capab)
 		wpabuf_put_u8(buf, (capab >> 16) & 0x000000FF);
 	if (flen > 3)
 		wpabuf_put_u8(buf, (capab >> 24) & 0x000000FF);
+	if (flen > 4)
+		wpabuf_put_u8(buf, (capab >> 32) & 0x000000FF);
+	if (flen > 5)
+		wpabuf_put_u8(buf, (capab >> 40) & 0x000000FF);
+	if (flen > 6)
+		wpabuf_put_u8(buf, (capab >> 48) & 0x000000FF);
+	if (flen > 7)
+		wpabuf_put_u8(buf, (capab >> 56) & 0x000000FF);
 }
 
 
@@ -4721,4 +4782,23 @@ bool rsn_is_snonce_cookie(const u8 *snonce)
 	pos = snonce + WPA_NONCE_LEN - 6;
 	return WPA_GET_BE24(pos) == OUI_WFA &&
 		WPA_GET_BE24(pos + 3) == 0x000029;
+}
+
+
+void wpa_add_supported_groups(struct wpabuf *buf, const int *groups)
+{
+	unsigned int count, i;
+
+	if (!buf || !groups)
+		return;
+
+	count = int_array_len(groups);
+	if (wpabuf_tailroom(buf) < 2 + 1 + count * 2)
+		return;
+
+	wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
+	wpabuf_put_u8(buf, 1 + count * 2);
+	wpabuf_put_u8(buf, WLAN_EID_EXT_SUPPORTED_GROUPS);
+	for (i = 0; i < count; i++)
+		wpabuf_put_le16(buf, groups[i]);
 }

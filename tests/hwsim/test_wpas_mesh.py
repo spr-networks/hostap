@@ -477,6 +477,8 @@ def set_reg(dev, country):
 def clear_reg_setting(dev):
     dev[0].request("MESH_GROUP_REMOVE " + dev[0].ifname)
     dev[1].request("MESH_GROUP_REMOVE " + dev[1].ifname)
+    dev[0].set("country", "00")
+    dev[1].set("country", "00")
     clear_regdom_dev(dev)
     dev[0].flush_scan_cache()
     dev[1].flush_scan_cache()

@@ -334,4 +334,17 @@ void ieee80211_send_eap_req(struct hostapd_data *hapd, struct sta_info *sta,
 			    struct rsn_pmksa_cache_entry *cached_pmk,
 			    const u8 *eap_req, size_t eap_req_len);
 
+size_t hostapd_eid_uhr_capab_len(struct hostapd_data *hapd,
+				 enum ieee80211_op_mode opmode);
+u8 * hostapd_eid_uhr_capab(struct hostapd_data *hapd, u8 *eid,
+			   enum ieee80211_op_mode opmode);
+u8 * hostapd_eid_uhr_operation(struct hostapd_data *hapd, u8 *eid, bool beacon);
+u16 copy_sta_uhr_capab(struct hostapd_data *hapd, struct sta_info *sta,
+		       enum ieee80211_op_mode opmode,
+		       const u8 *uhr_capab, size_t uhr_capab_len);
+void hostapd_get_uhr_capab(struct hostapd_data *hapd,
+			   const struct ieee80211_uhr_capabilities *src,
+			   struct ieee80211_uhr_capabilities *dest,
+			   size_t len);
+
 #endif /* IEEE802_11_H */

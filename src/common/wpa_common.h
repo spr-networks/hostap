@@ -359,6 +359,13 @@ struct rsn_error_kde {
 	be16 error_type;
 } STRUCT_PACKED;
 
+#define WPA_GTK_KDE_PREFIX_LEN 2
+struct wpa_gtk_kde {
+	u8 keyid;
+	u8 reserved;
+	u8 gtk[WPA_GTK_MAX_LEN];
+} STRUCT_PACKED;
+
 #define WPA_IGTK_KDE_PREFIX_LEN (2 + RSN_PN_LEN)
 struct wpa_igtk_kde {
 	u8 keyid[2];
@@ -740,6 +747,10 @@ struct wpa_eapol_ie_parse {
 	size_t rsne_override_2_len;
 	const u8 *rsnxe_override;
 	size_t rsnxe_override_len;
+	const u8 *nan_nik;
+	size_t nan_nik_len;
+	const u8 *nan_key_lifetime;
+	size_t nan_key_lifetime_len;
 	u16 valid_mlo_gtks; /* bitmap of valid link GTK KDEs */
 	const u8 *mlo_gtk[MAX_NUM_MLD_LINKS];
 	size_t mlo_gtk_len[MAX_NUM_MLD_LINKS];
@@ -827,7 +838,7 @@ int wpa_pasn_validate_rsne(const struct wpa_ie_data *data, bool is_eppke);
 int wpa_pasn_parse_parameter_ie(const u8 *data, u8 len, bool from_ap,
 				struct wpa_pasn_params_data *pasn_params);
 
-void wpa_pasn_add_rsnxe(struct wpabuf *buf, u32 capab);
+void wpa_pasn_add_rsnxe(struct wpabuf *buf, u64 capab);
 int wpa_pasn_add_extra_ies(struct wpabuf *buf, const u8 *extra_ies, size_t len);
 
 void rsn_set_snonce_cookie(u8 *snonce);
@@ -841,5 +852,6 @@ int wpa_auth_802_1x_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const u8 *spa,
 			       int akmp, int cipher, const u8 *dhss,
 			       size_t dhss_len, struct wpa_ptk *ptk,
 			       size_t kdk_len);
+void wpa_add_supported_groups(struct wpabuf *buf, const int *groups);
 
 #endif /* WPA_COMMON_H */

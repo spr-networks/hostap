@@ -86,7 +86,7 @@ void bitfield_clear(struct bitfield *bf, size_t bit)
 }
 
 
-int bitfield_is_set(struct bitfield *bf, size_t bit)
+int bitfield_is_set(const struct bitfield *bf, size_t bit)
 {
 	if (bit >= bf->max_bits)
 		return 0;

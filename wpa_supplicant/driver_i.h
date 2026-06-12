@@ -460,11 +460,12 @@ static inline int wpa_drv_if_remove(struct wpa_supplicant *wpa_s,
 
 static inline int wpa_drv_remain_on_channel(struct wpa_supplicant *wpa_s,
 					    unsigned int freq,
-					    unsigned int duration)
+					    unsigned int duration,
+					    const u8 *filter_addr)
 {
 	if (wpa_s->driver->remain_on_channel)
 		return wpa_s->driver->remain_on_channel(wpa_s->drv_priv, freq,
-							duration);
+							duration, filter_addr);
 	return -1;
 }
 
@@ -736,6 +737,46 @@ static inline int wpa_drv_wowlan(struct wpa_supplicant *wpa_s,
 		return -1;
 	return wpa_s->driver->set_wowlan(wpa_s->drv_priv, triggers);
 }
+
+#ifdef CONFIG_PR
+
+static inline int
+wpa_drv_pd_start(struct wpa_supplicant *wpa_s, const u8 *addr, u8 *pd_addr)
+{
+	if (!wpa_s->driver->pd_start)
+		return -1;
+	return wpa_s->driver->pd_start(wpa_s->drv_priv, addr, pd_addr);
+}
+
+static inline void
+wpa_drv_pd_stop(struct wpa_supplicant *wpa_s)
+{
+	if (!wpa_s->driver->pd_stop)
+		return;
+	wpa_s->driver->pd_stop(wpa_s->drv_priv);
+}
+
+static inline int
+wpa_drv_start_peer_measurement(struct wpa_supplicant *wpa_s, const u8 *peer,
+			       int freq, u8 channel, int bw,
+			       struct pr_pasn_ranging_params *params)
+{
+	if (!wpa_s->driver->start_peer_measurement)
+		return -1;
+	return wpa_s->driver->start_peer_measurement(wpa_s->drv_priv, peer,
+						      freq, channel, bw,
+						      params);
+}
+
+static inline void
+wpa_drv_stop_peer_measurement(struct wpa_supplicant *wpa_s)
+{
+	if (!wpa_s->driver->stop_peer_measurement)
+		return;
+	wpa_s->driver->stop_peer_measurement(wpa_s->drv_priv);
+}
+
+#endif /* CONFIG_PR */
 
 static inline int wpa_drv_vendor_cmd(struct wpa_supplicant *wpa_s,
 				     int vendor_id, int subcmd, const u8 *data,
@@ -1221,14 +1262,15 @@ wpas_drv_nan_publish(struct wpa_supplicant *wpa_s, const u8 *addr,
 		     const u8 *service_id,
 		     enum nan_service_protocol_type srv_proto_type,
 		     const struct wpabuf *ssi, const struct wpabuf *elems,
-		     struct nan_publish_params *params)
+		     struct nan_publish_params *params, const u8 *network_id)
 {
 	if (!wpa_s->driver->nan_publish)
 		return 0;
 
 	return wpa_s->driver->nan_publish(wpa_s->drv_priv, addr, publish_id,
 					  service_name, service_id,
-					  srv_proto_type, ssi, elems, params);
+					  srv_proto_type, ssi, elems, params,
+					  network_id);
 }
 
 static inline int
@@ -1257,14 +1299,16 @@ wpas_drv_nan_subscribe(struct wpa_supplicant *wpa_s, const u8 *addr,
 		       const u8 *service_id,
 		       enum nan_service_protocol_type srv_proto_type,
 		       const struct wpabuf *ssi, const struct wpabuf *elems,
-		       struct nan_subscribe_params *params)
+		       struct nan_subscribe_params *params,
+		       const u8 *network_id)
 {
 	if (!wpa_s->driver->nan_subscribe)
 		return 0;
 
 	return wpa_s->driver->nan_subscribe(wpa_s->drv_priv, addr, subscribe_id,
 					    service_name, service_id,
-					    srv_proto_type, ssi, elems, params);
+					    srv_proto_type, ssi, elems, params,
+					    network_id);
 }
 
 static inline int
@@ -1302,6 +1346,40 @@ wpa_drv_nan_update_config(struct wpa_supplicant *wpa_s,
 	if (!wpa_s->driver->nan_change_config)
 		return -1;
 	return wpa_s->driver->nan_change_config(wpa_s->drv_priv, conf);
+}
+
+static inline int wpa_drv_nan_config_schedule(struct wpa_supplicant *wpa_s,
+					      u8 map_id,
+					      struct nan_schedule_config *conf)
+{
+	if (!wpa_s->driver->nan_config_schedule)
+		return -1;
+	return wpa_s->driver->nan_config_schedule(wpa_s->drv_priv, map_id,
+						  conf);
+}
+
+static inline int
+wpa_drv_nan_config_peer_schedule(struct wpa_supplicant *wpa_s, const u8 *peer,
+				 u16 cdw, u8 sequence_id,
+				 u16 max_chan_switch_time,
+				 const struct wpabuf *ulw,
+				 struct nan_peer_schedule_config *sched)
+{
+	if (!wpa_s->driver->nan_config_peer_schedule)
+		return -1;
+	return wpa_s->driver->nan_config_peer_schedule(wpa_s->drv_priv, peer,
+						       cdw, sequence_id,
+						       max_chan_switch_time,
+						       ulw, sched);
+}
+
+static inline int wpa_drv_get_inact_sec(struct wpa_supplicant *wpa_s,
+					const u8 *addr)
+{
+	if (!wpa_s->driver->get_inact_sec)
+		return -1;
+
+	return wpa_s->driver->get_inact_sec(wpa_s->drv_priv, addr);
 }
 
 #endif /* CONFIG_NAN */

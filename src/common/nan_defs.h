@@ -67,7 +67,7 @@ enum nan_attr_id {
 	NAN_ATTR_NDP_EXT = 0x29,
 	NAN_ATTR_DCEA = 0x2A, /* Device Capability Extension attribute */
 	NAN_ATTR_NIRA = 0x2B, /* NAN Identity Resolution attribute */
-	NAN_ATTR_BPBA = 0x2C, /* NAN Pairing Bootstrapping attribute */
+	NAN_ATTR_NPBA = 0x2C, /* NAN Pairing Bootstrapping attribute */
 	NAN_ATTR_S3 = 0x2D,
 	NAN_ATTR_TPEA = 0x2E, /* Transmit Power Envelope attribute */
 	NAN_ATTR_VENDOR_SPECIFIC = 0xDD,
@@ -136,6 +136,37 @@ enum nan_service_protocol_type {
 /* bit 2-3: Bloom Filter Index */
 #define NAN_SRF_CTRL_BF_IDX_MSK (BIT(0) | BIT(1))
 #define NAN_SRF_CTRL_BF_IDX_POS 2
+
+/* Wi-Fi Aware spec v4.0, Table 128 (NPBA format)  */
+#define NAN_PBA_TYPE_MASK 0xf
+#define NAN_PBA_STATUS_MASK 0xf
+#define NAN_PBA_STATUS_POS 4
+
+enum nan_pba_type {
+	NAN_PBA_TYPE_ADVERTISE = 0,
+	NAN_PBA_TYPE_REQUEST   = 1,
+	NAN_PBA_TYPE_RESPONSE  = 2,
+};
+
+enum nan_pba_status {
+	NAN_PBA_STATUS_ACCEPTED = 0,
+	NAN_PBA_STATUS_REJECTED = 1,
+	NAN_PBA_STATUS_COMEBACK = 2,
+};
+
+enum nan_pairing_bootstrapping_method {
+	NAN_PBA_METHOD_OPPORTUNISTIC      = BIT(0),
+	NAN_PBA_METHOD_PIN_DISPLAY        = BIT(1),
+	NAN_PBA_METHOD_PASSPHRASE_DISPLAY = BIT(2),
+	NAN_PBA_METHOD_QR_DISPLAY         = BIT(3),
+	NAN_PBA_METHOD_NFC_TAG            = BIT(4),
+	NAN_PBA_METHOD_PIN_KEYPAD         = BIT(5),
+	NAN_PBA_METHOD_PASSPHRASE_KEYPAD  = BIT(6),
+	NAN_PBA_METHOD_QR_SCAN            = BIT(7),
+	NAN_PBA_METHOD_NFC_READER         = BIT(8),
+	NAN_PBA_METHOD_SERVICE_MANAGED    = BIT(14),
+	NAN_PBA_METHOD_HANDSHAKE_SKIPPED  = BIT(15),
+};
 
 #define NAN_ATTR_HDR_LEN 3
 #define NAN_SERVICE_ID_LEN 6
@@ -223,14 +254,21 @@ enum nan_ndp_status {
 	NAN_NDP_STATUS_REJECTED  = 2,
 };
 
-/* Wi-Fi Aware spec v4.0, Table 84 (NDP Control field) */
+/* Wi-Fi Aware spec v4.0, Table 84 (NDP Control field) and Table 87 (Subfields
+ * of NDPE Control field format).
+ * Bits 0-4 are identical for NDP and NDPE. The only differences are in
+ * Bit 5.
+ */
 #define NAN_NDP_CTRL_CONFIRM_REQUIRED       BIT(0)
 #define NAN_NDP_CTRL_SECURITY_PRESENT       BIT(2)
 #define NAN_NDP_CTRL_PUBLISH_ID_PRESENT     BIT(3)
 #define NAN_NDP_CTRL_RESPONDER_NDI_PRESENT  BIT(4)
-#define NAN_NDP_CTRL_SPEC_INFO_PRESENT      BIT(5)
 
-/* Wi-Fi Aware spec v4.0, Table 82 (NDP attribute format)
+#define NAN_NDP_CTRL_SPEC_INFO_PRESENT      BIT(5)
+#define NAN_NDPE_CTRL_GTK_REQUIRED          BIT(5)
+
+/* Wi-Fi Aware spec v4.0, Table 82 (NDP attribute format) and
+ * Table 86 (NAN Data Path Extension attribute format)
  * Note: The structure does not include the Attribute ID and Length fields. */
 struct ieee80211_ndp {
 	u8 dialog_token; /* Dialog Token */
@@ -243,6 +281,14 @@ struct ieee80211_ndp {
 	/* followed by optional fields based on ndp_ctrl */
 	u8 optional[0];
 } STRUCT_PACKED;
+
+/* Wi-Fi Aware spec v4.0, Table 89 (List of TLV types for the NDPE attribute) */
+enum nan_ndpe_tlv_type {
+	NAN_NDPE_TLV_IPV6_LINK_LOCAL = 0,
+	NAN_NDPE_TLV_SRV_INFO        = 1,
+};
+
+#define NAN_NDPE_TLV_IPV6_LINK_LOCAL_LEN 8
 
 /* Wi-Fi Aware spec v4.0, Table 97 (Time Bitmap Control field format for the
  * NAN Availability attribute) */
@@ -360,6 +406,44 @@ struct nan_avail {
 	u8 optional[0];
 } STRUCT_PACKED;
 
+/* Wi-Fi Aware spec v4.0, Table 110 (Attribute Control field format for the
+ * Unaligned Schedule attribute)
+ */
+#define NAN_UNALIGNED_SCHED_CTRL_SCHED_ID_MASK (BIT(0) | BIT(1) | BIT(2) | \
+						BIT(3))
+
+/* Wi-Fi Aware spec v4.0, Table 111 (ULW Overwrite field format) */
+#define NAN_ULW_OVERWRITE_ALL        BIT(0)
+#define NAN_ULW_OVERWRITE_MAP_ID_POS 1
+#define NAN_ULW_OVERWRITE_MAP_ID_MASK (BIT(1) | BIT(2) | BIT(3) | BIT(4))
+
+/* Wi-Fi Aware spec v4.0, Table 112 (ULW Control field format) */
+#define NAN_ULW_CTRL_TYPE_POS                0
+#define NAN_ULW_CTRL_TYPE_MASK               (BIT(0) | BIT(1))
+#define NAN_ULW_CTRL_TYPE_BAND_ID            0
+#define NAN_ULW_CTRL_TYPE_CHAN_ENTRY         1
+#define NAN_ULW_CTRL_TYPE_CHAN_ENTRY_WITH_AUX 2
+#define NAN_ULW_CTRL_CHAN_AVAIL              BIT(2)
+#define NAN_ULW_CTRL_RX_NSS_POS              3
+#define NAN_ULW_CTRL_RX_NSS_MASK             (BIT(3) | BIT(4) | BIT(5) | BIT(6))
+
+/* Wi-Fi Aware spec v4.0, Table 109 (Unaligned Schedule attribute format).
+ * ID and length are not included.
+ */
+struct nan_unaligned_sched {
+	u8 sched_id;
+	u8 seq_id;
+	le32 start_time;
+	le32 duration;
+	le32 period;
+	u8 count_down;
+	u8 ulw_overwrite;
+
+	/* followed by optional fields (ULW Control and Band ID or Channel
+	 * Entry) */
+	u8 optional[0];
+} STRUCT_PACKED;
+
 #define NAN_SCHED_ENTRY_MAP_MASK (BIT(0) | BIT(1) | BIT(2) | BIT(3))
 
 /* Wi-Fi Aware spec v4.0, Table 104 (Schedule Entry format for the NDC
@@ -461,7 +545,19 @@ enum nan_cipher_suite_id {
 	NAN_CS_GTK_GCMP_256 = 6,
 	NAN_CS_PK_PASN_128  = 7,
 	NAN_CS_PK_PASN_256  = 8,
+	/* Keep last */
+	NAN_CS_MAX
 };
+
+/* Helper macros to check CSID properties */
+#define NAN_CS_IS_128(csid) \
+	((csid) == NAN_CS_SK_CCM_128 || (csid) == NAN_CS_PK_PASN_128)
+#define NAN_CS_IS_256(csid) \
+	((csid) == NAN_CS_SK_GCM_256 || (csid) == NAN_CS_PK_PASN_256)
+#define NAN_CS_IS_VALID_NDP(csid) \
+	(NAN_CS_IS_128(csid) || NAN_CS_IS_256(csid))
+#define NAN_CS_IS_PASN(csid) \
+	((csid) == NAN_CS_PK_PASN_128 || (csid) == NAN_CS_PK_PASN_256)
 
 struct nan_cipher_suite {
 	u8 csid; /* Cipher Suite ID */
@@ -524,5 +620,44 @@ struct nan_shared_key {
 
 #define NAN_DEV_CAPA_EXT_INFO_1_PAIRING_SETUP     BIT(0)
 #define NAN_DEV_CAPA_EXT_INFO_1_NPK_NIK_CACHING   BIT(1)
+
+/* Wi-Fi Aware spec v4.0, Table 22 (NIRA Cryptographic Parameters and Methods)
+ */
+#define NAN_NIRA_NONCE_LEN	8
+#define NAN_NIRA_TAG_LEN	8
+#define NAN_NIRA_STR		"NIR"
+#define NAN_NIRA_STR_LEN	3
+#define NAN_NIRA_CIPHER_VER_128	0
+#define NAN_NIK_LEN		16
+
+#define NAN_PASN_SSID "516F9A010000"
+
+/* Wi-Fi Aware spec v4.0, Table 126 (NAN KDE field format) */
+#define NAN_KEY_DATA_NIK RSN_SELECTOR(0x50, 0x6f, 0x9a, 36)
+#define NAN_KEY_DATA_LIFETIME RSN_SELECTOR(0x50, 0x6f, 0x9a, 37)
+
+/* Wi-Fi Aware spec v4.0, Figure 61 (NIK KDE format)
+ * Note: The NIK field is defined with a variable length in Figure 61, but
+ * since only one cipher version is defined for now (which determines the
+ * length), use a fixed length here.
+ */
+struct nan_nik_kde {
+	u8 cipher_ver;
+	u8 nik[NAN_NIK_LEN];
+} STRUCT_PACKED;
+
+/* Wi-Fi Aware spec v4.0, Figure 63 (Key Bitmap format) */
+#define NAN_KEY_LIFETIME_GTK    BIT(0)
+#define NAN_KEY_LIFETIME_IGTK   BIT(1)
+#define NAN_KEY_LIFETIME_BIGTK  BIT(2)
+#define NAN_KEY_LIFETIME_NIK    BIT(3)
+#define NAN_KEY_LIFETIME_ND_TK  BIT(4)
+#define NAN_KEY_LIFETIME_NM_TK  BIT(5)
+
+/* Wi-Fi Aware spec v4.0, Figure 62 (NAN Key Lifetime KDE format) */
+struct nan_key_lifetime_kde {
+	le16 key_bitmap;
+	be32 lifetime_sec;
+} STRUCT_PACKED;
 
 #endif /* NAN_DEFS_H */
