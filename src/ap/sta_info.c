@@ -392,7 +392,10 @@ void ap_free_sta(struct hostapd_data *hapd, struct sta_info *sta)
 #ifdef CONFIG_IEEE80211BE
 	if (!ap_sta_is_mld(hapd, sta) ||
 	    hapd->mld_link_id == sta->mld_assoc_link_id) {
-		wpa_auth_sta_deinit(sta->wpa_sm);
+		struct wpa_state_machine *sm = sta->wpa_sm;
+
+		clear_wpa_sm_for_all_sta(hapd, sm);
+		wpa_auth_sta_deinit(sm);
 		/* Remove references from partner links. */
 		clear_wpa_sm_for_each_partner_link(hapd, sta);
 	}
@@ -1045,7 +1048,10 @@ static void ap_sta_disconnect_common(struct hostapd_data *hapd,
 #ifdef CONFIG_IEEE80211BE
 	if (!ap_sta_is_mld(hapd, sta) ||
 	    hapd->mld_link_id == sta->mld_assoc_link_id) {
-		wpa_auth_sta_deinit(sta->wpa_sm);
+		struct wpa_state_machine *sm = sta->wpa_sm;
+
+		clear_wpa_sm_for_all_sta(hapd, sm);
+		wpa_auth_sta_deinit(sm);
 		clear_wpa_sm_for_each_partner_link(hapd, sta);
 	}
 #else /* CONFIG_IEEE80211BE */
