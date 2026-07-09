@@ -854,6 +854,12 @@ wpa_bss_update(struct wpa_supplicant *wpa_s, struct wpa_bss *bss,
 		bool update_current_bss = wpa_s->current_bss == bss;
 		bool update_ml_probe_bss = wpa_s->ml_connect_probe_bss == bss;
 		int update_link_bss = -1;
+#ifdef CONFIG_WNM
+		bool update_wnm_target = wpa_s->wnm_target_bss == bss;
+#endif /* CONFIG_WNM */
+#ifdef CONFIG_INTERWORKING
+		bool update_interworking = wpa_s->interworking_gas_bss == bss;
+#endif /* CONFIG_INTERWORKING */
 
 		for (j = 0; j < MAX_NUM_MLD_LINKS; j++) {
 			if (wpa_s->links[j].bss == bss) {
@@ -884,6 +890,15 @@ wpa_bss_update(struct wpa_supplicant *wpa_s, struct wpa_bss *bss,
 
 			if (update_link_bss >= 0)
 				wpa_s->links[update_link_bss].bss = nbss;
+
+#ifdef CONFIG_WNM
+			if (update_wnm_target)
+				wpa_s->wnm_target_bss = nbss;
+#endif /* CONFIG_WNM */
+#ifdef CONFIG_INTERWORKING
+			if (update_interworking)
+				wpa_s->interworking_gas_bss = nbss;
+#endif /* CONFIG_INTERWORKING */
 
 			if (cwork)
 				wpa_bss_update_pending_connect(cwork, nbss);
@@ -2233,6 +2248,8 @@ u16 wpa_bss_parse_reconf_ml_element(struct wpa_supplicant *wpa_s,
 			break;
 		}
 
+		if ((size_t) num_frag_subelems * 2 > len)
+			goto out;
 		len -= num_frag_subelems * 2;
 
 		if (2 + sub_elem_len > len) {

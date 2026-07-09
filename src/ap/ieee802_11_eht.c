@@ -448,6 +448,7 @@ u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 	u8 common_info_len;
 	u16 mld_cap;
 	u8 max_simul_links, active_links;
+	u16 mld_eml_capa;
 
 	/*
 	 * As the Multi-Link element can exceed the size of 255 bytes need to
@@ -497,13 +498,16 @@ u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 
 	wpabuf_put_u8(buf, hapd->eht_mld_bss_param_change);
 
-	/* Currently hard-code Enhanced Critical Updates Information to zero */
-	if (hostapd_is_uhr_enabled(hapd))
-		wpabuf_put_u8(buf, 0);
+	/* Set EMLSR/EMLMR Transition and Padding delay to zero for AP MLD as
+	 * per IEEE Std 802.11be-2024, 9.4.2.322.2.3 (Common Info field of the
+	 * Basic Multi-Link element).
+	 */
+	mld_eml_capa = hapd->iface->mld_eml_capa &
+		~(EHT_ML_EML_CAPA_EMLSR_TRANS_DELAY_MASK |
+		  EHT_ML_EML_CAPA_EMLSR_PADDING_DELAY_MASK);
 
-	wpa_printf(MSG_DEBUG, "MLD: EML Capabilities=0x%x",
-		   hapd->iface->mld_eml_capa);
-	wpabuf_put_le16(buf, hapd->iface->mld_eml_capa);
+	wpa_printf(MSG_DEBUG, "MLD: EML Capabilities=0x%x", mld_eml_capa);
+	wpabuf_put_le16(buf, mld_eml_capa);
 
 	mld_cap = hapd->iface->mld_mld_capa;
 	max_simul_links = mld_cap & EHT_ML_MLD_CAPA_MAX_NUM_SIM_LINKS_MASK;
@@ -533,6 +537,10 @@ u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 			   hostapd_get_mld_id(hapd));
 		wpabuf_put_u8(buf, hostapd_get_mld_id(hapd));
 	}
+
+	/* Currently hard-code Enhanced Critical Updates Information to zero */
+	if (hostapd_is_uhr_enabled(hapd))
+		wpabuf_put_u8(buf, 0);
 
 	if (!mld_info)
 		goto out;
@@ -1410,6 +1418,8 @@ u16 hostapd_process_ml_assoc_req(struct hostapd_data *hapd,
 			goto out;
 		}
 
+		if ((size_t) num_frag_subelems * 2 > ml_len)
+			goto out;
 		ml_len -= num_frag_subelems * 2;
 		ml_end = ((const u8 *) ml) + ml_len;
 
@@ -1954,7 +1964,7 @@ hostapd_send_link_reconf_resp(struct hostapd_data *hapd,
 				continue;
 
 			link->valid = true;
-			ieee80211_ml_build_assoc_resp(lhapd, link);
+			ieee80211_ml_build_assoc_resp(lhapd, link, assoc_sta);
 		}
 		/* TODO: Basic MLE is not supposed to include BPCC in Link
 		 * Reconfiguration Response, but mac80211 implementation for
@@ -2472,6 +2482,8 @@ hostapd_parse_link_reconf_req_reconf_mle(
 			goto fail;
 		}
 
+		if ((size_t) num_frag_subelems * 2 > len)
+			goto fail;
 		len -= num_frag_subelems * 2;
 		end = ((const u8 *) ml) + len;
 

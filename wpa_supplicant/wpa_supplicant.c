@@ -7650,6 +7650,9 @@ radio_work_pending(struct wpa_supplicant *wpa_s, const char *type)
 	struct wpa_radio_work *work;
 	struct wpa_radio *radio = wpa_s->radio;
 
+	if (!radio)
+		return NULL;
+
 	dl_list_for_each(work, &radio->work, struct wpa_radio_work, list) {
 		if (work->wpa_s == wpa_s && os_strcmp(work->type, type) == 0)
 			return work;

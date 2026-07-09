@@ -62,6 +62,7 @@
 #include "comeback_token.h"
 #include "nan_usd_ap.h"
 #include "pasn/pasn_common.h"
+#include "robust_av.h"
 
 
 #ifdef CONFIG_FILS
@@ -6184,7 +6185,8 @@ static int check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 #ifdef CONFIG_IEEE80211BE
 
 void ieee80211_ml_build_assoc_resp(struct hostapd_data *hapd,
-				   struct mld_link_info *link)
+				   struct mld_link_info *link,
+				   struct sta_info *sta)
 {
 	u8 buf[EHT_ML_MAX_STA_PROF_LEN];
 	u8 *p = buf;
@@ -6236,6 +6238,9 @@ void ieee80211_ml_build_assoc_resp(struct hostapd_data *hapd,
 
 	p = hostapd_eid_mbo(hapd, p, buf + buflen - p);
 	p = hostapd_eid_wmm(hapd, p);
+
+	if (sta)
+		p = hostapd_eid_wfa_capab(hapd, sta, p);
 
 	if (hapd->conf->assocresp_elements &&
 	    (size_t) (buf + buflen - p) >=
@@ -6372,7 +6377,7 @@ out:
 	link->status = status;
 
 	if (!offload && type != LINK_PARSE_RECONF)
-		ieee80211_ml_build_assoc_resp(hapd, link);
+		ieee80211_ml_build_assoc_resp(hapd, link, sta);
 
 	wpa_printf(MSG_DEBUG, "MLD: link: status=%u", status);
 	if (status != WLAN_STATUS_SUCCESS) {
@@ -6454,12 +6459,12 @@ int hostapd_process_assoc_ml_info(struct hostapd_data *hapd,
 
 			link->status = WLAN_STATUS_UNSPECIFIED_FAILURE;
 			if (!offload)
-				ieee80211_ml_build_assoc_resp(hapd, link);
+				ieee80211_ml_build_assoc_resp(hapd, link, sta);
 		} else if (tx_link_status != WLAN_STATUS_SUCCESS) {
 			/* TX link rejected the connection */
 			link->status = WLAN_STATUS_DENIED_TX_LINK_NOT_ACCEPTED;
 			if (!offload)
-				ieee80211_ml_build_assoc_resp(hapd, link);
+				ieee80211_ml_build_assoc_resp(hapd, link, sta);
 		} else {
 			if (ieee80211_ml_process_link(
 				    bss, sta, link, ies, ies_len,
@@ -6875,6 +6880,14 @@ rsnxe_done:
 	     sta->auth_alg == WLAN_AUTH_802_1X) &&
 	    wpa_auth_ap_sta_support_assoc_enc(sta->wpa_sm) &&
 	    status_code == WLAN_STATUS_SUCCESS) {
+		/* Ensure GMK/Counter are initialized before the Key Delivery
+		 * element is built. For auth-frame STAs the normal 4-way
+		 * handshake path (SM_STATE AUTHENTICATION2) is skipped, so
+		 * wpa_group_ensure_init() must be called here instead.
+		 * Without this, the first non-auth-frame STA that connects
+		 * later triggers a GTK rotation that is unknown to this STA,
+		 * breaking broadcast frame reception. */
+		wpa_auth_ensure_group_init(sta->wpa_sm);
 		reply->frame_control |= WLAN_FC_PROTECTED;
 
 #ifdef CONFIG_PMKSA_PRIVACY
@@ -7015,6 +7028,7 @@ rsnxe_done:
 #endif /* CONFIG_P2P_MANAGER */
 
 	p = hostapd_eid_mbo(hapd, p, buf + buflen - p);
+	p = hostapd_eid_wfa_capab(hapd, sta, p);
 
 	if (hapd->conf->assocresp_elements &&
 	    (size_t) (buf + buflen - p) >=
@@ -7903,6 +7917,36 @@ static void handle_beacon(struct hostapd_data *hapd,
 }
 
 
+#ifdef CONFIG_ROBUST_AV
+static void hostapd_dscp_action(struct hostapd_data *hapd, struct sta_info *sta,
+				const u8 *pos, const u8 *end)
+{
+	u8 subtype;
+
+	if (!hapd->conf->enable_dscp_policy_capa)
+		return;
+
+	if (end - pos < 1) {
+		wpa_printf(MSG_DEBUG, "DSCP Action: Frame too short");
+		return;
+	}
+
+	subtype = *pos++;
+	switch (subtype) {
+	case QM_DSCP_POLICY_QUERY:
+		hostapd_handle_dscp_policy_query(hapd, sta, pos, end - pos);
+		break;
+	case QM_DSCP_POLICY_RESP:
+		hostapd_handle_dscp_policy_response(hapd, sta, pos, end - pos);
+		break;
+	default:
+		wpa_printf(MSG_DEBUG, "QM Action: Unknown subtype %u", subtype);
+		break;
+	}
+}
+#endif /* CONFIG_ROBUST_AV */
+
+
 static int hostapd_action_vs(struct hostapd_data *hapd,
 			     struct sta_info *sta,
 			     const struct ieee80211_mgmt *mgmt, size_t len,
@@ -7925,6 +7969,16 @@ static int hostapd_action_vs(struct hostapd_data *hapd,
 	case WFA_CAPAB_VENDOR_TYPE:
 		hostapd_wfa_capab(hapd, sta, pos, end);
 		return 0;
+#ifdef CONFIG_ROBUST_AV
+	case QM_ACTION_VENDOR_TYPE:
+		if (!protected) {
+			wpa_printf(MSG_DEBUG,
+				   "DSCP: Ignoring unprotected frame");
+			return -1;
+		}
+		hostapd_dscp_action(hapd, sta, pos, end);
+		return 0;
+#endif /* CONFIG_ROBUST_AV */
 	default:
 		wpa_printf(MSG_DEBUG,
 			   "Ignore unknown Vendor Specific Action frame OUI/type %08x%s",
@@ -8750,6 +8804,27 @@ skip_update:
 		os_free(sta->pending_eapol_rx);
 		sta->pending_eapol_rx = NULL;
 	}
+
+#ifdef CONFIG_ROBUST_AV
+	if (hapd->conf->enable_dscp_policy_capa && sta &&
+	    (sta->flags & WLAN_STA_DSCP_POLICY) && sta->num_dscp_policies > 0) {
+		int *policy_ids = NULL;
+		size_t num_policies = 0;
+		unsigned int i;
+
+		policy_ids = os_calloc(sta->num_dscp_policies, sizeof(int));
+		if (!policy_ids)
+			return;
+
+		for (i = 0; i < sta->num_dscp_policies; i++)
+			policy_ids[num_policies++] =
+				sta->policies[i]->policy_id;
+
+		hostapd_send_unsolicited_dscp_policy_request(
+			hapd, sta, 0, policy_ids, num_policies);
+		os_free(policy_ids);
+	}
+#endif /* CONFIG_ROBUST_AV */
 
 handle_ml:
 	hostapd_ml_handle_assoc_cb(hapd, sta, ok);

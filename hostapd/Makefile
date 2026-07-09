@@ -1277,6 +1277,11 @@ OBJS += ../src/ap/ndisc_snoop.o
 endif
 endif
 
+ifdef CONFIG_ROBUST_AV
+CFLAGS += -DCONFIG_ROBUST_AV
+OBJS += ../src/ap/robust_av.o
+endif
+
 OBJS += ../src/drivers/driver_common.o
 
 ifdef CONFIG_WPA_CLI_EDIT
@@ -1408,8 +1413,16 @@ SOBJS += ../src/common/sae.o
 SOBJS += ../src/common/sae_pk.o
 SOBJS += ../src/common/dragonfly.o
 SOBJS += $(AESOBJS)
+ifneq ($(CONFIG_TLS), openssl)
+ifneq ($(CONFIG_TLS), linux)
+ifneq ($(CONFIG_TLS), gnutls)
+ifneq ($(CONFIG_TLS), wolfssl)
 SOBJS += ../src/crypto/sha384.o
 SOBJS += ../src/crypto/sha512.o
+endif
+endif
+endif
+endif
 SOBJS += ../src/crypto/sha256-prf.o
 SOBJS += ../src/crypto/sha384-prf.o
 SOBJS += ../src/crypto/sha512-prf.o
@@ -1418,7 +1431,11 @@ SOBJS += ../src/crypto/sha256-kdf.o
 SOBJS += ../src/crypto/sha384-kdf.o
 SOBJS += ../src/crypto/sha512-kdf.o
 SOBJS += ../src/common/wpa_common.o
+ifdef CONFIG_NO_RANDOM_POOL
+CFLAGS += -DCONFIG_NO_RANDOM_POOL
+else
 SOBJS += ../src/crypto/random.o
+endif
 SOBJS += ../src/crypto/sha1-prf.o
 SOBJS += ../src/utils/eloop.o
 

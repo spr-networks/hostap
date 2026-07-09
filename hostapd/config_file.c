@@ -1269,7 +1269,7 @@ static int hostapd_parse_he_srg_bitmap(u8 *bitmap, char *val)
 			*end = '\0';
 
 		bitpos = atoi(pos);
-		if (bitpos < 0 || bitpos > 64)
+		if (bitpos < 0 || bitpos > 63)
 			return -1;
 
 		bitmap[bitpos / 8] |= BIT(bitpos % 8);
@@ -5018,6 +5018,10 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 #endif /* CONFIG_IEEE80211BN */
 	} else if (os_strcmp(buf, "i2r_lmr_policy") == 0) {
 		conf->i2r_lmr_policy = atoi(pos);
+#ifdef CONFIG_ROBUST_AV
+	} else if (os_strcmp(buf, "enable_dscp_policy_capa") == 0) {
+		bss->enable_dscp_policy_capa = atoi(pos);
+#endif /* CONFIG_ROBUST_AV */
 	} else {
 		wpa_printf(MSG_ERROR,
 			   "Line %d: unknown configuration item '%s'",

@@ -46,6 +46,7 @@
 #define WLAN_STA_6GHZ BIT_ULL(25)
 #define WLAN_STA_PENDING_PASN_FILS_ERP BIT_ULL(26)
 #define WLAN_STA_EHT BIT_ULL(27)
+#define WLAN_STA_DSCP_POLICY BIT_ULL(28)
 #define WLAN_STA_PENDING_DISASSOC_CB BIT_ULL(29)
 #define WLAN_STA_PENDING_DEAUTH_CB BIT_ULL(30)
 #define WLAN_STA_NONERP BIT_ULL(31)
@@ -103,6 +104,12 @@ struct mld_info {
 	} common_info;
 
 	struct mld_link_info links[MAX_NUM_MLD_LINKS];
+};
+
+struct dscp_policy_state {
+	size_t offset;
+	u8 last_dialog_token;
+	bool pending_more;
 };
 
 struct sta_info {
@@ -362,6 +369,14 @@ struct sta_info {
 #ifdef CONFIG_IEEE8021X_AUTH
 	struct eap_over_auth_data eap_auth_data;
 #endif /* CONFIG_IEEE8021X_AUTH */
+
+#ifdef CONFIG_ROBUST_AV
+	struct hostapd_dscp_policy **policies;
+	unsigned int num_dscp_policies;
+	bool dscp_reset;
+	u8 unsolicited_dialog_token;
+	struct dscp_policy_state dscp_state;
+#endif /* CONFIG_ROBUST_AV */
 };
 
 
