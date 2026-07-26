@@ -2003,10 +2003,10 @@ static int add_airtime_weight(struct hostapd_bss_config *bss, char *value)
 #endif /* CONFIG_AIRTIME_POLICY */
 
 
-#ifdef CONFIG_SAE
-
-static int parse_sae_password(struct hostapd_bss_config *bss, const char *val)
+int parse_sae_password(struct hostapd_bss_config *bss, const char *val)
 {
+
+#ifdef CONFIG_SAE
 	struct sae_password_entry *pw;
 	const char *pos = val, *pos2, *end = NULL;
 
@@ -2106,12 +2106,14 @@ fail:
 	sae_deinit_pk(pw->pk);
 #endif /* CONFIG_SAE_PK */
 	os_free(pw);
+
+#endif
+
 	return -1;
 }
 
 
-static int parse_sae_password_file(struct hostapd_bss_config *bss,
-				   const char *fname)
+static int parse_sae_password_file(struct hostapd_bss_config *bss, const char *fname)
 {
 	FILE *f;
 	char buf[500], *pos;
@@ -2141,8 +2143,6 @@ static int parse_sae_password_file(struct hostapd_bss_config *bss,
 	fclose(f);
 	return 0;
 }
-
-#endif /* CONFIG_SAE */
 
 
 #ifdef CONFIG_DPP2
@@ -4371,6 +4371,14 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 	} else if (os_strcmp(buf, "sae_password") == 0) {
 		if (parse_sae_password(bss, pos) < 0) {
 			wpa_printf(MSG_ERROR, "Line %d: Invalid sae_password",
+				   line);
+			return 1;
+		}
+	} else if (os_strcmp(buf, "sae_psk_file") == 0) {
+		os_free(bss->ssid.sae_psk_file);
+		bss->ssid.sae_psk_file = os_strdup(pos);
+		if (!bss->ssid.sae_psk_file) {
+			wpa_printf(MSG_ERROR, "Line %d: allocation failed",
 				   line);
 			return 1;
 		}

@@ -110,6 +110,7 @@ struct hostapd_ssid {
 	struct hostapd_wpa_psk *wpa_psk;
 	char *wpa_passphrase;
 	char *wpa_psk_file;
+	char *sae_psk_file;
 	struct sae_pt *pt;
 
 #ifdef CONFIG_WEP
@@ -667,6 +668,7 @@ struct hostapd_bss_config {
 	enum sae_pwe sae_pwe;
 	int *sae_groups;
 	struct sae_password_entry *sae_passwords;
+	struct sae_password_entry *previous_sae_passwords;
 	int sae_password_psk;
 	int sae_track_password;
 	struct wpabuf *sae_pw_id_key;
@@ -1435,6 +1437,7 @@ int hostapd_sae_pw_id_in_use(struct hostapd_bss_config *conf);
 bool hostapd_sae_pk_in_use(struct hostapd_bss_config *conf);
 bool hostapd_sae_pk_exclusively(struct hostapd_bss_config *conf);
 int hostapd_setup_sae_pt(struct hostapd_bss_config *conf);
+int parse_sae_password(struct hostapd_bss_config *bss, const char *val);
 int hostapd_acl_comp(const void *a, const void *b);
 int hostapd_add_acl_maclist(struct mac_acl_entry **acl, int *num,
 			    int vlan_id, const u8 *addr);

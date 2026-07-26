@@ -2045,6 +2045,9 @@ static void handle_auth_sae(struct hostapd_data *hapd, struct sta_info *sta,
 				}
 				resp = WLAN_STATUS_CHALLENGE_FAIL;
 				goto reply;
+			} else {
+				wpa_msg(hapd->msg_ctx, MSG_INFO, SPR_AP_STA_PSK_PROGRESS MACSTR " sae confirmed",
+					MAC2STR(sta->addr));
 			}
 			sae_password_track_success(hapd, sta);
 			sta->sae->rc = peer_send_confirm;
