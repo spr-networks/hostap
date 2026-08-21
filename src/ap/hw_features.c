@@ -407,6 +407,9 @@ static int ieee80211n_check_40mhz_2g4(struct hostapd_iface *iface,
 }
 
 
+static void ap_ht40_scan_timeout(void *eloop_data, void *user_data);
+
+
 static void ieee80211n_check_scan(struct hostapd_iface *iface)
 {
 	struct wpa_scan_results *scan_res;
@@ -417,6 +420,7 @@ static void ieee80211n_check_scan(struct hostapd_iface *iface)
 	 * allowed per IEEE Std 802.11-2012, 10.15.3.2 */
 
 	iface->scan_cb = NULL;
+	eloop_cancel_timeout(ap_ht40_scan_timeout, iface, NULL);
 
 	scan_res = hostapd_driver_get_scan_results(iface->bss[0]);
 	if (scan_res == NULL) {
@@ -564,9 +568,49 @@ static void ieee80211n_scan_channels_5g(struct hostapd_iface *iface,
 }
 
 
+#define HT2040_COEX_SCAN_RETRY 15
+#define HT2040_COEX_SCAN_TIMEOUT 40
+
+
+static void ap_ht40_scan_fallback(struct hostapd_iface *iface)
+{
+	hostapd_set_oper_centr_freq_seg0_idx(iface->conf, 0);
+	hostapd_set_oper_centr_freq_seg1_idx(iface->conf, 0);
+	hostapd_set_oper_chwidth(iface->conf, CONF_OPER_CHWIDTH_USE_HT);
+	iface->conf->secondary_channel = 0;
+	iface->conf->ht_capab &= ~HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET;
+	hostapd_setup_interface_complete(iface, 0);
+}
+
+
+static void ap_ht40_scan_timeout(void *eloop_data, void *user_data)
+{
+	struct hostapd_iface *iface = eloop_data;
+
+	if (iface->state != HAPD_IFACE_HT_SCAN ||
+	    iface->scan_cb != ieee80211n_check_scan)
+		return;
+
+	wpa_printf(MSG_ERROR,
+		   "Scan of neighboring BSSes timed out - bringing up in HT20 mode");
+	iface->scan_cb = NULL;
+	iface->bss[0]->scan_cookie = 0;
+	ap_ht40_scan_fallback(iface);
+}
+
+
+static void ap_ht40_scan_started(struct hostapd_iface *iface, u64 scan_cookie)
+{
+	iface->scan_cb = ieee80211n_check_scan;
+	iface->bss[0]->scan_cookie = scan_cookie;
+	eloop_cancel_timeout(ap_ht40_scan_timeout, iface, NULL);
+	eloop_register_timeout(HT2040_COEX_SCAN_TIMEOUT, 0,
+			       ap_ht40_scan_timeout, iface, NULL);
+}
+
+
 static void ap_ht40_scan_retry(void *eloop_data, void *user_data)
 {
-#define HT2040_COEX_SCAN_RETRY 15
 	struct hostapd_iface *iface = eloop_data;
 	struct wpa_driver_scan_params params;
 	int ret;
@@ -591,25 +635,20 @@ static void ap_ht40_scan_retry(void *eloop_data, void *user_data)
 	}
 
 	if (ret == 0) {
-		iface->scan_cb = ieee80211n_check_scan;
-		iface->bss[0]->scan_cookie = params.scan_cookie;
+		ap_ht40_scan_started(iface, params.scan_cookie);
 		return;
 	}
 
 	wpa_printf(MSG_DEBUG,
 		   "Failed to request a scan in device, bringing up in HT20 mode");
-	hostapd_set_oper_centr_freq_seg0_idx(iface->conf, 0);
-	hostapd_set_oper_centr_freq_seg1_idx(iface->conf, 0);
-	hostapd_set_oper_chwidth(iface->conf, CONF_OPER_CHWIDTH_USE_HT);
-	iface->conf->secondary_channel = 0;
-	iface->conf->ht_capab &= ~HT_CAP_INFO_SUPP_CHANNEL_WIDTH_SET;
-	hostapd_setup_interface_complete(iface, 0);
+	ap_ht40_scan_fallback(iface);
 }
 
 
 void hostapd_stop_setup_timers(struct hostapd_iface *iface)
 {
 	eloop_cancel_timeout(ap_ht40_scan_retry, iface, NULL);
+	eloop_cancel_timeout(ap_ht40_scan_timeout, iface, NULL);
 }
 
 
@@ -651,8 +690,7 @@ static int ieee80211n_check_40mhz(struct hostapd_iface *iface)
 		return -1;
 	}
 
-	iface->scan_cb = ieee80211n_check_scan;
-	iface->bss[0]->scan_cookie = params.scan_cookie;
+	ap_ht40_scan_started(iface, params.scan_cookie);
 	return 1;
 }
 
