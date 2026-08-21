@@ -40,7 +40,7 @@ def start_wnm_ap(apdev, bss_transition=True, time_adv=False, ssid=None,
                  pmf=True, passphrase=None, ht=True, vht=False, mbo=False,
                  beacon_prot=False, he=False, bss_max_idle=None,
                  wpa_group_rekey=None, no_disconnect_on_group_keyerror=False,
-                 max_acceptable_idle_period=None):
+                 max_acceptable_idle_period=None, group_cipher_256=None):
     if rsn:
         if not ssid:
             ssid = "test-wnm-rsn"
@@ -52,6 +52,9 @@ def start_wnm_ap(apdev, bss_transition=True, time_adv=False, ssid=None,
             params["ieee80211w"] = "2"
             if beacon_prot:
                 params["beacon_prot"] = "1"
+            if group_cipher_256:
+                params["group_cipher"] = "GCMP-256"
+                params["group_mgmt_cipher"] = "BIP-GMAC-256"
     else:
         params = {"ssid": "test-wnm"}
     if bss_transition:
@@ -373,6 +376,19 @@ def test_wnm_sleep_mode_rsn_beacon_prot(dev, apdev):
                         beacon_prot=True)
     dev[0].connect("test-wnm-rsn", psk="12345678", ieee80211w="2",
                    beacon_prot="1",
+                   key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
+    ev = hapd.wait_event(["AP-STA-CONNECTED"], timeout=5)
+    if ev is None:
+        raise Exception("No connection event received from hostapd")
+    check_wnm_sleep_mode_enter_exit(hapd, dev[0])
+    check_wnm_sleep_mode_enter_exit(hapd, dev[0], rekey=True)
+
+def test_wnm_sleep_mode_rsn_beacon_prot_group_cipher_256(dev, apdev):
+    """WNM Sleep Mode - RSN with PMF and beacon protection using 256-bit group ciphers"""
+    hapd = start_wnm_ap(apdev[0], rsn=True, wnm_sleep_mode=True, time_adv=True,
+                        beacon_prot=True, group_cipher_256=True)
+    dev[0].connect("test-wnm-rsn", psk="12345678", ieee80211w="2",
+                   beacon_prot="1", group="GCMP-256",
                    key_mgmt="WPA-PSK-SHA256", proto="WPA2", scan_freq="2412")
     ev = hapd.wait_event(["AP-STA-CONNECTED"], timeout=5)
     if ev is None:
@@ -1864,13 +1880,13 @@ def test_wnm_action_proto_no_pmf(dev, apdev):
 def test_wnm_bss_tm_req_with_mbo_ie(dev, apdev):
     """WNM BSS transition request with MBO IE and reassociation delay attribute"""
     ssid = "test-wnm-mbo"
-    hapd = start_wnm_ap(apdev[0], rsn=True, pmf=False, ssid=ssid)
+    hapd = start_wnm_ap(apdev[0], rsn=True, pmf=True, ssid=ssid)
     bssid = apdev[0]['bssid']
     if "OK" not in dev[0].request("SET mbo_cell_capa 1"):
         raise Exception("Failed to set STA as cellular data capable")
 
-    dev[0].connect(ssid, psk="12345678", key_mgmt="WPA-PSK",
-                   proto="WPA2", ieee80211w="0", scan_freq="2412")
+    dev[0].connect(ssid, psk="12345678", key_mgmt="WPA-PSK-SHA256",
+                   proto="WPA2", ieee80211w="2", scan_freq="2412")
 
     logger.debug("BTM request with MBO reassociation delay when disassoc imminent is not set")
     if 'FAIL' not in hapd.request("BSS_TM_REQ " + dev[0].own_addr() + " mbo=3:2:1"):

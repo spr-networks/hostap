@@ -711,7 +711,5 @@ int wpa_sm_install_mlo_group_keys(struct wpa_sm *sm, const u8 *key_data,
 bool wpa_sm_pmksa_privacy_supported(struct wpa_sm *sm);
 
 void wpa_sm_set_802_1x_auth_caps(struct wpa_sm *sm, u64 flags2);
-const u8 * wpa_sm_get_pmk(struct wpa_sm *sm, const u8 *addr, const u8 *pmkid,
-			  size_t *pmk_len);
 
 #endif /* WPA_H */

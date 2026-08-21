@@ -146,8 +146,8 @@ static int ieee802_11_send_wnmsleep_resp(struct hostapd_data *hapd,
 #endif /* CONFIG_OCV */
 
 #define MAX_GTK_SUBELEM_LEN 45
-#define MAX_IGTK_SUBELEM_LEN 26
-#define MAX_BIGTK_SUBELEM_LEN 26
+#define MAX_IGTK_SUBELEM_LEN 10 + WPA_IGTK_MAX_LEN
+#define MAX_BIGTK_SUBELEM_LEN 10 + WPA_BIGTK_MAX_LEN
 	mgmt = os_zalloc(sizeof(*mgmt) + wnmsleep_ie_len + wnmtfs_ie_len +
 			 MAX_GTK_SUBELEM_LEN + MAX_IGTK_SUBELEM_LEN +
 			 MAX_BIGTK_SUBELEM_LEN +

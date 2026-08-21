@@ -35,7 +35,6 @@
 #define WLAN_STA_WDS BIT_ULL(14)
 #define WLAN_STA_ASSOC_REQ_OK BIT_ULL(15)
 #define WLAN_STA_WPS2 BIT_ULL(16)
-#define WLAN_STA_GAS BIT_ULL(17)
 #define WLAN_STA_VHT BIT_ULL(18)
 #define WLAN_STA_WNM_SLEEP_MODE BIT_ULL(19)
 #define WLAN_STA_VHT_OPMODE_ENABLED BIT_ULL(20)
@@ -244,12 +243,6 @@ struct sta_info {
 				* sa_query_count octets of pending SA Query
 				* transaction identifiers */
 	struct os_reltime sa_query_start;
-
-#if defined(CONFIG_INTERWORKING) || defined(CONFIG_DPP)
-#define GAS_DIALOG_MAX 8 /* Max concurrent dialog number */
-	struct gas_dialog_info *gas_dialog;
-	u8 gas_dialog_next;
-#endif /* CONFIG_INTERWORKING || CONFIG_DPP */
 
 	struct wpabuf *wps_ie; /* WPS IE from (Re)Association Request */
 	struct wpabuf *p2p_ie; /* P2P IE from (Re)Association Request */

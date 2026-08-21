@@ -1733,7 +1733,10 @@ struct wpa_supplicant {
 	bool scs_reconfigure;
 	bool ext_auth_to_same_bss; /* Whether external authentication has been
 				    * completed successfully with the BSS that
-				    * we are already associated with. */
+				    * we are already associated with, or an
+				    * equivalent driver-indicated roam
+				    * authentication status (EVENT_ROAM_STATUS)
+				    * has been received for that BSS. */
 
 	bool nan_mgmt;
 	bool nan_data;

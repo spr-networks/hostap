@@ -2861,7 +2861,6 @@ static void nl80211_radar_event(struct i802_bss *bss, struct nlattr **tb)
 static void nl80211_spurious_frame(struct i802_bss *bss, struct nlattr **tb,
 				   int wds)
 {
-	struct wpa_driver_nl80211_data *drv = bss->drv;
 	union wpa_event_data event;
 
 	if (!tb[NL80211_ATTR_MAC])
@@ -2874,7 +2873,7 @@ static void nl80211_spurious_frame(struct i802_bss *bss, struct nlattr **tb,
 	event.rx_from_unknown.link_id = tb[NL80211_ATTR_MLO_LINK_ID] ?
 		nla_get_u8(tb[NL80211_ATTR_MLO_LINK_ID]) : -1;
 
-	wpa_supplicant_event(drv->ctx, EVENT_RX_FROM_UNKNOWN, &event);
+	wpa_supplicant_event(bss->ctx, EVENT_RX_FROM_UNKNOWN, &event);
 }
 
 
@@ -3641,6 +3640,124 @@ static void qca_nl80211_external_auth(struct wpa_driver_nl80211_data *drv,
 	wpa_supplicant_event(drv->ctx, EVENT_EXTERNAL_AUTH, &event);
 }
 
+
+static void
+qca_nl80211_send_roam_status_ack(struct wpa_driver_nl80211_data *drv,
+				 const u8 *bssid, const u8 *ap_mld_addr)
+{
+	struct nl_msg *msg;
+	struct nlattr *attr;
+	int ret;
+
+	wpa_printf(MSG_DEBUG, "nl80211: Send roam auth status ACK for " MACSTR,
+		   MAC2STR(bssid));
+
+	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_VENDOR);
+	if (!msg ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_ID, OUI_QCA) ||
+	    nla_put_u32(msg, NL80211_ATTR_VENDOR_SUBCMD,
+			QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS)) {
+		nlmsg_free(msg);
+		return;
+	}
+
+	attr = nla_nest_start(msg, NL80211_ATTR_VENDOR_DATA);
+	if (!attr) {
+		nlmsg_free(msg);
+		return;
+	}
+
+	if (nla_put_u8(msg, QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_ACTION,
+		       QCA_WLAN_ROAM_STATUS_ACTION_AUTH_ACK) ||
+	    nla_put(msg, QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_BSSID,
+		    ETH_ALEN, bssid) ||
+	    (ap_mld_addr &&
+	     nla_put(msg, QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AP_MLD_ADDR,
+		     ETH_ALEN, ap_mld_addr))) {
+		nlmsg_free(msg);
+		return;
+	}
+
+	nla_nest_end(msg, attr);
+
+	ret = send_and_recv_cmd(drv, msg);
+	if (ret)
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Roam auth status ACK failed: ret=%d (%s)",
+			   ret, strerror(-ret));
+}
+
+
+static void qca_nl80211_roam_status_event(struct wpa_driver_nl80211_data *drv,
+					  const u8 *data, size_t len)
+{
+	struct nlattr *tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_MAX + 1];
+	union wpa_event_data event;
+	const u8 *bssid;
+	const u8 *ap_mld_addr = NULL;
+	u8 qca_action;
+	enum roam_auth_status_action action;
+
+	if (nla_parse(tb, QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_MAX,
+		      (struct nlattr *) data, len, NULL) ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_ACTION] ||
+	    !tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_BSSID] ||
+	    nla_len(tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_BSSID]) != ETH_ALEN) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Invalid roam auth status event");
+		return;
+	}
+
+	qca_action = nla_get_u8(tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_ACTION]);
+	bssid = nla_data(tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_BSSID]);
+	if (tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AP_MLD_ADDR] &&
+	    nla_len(tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AP_MLD_ADDR]) ==
+	    ETH_ALEN)
+		ap_mld_addr =
+			nla_data(tb[QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AP_MLD_ADDR]);
+
+	switch (qca_action) {
+	case QCA_WLAN_ROAM_STATUS_ACTION_AUTH_DONE:
+		action = ROAM_AUTH_STATUS_ACTION_AUTH_DONE;
+		break;
+	case QCA_WLAN_ROAM_STATUS_ACTION_ROAM_ABORT:
+		action = ROAM_AUTH_STATUS_ACTION_ROAM_ABORT;
+		break;
+	default:
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Unexpected roam auth status action %u",
+			   qca_action);
+		return;
+	}
+
+	if (ap_mld_addr)
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: QCA roam auth status event action=%u bssid="
+			   MACSTR " ap_mld_addr=" MACSTR,
+			   qca_action, MAC2STR(bssid), MAC2STR(ap_mld_addr));
+	else
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: QCA roam auth status event action=%u bssid="
+			   MACSTR, qca_action, MAC2STR(bssid));
+
+	os_memset(&event, 0, sizeof(event));
+	event.roam_auth_status.action = action;
+	os_memcpy(event.roam_auth_status.bssid, bssid, ETH_ALEN);
+	if (ap_mld_addr)
+		os_memcpy(event.roam_auth_status.ap_mld_addr, ap_mld_addr,
+			  ETH_ALEN);
+
+	/*
+	 * Indicate to wpa_supplicant first so the EAPOL deferral flag is
+	 * armed (AUTH_DONE) or cleared (ROAM_ABORT) before acknowledging.
+	 * AUTH_ACK is purely internal to the driver wrapper.
+	 */
+	wpa_supplicant_event(drv->ctx, EVENT_ROAM_STATUS, &event);
+
+	if (action == ROAM_AUTH_STATUS_ACTION_AUTH_DONE)
+		qca_nl80211_send_roam_status_ack(drv, bssid, ap_mld_addr);
+}
+
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 
 
@@ -3690,6 +3807,9 @@ static void nl80211_vendor_event_qca(struct i802_bss *bss,
 		break;
 	case QCA_NL80211_VENDOR_SUBCMD_EXTERNAL_AUTH:
 		qca_nl80211_external_auth(bss->drv, data, len);
+		break;
+	case QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS:
+		qca_nl80211_roam_status_event(bss->drv, data, len);
 		break;
 #endif /* CONFIG_DRIVER_NL80211_QCA */
 	default:

@@ -221,6 +221,8 @@ int hostapd_get_hw_features(struct hostapd_iface *iface)
 	iface->hw_features = modes;
 	iface->num_hw_features = num_modes;
 
+	hostap_afc_disable_channels(iface);
+
 	if (orig_mode_valid && !iface->current_mode) {
 		wpa_printf(MSG_ERROR,
 			   "%s: Could not update iface->current_mode",
@@ -1121,16 +1123,87 @@ static bool hostapd_is_usable_punct_bitmap(struct hostapd_iface *iface)
 }
 
 
+static int hostapd_is_usable_chan_seg(struct hostapd_iface *iface)
+{
+	int central, oper_chwidth, err;
+	int start_chan, start_freq, chan_num, i;
+
+	oper_chwidth = hostapd_get_oper_chwidth(iface->conf);
+	central = hostapd_get_oper_centr_freq_seg0_idx(iface->conf);
+
+	switch (oper_chwidth) {
+	case CONF_OPER_CHWIDTH_80MHZ:
+	case CONF_OPER_CHWIDTH_80P80MHZ:
+		chan_num = 4;
+		break;
+	case CONF_OPER_CHWIDTH_160MHZ:
+		chan_num = 8;
+		break;
+	case CONF_OPER_CHWIDTH_320MHZ:
+		chan_num = 16;
+		break;
+	default:
+		return 0;
+	}
+	start_chan = central - chan_num * 2 + 2;
+	start_freq = hw_get_freq(iface->current_mode, start_chan);
+
+	if (!start_freq) {
+		wpa_printf(MSG_ERROR, "Frequency not present (seg0)");
+		return 0;
+	}
+
+	for (i = 0; i < chan_num; i++) {
+		int freq = start_freq + i * 20;
+
+		err = hostapd_is_usable_chan(iface, freq, freq == iface->freq);
+		if (err <= 0) {
+			wpa_printf(MSG_ERROR,
+				   "Frequency %d is not allowed (seg0)",
+				   freq);
+			return err;
+		}
+	}
+
+	if (oper_chwidth != CONF_OPER_CHWIDTH_80P80MHZ)
+		return 1;
+
+	central = hostapd_get_oper_centr_freq_seg1_idx(iface->conf);
+	start_chan = central - chan_num * 2 + 2;
+	start_freq = hw_get_freq(iface->current_mode, start_chan);
+
+	if (!start_freq) {
+		wpa_printf(MSG_ERROR, "Frequency not present (seg1)");
+		return 0;
+	}
+
+	for (i = 0; i < chan_num; i++) {
+		int freq = start_freq + i * 20;
+
+		err = hostapd_is_usable_chan(iface, freq, freq == iface->freq);
+		if (err <= 0) {
+			wpa_printf(MSG_ERROR,
+				   "Frequency %d is not allowed (seg1)",
+				   freq);
+			return err;
+		}
+	}
+
+	return 1;
+}
+
+
 /* Returns:
  * 1 = usable
  * 0 = not usable
  * -1 = not currently usable due to 6 GHz NO-IR
  */
-static int hostapd_is_usable_chans(struct hostapd_iface *iface)
+int hostapd_is_usable_chans(struct hostapd_iface *iface)
 {
-	int secondary_freq;
+	int secondary_freq, new_sec;
+	enum hostapd_chan_width_attr bw_flag;
 	struct hostapd_channel_data *pri_chan;
-	int err, err2;
+	int err, err2, central, oper_chwidth;
 
 	if (!iface->current_mode)
 		return 0;
@@ -1143,17 +1216,30 @@ static int hostapd_is_usable_chans(struct hostapd_iface *iface)
 		return 0;
 	}
 
-	err = hostapd_is_usable_chan(iface, pri_chan->freq, 1);
-	if (err <= 0) {
-		wpa_printf(MSG_ERROR, "Primary frequency not allowed");
-		return err;
-	}
 	err = hostapd_is_usable_edmg(iface);
 	if (err <= 0)
 		return err;
 
 	if (!hostapd_is_usable_punct_bitmap(iface))
 		return 0;
+
+	oper_chwidth = hostapd_get_oper_chwidth(iface->conf);
+
+	/*
+	 * The central channel is not filled in acs_adjust_center_freq() after
+	 * ACS of 80+80 MHz. In that case we only check the primary 40 MHz.
+	 */
+	central = hostapd_get_oper_centr_freq_seg0_idx(iface->conf);
+
+	if (iface->current_mode->mode == HOSTAPD_MODE_IEEE80211A &&
+	    oper_chwidth != CONF_OPER_CHWIDTH_USE_HT && central)
+		return hostapd_is_usable_chan_seg(iface);
+
+	err = hostapd_is_usable_chan(iface, pri_chan->freq, 1);
+	if (err <= 0) {
+		wpa_printf(MSG_ERROR, "Primary frequency not allowed");
+		return err;
+	}
 
 	if (!iface->conf->secondary_channel)
 		return 1;
@@ -1171,18 +1257,19 @@ static int hostapd_is_usable_chans(struct hostapd_iface *iface)
 	if (!iface->conf->ht40_plus_minus_allowed)
 		return err;
 
-	/* Both HT40+ and HT40- are set, pick a valid secondary channel */
-	secondary_freq = iface->freq + 20;
-	err2 = hostapd_is_usable_chan(iface, secondary_freq, 0);
-	if (err2 > 0 && (pri_chan->allowed_bw & HOSTAPD_CHAN_WIDTH_40P)) {
-		iface->conf->secondary_channel = 1;
-		return 1;
-	}
+	/* Both HT40+ and HT40- are set, check the swapped pri/sec channel
+	 * option for a 40 MHz channel */
+	new_sec = -iface->conf->secondary_channel;
+	bw_flag = new_sec == 1 ?
+		HOSTAPD_CHAN_WIDTH_40P : HOSTAPD_CHAN_WIDTH_40M;
 
-	secondary_freq = iface->freq - 20;
+	secondary_freq = iface->freq + new_sec * 20;
 	err2 = hostapd_is_usable_chan(iface, secondary_freq, 0);
-	if (err2 > 0 && (pri_chan->allowed_bw & HOSTAPD_CHAN_WIDTH_40M)) {
-		iface->conf->secondary_channel = -1;
+	if (err2 <= 0)
+		return err;
+
+	if (pri_chan->allowed_bw & bw_flag) {
+		iface->conf->secondary_channel = new_sec;
 		return 1;
 	}
 

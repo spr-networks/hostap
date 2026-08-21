@@ -573,6 +573,13 @@ void p2p_process_invitation_resp(struct p2p_data *p2p, const u8 *sa,
 				      &p2p->op_channel, NULL, NULL) == 0) {
 		p2p->retry_invite_req = 0;
 		p2p->cfg->send_action_done(p2p->cfg->cb_ctx);
+
+		if (p2p->pending_listen_freq) {
+			p2p_dbg(p2p,
+				"Clear pending_listen_freq for p2p_invite");
+			p2p->pending_listen_freq = 0;
+		}
+
 		p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
 		p2p_set_state(p2p, P2P_INVITE);
 		p2p_dbg(p2p, "Resend Invitation Request setting op_class %u channel %u as operating channel",

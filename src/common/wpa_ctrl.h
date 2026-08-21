@@ -506,6 +506,7 @@ extern "C" {
  * <result> role=<role> protocol=<protocol type> opclass=<op class> channel=<op channel> cc=<country>
  */
 #define PR_PASN_RESULT "PR-PASN-RESULT "
+#define PR_RANGING_TERMINATED "PR-RANGING-TERMINATED "
 
 /* Proximity Ranging parameters to use in ranging */
 #define PR_RANGING_PARAMS "PR-RANGING-PARAMS "
@@ -515,6 +516,17 @@ extern "C" {
 
 /* Proximity Ranging measurement session complete */
 #define PR_EVENT_RANGING_COMPLETE "PR-RANGING-COMPLETE "
+
+/* Proximity Ranging capable peer discovered via USD
+ * peer_addr=<MAC> pasn_type=0x<hex> name=<string>
+ * edca=<0|1> edca_ista=<0|1> edca_rsta=<0|1>
+ * ntb=<0|1> ntb_ista=<0|1> ntb_rsta=<0|1>
+ * secure_ltf=<0|1> 6ghz=<0|1> freq=<MHz> dik_valid=<0|1>
+ */
+#define PR_PEER_FOUND "PR-PEER-FOUND "
+
+#define AFC_EVENT_RECEIVED "AFC-EVENT-RECEIVED "
+#define AFC_EVENT_COMPLETE "AFC-EVENT-COMPLETE "
 
 /* BSS command information masks */
 

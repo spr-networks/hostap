@@ -24,6 +24,12 @@ ifdef CONFIG_BUILD_WPA_CLIENT_SO
 _all: libwpa_client.so
 endif
 
+ifdef CONFIG_BUILD_WPA_CLIENT_STATIC
+# add the dependency this way to allow CONFIG_BUILD_WPA_CLIENT_STATIC
+# being set in the config which is read by build.rules
+_all: libwpa_client.a
+endif
+
 ifndef CONFIG_NO_WPA_PASSPHRASE
 # add the dependency this way to allow CONFIG_NO_WPA_PASSPHRASE
 # being set in the config which is read by build.rules
@@ -90,6 +96,10 @@ endif
 
 ifdef CONFIG_BUILD_WPA_CLIENT_SO
 	install -m 0644 -D libwpa_client.so $(DESTDIR)/$(LIBDIR)/libwpa_client.so
+	install -m 0644 -D ../src/common/wpa_ctrl.h $(DESTDIR)/$(INCDIR)/wpa_ctrl.h
+endif
+ifdef CONFIG_BUILD_WPA_CLIENT_STATIC
+	install -m 0644 -D libwpa_client.a $(DESTDIR)/$(LIBDIR)/libwpa_client.a
 	install -m 0644 -D ../src/common/wpa_ctrl.h $(DESTDIR)/$(INCDIR)/wpa_ctrl.h
 endif
 	if ls eap_*.so >/dev/null 2>&1; then \

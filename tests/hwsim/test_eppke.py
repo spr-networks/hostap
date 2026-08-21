@@ -263,29 +263,41 @@ def test_eppke_ap_with_base_akm_sae_ext_non_mld_client_pmksa_cached(dev, apdev):
     try:
         dev[0].set("pasn_groups", "")
         dev[0].set("sae_pwe", "1")
+        dev[0].set("preassoc_mac_addr", "1")
+        dev[0].set("rand_addr_lifetime", "0")
         dev[0].connect(ssid, sae_password=passphrase, scan_freq="2412",
                        key_mgmt="SAE-EXT-KEY EPPKE", ieee80211w="2",
-                       beacon_prot="1", pairwise="CCMP", pmksa_privacy="1")
+                       beacon_prot="1", pairwise="CCMP", pmksa_privacy="1",
+                       mac_addr="1")
         hapd.wait_sta();
         sta = hapd.get_sta(dev[0].own_addr())
         if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
             raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
         hwsim_utils.test_connectivity(dev[0], hapd)
 
-        dev[0].request("DISCONNECT")
-        dev[0].wait_disconnected()
-        dev[0].request("RECONNECT")
-        dev[0].wait_connected(timeout=15, error="Reconnect timed out")
-        val = dev[0].get_status_field('sae_group')
-        if val is not None:
-            raise Exception("SAE group claimed to have been used: " + val)
-        sta = hapd.get_sta(dev[0].own_addr())
-        if sta['auth_alg'] != '9' or sta['AKMSuiteSelector'] != '00-0f-ac-24':
-            raise Exception("Incorrect Auth Algo/AKMSuiteSelector value after PMKSA caching")
-        hwsim_utils.test_connectivity(dev[0], hapd)
+        for i in range(3):
+            prev_addr = dev[0].own_addr()
+            dev[0].request("DISCONNECT")
+            dev[0].wait_disconnected()
+            # Let driver fully process disconnect before MAC address change
+            time.sleep(0.5)
+            dev[0].request("RECONNECT")
+            dev[0].wait_connected(timeout=15, error="Reconnect timed out")
+            new_addr = dev[0].own_addr()
+            if new_addr == prev_addr:
+                raise Exception("MAC address did not change on iteration %d" % i)
+            val = dev[0].get_status_field('sae_group')
+            if val is not None:
+                raise Exception("SAE group claimed to have been used: " + val)
+            sta = hapd.get_sta(new_addr)
+            if sta['auth_alg'] != '9' or sta['AKMSuiteSelector'] != '00-0f-ac-24':
+                raise Exception("Incorrect Auth Algo/AKMSuiteSelector value after PMKSA caching")
+            hwsim_utils.test_connectivity(dev[0], hapd)
 
     finally:
         dev[0].set("pasn_groups", "")
+        dev[0].set("preassoc_mac_addr", "0")
+        dev[0].set("rand_addr_lifetime", "60")
         dev[0].set("sae_pwe", "0")
 
 def test_eppke_mld_ap_with_base_akm_sae_ext_non_mld_client_pmksa_cached(dev, apdev):
@@ -309,10 +321,12 @@ def test_eppke_mld_ap_with_base_akm_sae_ext_non_mld_client_pmksa_cached(dev, apd
         try:
             dev[0].set("pasn_groups", "")
             dev[0].set("sae_pwe", "1")
+            dev[0].set("preassoc_mac_addr", "1")
+            dev[0].set("rand_addr_lifetime", "0")
             dev[0].connect(ssid, sae_password=passphrase, scan_freq="2412",
                            key_mgmt="SAE-EXT-KEY EPPKE", ieee80211w="2",
                            beacon_prot="1", pairwise="CCMP GCMP-256",
-                           pmksa_privacy="1")
+                           pmksa_privacy="1", mac_addr="1")
             bssid = dev[0].get_status_field("bssid")
             if hapd0.own_addr() == bssid:
                 hapd0.wait_sta();
@@ -328,30 +342,40 @@ def test_eppke_mld_ap_with_base_akm_sae_ext_non_mld_client_pmksa_cached(dev, apd
                 raise Exception("Unknown BSSID: " + bssid)
             hwsim_utils.test_connectivity(dev[0], hapd0)
 
-            dev[0].request("DISCONNECT")
-            dev[0].wait_disconnected()
-            dev[0].request("RECONNECT")
-            dev[0].wait_connected(timeout=15, error="Reconnect timed out")
-            val = dev[0].get_status_field('sae_group')
-            if val is not None:
-                raise Exception("SAE group claimed to have been used: " + val)
+            for i in range(3):
+                prev_addr = dev[0].own_addr()
+                dev[0].request("DISCONNECT")
+                dev[0].wait_disconnected()
+                # Let driver fully process disconnect before MAC address change
+                time.sleep(0.5)
+                dev[0].request("RECONNECT")
+                dev[0].wait_connected(timeout=15, error="Reconnect timed out")
+                new_addr = dev[0].own_addr()
+                if new_addr == prev_addr:
+                    raise Exception("MAC address did not change on iteration %d" % i)
+                val = dev[0].get_status_field('sae_group')
+                if val is not None:
+                    raise Exception("SAE group claimed to have been used: " + val)
 
-            bssid = dev[0].get_status_field("bssid")
-            if hapd0.own_addr() == bssid:
-                hapd0.wait_sta();
-                sta = hapd0.get_sta(dev[0].own_addr())
-            elif hapd1.own_addr() == bssid:
-                hapd1.wait_sta();
-                sta = hapd1.get_sta(dev[0].own_addr())
-            else:
-                raise Exception("Unknown BSSID: " + bssid)
+                bssid = dev[0].get_status_field("bssid")
+                if hapd0.own_addr() == bssid:
+                    hapd0.wait_sta();
+                    sta = hapd0.get_sta(new_addr)
+                elif hapd1.own_addr() == bssid:
+                    hapd1.wait_sta();
+                    sta = hapd1.get_sta(new_addr)
+                else:
+                    raise Exception("Unknown BSSID: " + bssid)
 
-            if sta['auth_alg'] != '9' or sta['AKMSuiteSelector'] != '00-0f-ac-24':
-                raise Exception("Incorrect Auth Algo/AKMSuiteSelector value after PMKSA caching")
-            hwsim_utils.test_connectivity(dev[0], hapd0)
+                if sta['auth_alg'] != '9' or sta['AKMSuiteSelector'] != '00-0f-ac-24':
+                    raise Exception("Incorrect Auth Algo/AKMSuiteSelector value after PMKSA caching")
+
+                hwsim_utils.test_connectivity(dev[0], hapd0)
 
         finally:
             dev[0].set("pasn_groups", "")
+            dev[0].set("preassoc_mac_addr", "0")
+            dev[0].set("rand_addr_lifetime", "60")
             dev[0].set("sae_pwe", "0")
 
 def run_eppke_mld_one_link_pmksa_cached(dev, apdev, key_mgmt):
@@ -376,27 +400,42 @@ def run_eppke_mld_one_link_pmksa_cached(dev, apdev, key_mgmt):
 
         wpas.set("pasn_groups", "")
         wpas.set("sae_pwe", "1")
-        wpas.connect(ssid, sae_password=passphrase, scan_freq="2412",
-                     key_mgmt=key_mgmt, ieee80211w="2", beacon_prot="1",
-                     pairwise="CCMP GCMP-256", pmksa_privacy="1")
-        eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
-                          valid_links=1, active_links=1)
-        hapd0.wait_sta();
-        sta = hapd0.get_sta(wpas.own_addr())
-        if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
-            raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
-        hwsim_utils.test_connectivity(wpas, hapd0)
+        wpas.set("preassoc_mac_addr", "1")
+        wpas.set("rand_addr_lifetime", "0")
+        try:
+            wpas.connect(ssid, sae_password=passphrase, scan_freq="2412",
+                         key_mgmt=key_mgmt, ieee80211w="2", beacon_prot="1",
+                         pairwise="CCMP GCMP-256", pmksa_privacy="1",
+                         mac_addr="1")
+            eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
+                              valid_links=1, active_links=1)
+            hapd0.wait_sta();
+            sta = hapd0.get_sta(wpas.own_addr())
+            if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
+                raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
+            hwsim_utils.test_connectivity(wpas, hapd0)
 
-        wpas.request("DISCONNECT")
-        wpas.wait_disconnected()
-        wpas.request("RECONNECT")
-        wpas.wait_connected(timeout=15, error="Reconnect timed out")
-        val = wpas.get_status_field('sae_group')
-        if val is not None:
-            raise Exception("SAE group claimed to have been used: " + val)
-        eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
-                          valid_links=1, active_links=1)
-        hwsim_utils.test_connectivity(wpas, hapd0)
+            for i in range(3):
+                prev_addr = wpas.own_addr()
+                wpas.request("DISCONNECT")
+                wpas.wait_disconnected()
+                # Let driver fully process disconnect before MAC address change
+                time.sleep(0.5)
+                wpas.request("RECONNECT")
+                wpas.wait_connected(timeout=15, error="Reconnect timed out")
+                new_addr = wpas.own_addr()
+                if new_addr == prev_addr:
+                    raise Exception("MAC address did not change on iteration %d" % i)
+                val = wpas.get_status_field('sae_group')
+                if val is not None:
+                    raise Exception("SAE group claimed to have been used: " + val)
+                eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
+                                  valid_links=1, active_links=1)
+                hwsim_utils.test_connectivity(wpas, hapd0)
+        finally:
+            wpas.set("preassoc_mac_addr", "0")
+            wpas.set("rand_addr_lifetime", "60")
+            wpas.set("sae_pwe", "0")
 
 def test_eppke_with_base_akm_sae_ext_single_link_pmksa_cached(dev, apdev):
     """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using single link"""
@@ -427,27 +466,42 @@ def run_eppke_mld_two_links_pmksa_cached(dev, apdev, key_mgmt):
 
         wpas.set("pasn_groups", "")
         wpas.set("sae_pwe", "1")
-        wpas.connect(ssid, sae_password=passphrase, scan_freq="2412 2437",
-                     key_mgmt=key_mgmt, ieee80211w="2", beacon_prot="1",
-                     pairwise="CCMP GCMP-256", pmksa_privacy="1")
-        eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
-                          valid_links=3, active_links=3)
-        hapd0.wait_sta();
-        sta = hapd0.get_sta(wpas.own_addr())
-        if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
-            raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
-        hwsim_utils.test_connectivity(wpas, hapd0)
+        wpas.set("preassoc_mac_addr", "1")
+        wpas.set("rand_addr_lifetime", "0")
+        try:
+            wpas.connect(ssid, sae_password=passphrase, scan_freq="2412 2437",
+                         key_mgmt=key_mgmt, ieee80211w="2", beacon_prot="1",
+                         pairwise="CCMP GCMP-256", pmksa_privacy="1",
+                         mac_addr="1")
+            eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
+                              valid_links=3, active_links=3)
+            hapd0.wait_sta();
+            sta = hapd0.get_sta(wpas.own_addr())
+            if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
+                raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
+            hwsim_utils.test_connectivity(wpas, hapd0)
 
-        wpas.request("DISCONNECT")
-        wpas.wait_disconnected()
-        wpas.request("RECONNECT")
-        wpas.wait_connected(timeout=15, error="Reconnect timed out")
-        val = wpas.get_status_field('sae_group')
-        if val is not None:
-            raise Exception("SAE group claimed to have been used: " + val)
-        eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
-                          valid_links=3, active_links=3)
-        hwsim_utils.test_connectivity(wpas, hapd0)
+            for i in range(3):
+                prev_addr = wpas.own_addr()
+                wpas.request("DISCONNECT")
+                wpas.wait_disconnected()
+                # Let driver fully process disconnect before MAC change
+                time.sleep(0.5)
+                wpas.request("RECONNECT")
+                wpas.wait_connected(timeout=15, error="Reconnect timed out")
+                new_addr = wpas.own_addr()
+                if new_addr == prev_addr:
+                    raise Exception("MAC address did not change on iteration %d" % i)
+                val = wpas.get_status_field('sae_group')
+                if val is not None:
+                    raise Exception("SAE group claimed to have been used: " + val)
+                eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
+                                  valid_links=3, active_links=3)
+                hwsim_utils.test_connectivity(wpas, hapd0)
+        finally:
+            wpas.set("preassoc_mac_addr", "0")
+            wpas.set("rand_addr_lifetime", "60")
+            wpas.set("sae_pwe", "0")
 
 def test_eppke_with_base_akm_sae_ext_two_link_pmksa_cached(dev, apdev):
     """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using two links"""
@@ -1345,3 +1399,40 @@ def test_eppke_mld_two_links_different_security(dev, apdev):
                      ieee80211w="2", beacon_prot="1", pairwise="CCMP")
         eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
                           valid_links=3, active_links=3)
+
+def test_eppke_rsno(dev, apdev):
+    """EPPKE with RSNO"""
+    check_eppke_capab(dev[0])
+    ssid = "test-eppke-authentication"
+    passphrase = '1234567890'
+    params = hostapd.wpa2_params(ssid=ssid,
+                                 passphrase=passphrase,
+                                 ieee80211w='1')
+    params['rsn_override_key_mgmt'] = 'SAE-EXT-KEY EPPKE'
+    params['rsn_override_pairwise'] = 'CCMP GCMP-256'
+    params['rsn_override_mfp'] = '2'
+    params['beacon_prot'] = '1'
+    params['sae_groups'] = '19'
+    params['sae_require_mfp'] = '1'
+    params['sae_pwe'] = '2'
+    params['assoc_frame_encryption'] = '1'
+    params['pmksa_caching_privacy'] = '1'
+    params['eap_using_authentication_frames'] = '1'
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    try:
+        dev[0].set("pasn_groups", "")
+        dev[0].set("sae_pwe", "1")
+        dev[0].set("rsn_overriding", "1")
+        dev[0].connect(ssid, sae_password=passphrase, scan_freq="2412",
+                       key_mgmt="SAE-EXT-KEY EPPKE", ieee80211w="2",
+                       beacon_prot="1", pairwise="CCMP")
+        hapd.wait_sta();
+        sta = hapd.get_sta(dev[0].own_addr())
+        if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
+            raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
+        hwsim_utils.test_connectivity(dev[0], hapd)
+    finally:
+        dev[0].set("pasn_groups", "")
+        dev[0].set("sae_pwe", "0")
+        dev[0].set("rsn_overriding", "0")

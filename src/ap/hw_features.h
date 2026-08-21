@@ -32,6 +32,7 @@ int hostapd_hw_skip_mode(struct hostapd_iface *iface,
 int hostapd_determine_mode(struct hostapd_iface *iface);
 void hostapd_free_multi_hw_info(struct hostapd_multi_hw_info *multi_hw_info);
 int hostapd_set_current_hw_info(struct hostapd_iface *iface, int oper_freq);
+int hostapd_is_usable_chans(struct hostapd_iface *iface);
 #else /* NEED_AP_MLME */
 static inline void
 hostapd_free_hw_features(struct hostapd_hw_modes *hw_features,
@@ -114,6 +115,11 @@ static inline int hostapd_set_current_hw_info(struct hostapd_iface *iface,
 					      u32 oper_freq)
 {
 	return 0;
+}
+
+static inline int hostapd_is_usable_chans(struct hostapd_iface *iface)
+{
+	return 1;
 }
 #endif /* NEED_AP_MLME */
 

@@ -861,7 +861,8 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 		goto send_resp;
 	}
 
-	if (ieee802_11_parse_elems(mgmt->u.auth.variable,
+	if (len < offsetof(struct ieee80211_mgmt, u.auth.variable) ||
+	    ieee802_11_parse_elems(mgmt->u.auth.variable,
 				   len - offsetof(struct ieee80211_mgmt,
 						  u.auth.variable),
 				   &elems, 0) == ParseFailed) {
@@ -1257,7 +1258,8 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 	size_t copy_len, mic_offset;
 	u8 hash[SHA512_MAC_LEN];
 
-	if (ieee802_11_parse_elems(mgmt->u.auth.variable,
+	if (len < offsetof(struct ieee80211_mgmt, u.auth.variable) ||
+	    ieee802_11_parse_elems(mgmt->u.auth.variable,
 				   len - offsetof(struct ieee80211_mgmt,
 						  u.auth.variable),
 				   &elems, 0) == ParseFailed) {

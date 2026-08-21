@@ -58,6 +58,11 @@ static inline void wpa_hexdump_ascii(int level, const char *title,
 {
 }
 
+static inline void wpa_hexdump_ascii_buf(int level, const char *title,
+					 const struct wpabuf *buf)
+{
+}
+
 static inline void wpa_hexdump_ascii_key(int level, const char *title,
 					 const void *buf, size_t len)
 {
@@ -156,6 +161,13 @@ static inline void wpa_hexdump_buf_key(int level, const char *title,
  */
 void wpa_hexdump_ascii(int level, const char *title, const void *buf,
 		       size_t len);
+
+static inline void wpa_hexdump_ascii_buf(int level, const char *title,
+					 const struct wpabuf *buf)
+{
+	wpa_hexdump_ascii(level, title, buf ? wpabuf_head(buf) : NULL,
+			  buf ? wpabuf_len(buf) : 0);
+}
 
 /**
  * wpa_hexdump_ascii_key - conditional hex dump, hide keys

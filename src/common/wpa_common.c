@@ -581,6 +581,7 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha384_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA384;
 #else /* CONFIG_SHA384 */
 		return -1;
 #endif /* CONFIG_SHA384 */
@@ -589,6 +590,7 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha256_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA256;
 #ifdef CONFIG_OWE
 	} else if (akmp == WPA_KEY_MGMT_OWE && (pmk_len == 32 ||
 						owe_ptk_workaround)) {
@@ -596,16 +598,24 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha256_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		if (owe_ptk_workaround && pmk_len == 64)
+			ptk->hash_alg = RSN_HASH_SHA512;
+		else if (owe_ptk_workaround && pmk_len == 48)
+			ptk->hash_alg = RSN_HASH_SHA384;
+		else
+			ptk->hash_alg = RSN_HASH_SHA256;
 	} else if (akmp == WPA_KEY_MGMT_OWE && pmk_len == 48) {
 		wpa_printf(MSG_DEBUG, "WPA: PTK derivation using PRF(SHA384)");
 		if (sha384_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA384;
 	} else if (akmp == WPA_KEY_MGMT_OWE && pmk_len == 64) {
 		wpa_printf(MSG_DEBUG, "WPA: PTK derivation using PRF(SHA512)");
 		if (sha512_prf(pmk, pmk_len, label, data, data_len,
 			       tmp, ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA512;
 	} else if (akmp == WPA_KEY_MGMT_OWE) {
 		wpa_printf(MSG_INFO, "OWE: Unknown PMK length %u",
 			   (unsigned int) pmk_len);
@@ -673,6 +683,7 @@ int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		if (sha1_prf(pmk, pmk_len, label, data, data_len, tmp,
 			     ptk_len) < 0)
 			return -1;
+		ptk->hash_alg = RSN_HASH_SHA1;
 	}
 
 	wpa_printf(MSG_DEBUG, "WPA: PTK derivation - A1=" MACSTR " A2=" MACSTR,
@@ -4788,9 +4799,13 @@ bool rsn_is_snonce_cookie(const u8 *snonce)
 void wpa_add_supported_groups(struct wpabuf *buf, const int *groups)
 {
 	unsigned int count, i;
+	static const int default_groups[] = { 19, 0 };
 
-	if (!buf || !groups)
+	if (!buf)
 		return;
+
+	if (!groups)
+		groups = default_groups;
 
 	count = int_array_len(groups);
 	if (wpabuf_tailroom(buf) < 2 + 1 + count * 2)

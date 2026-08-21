@@ -13,6 +13,8 @@
 #include "utils/list.h"
 #include "wps/wps_defs.h"
 
+struct ieee80211_mgmt;
+
 #define DEVICE_IDENTITY_KEY_LEN 16
 #define DEVICE_IDENTITY_TAG_LEN 8
 #define DEVICE_IDENTITY_NONCE_LEN 8
@@ -25,7 +27,7 @@
 /**
  * PR_MAX_OP_CLASSES - Maximum number of operating classes
  */
-#define PR_MAX_OP_CLASSES 15
+#define PR_MAX_OP_CLASSES 30
 
 /**
  * PR_MAX_OP_CLASS_CHANNELS - Maximum number of channels per operating class
@@ -45,6 +47,16 @@
 #define PR_NEGOTIATION_SUCCESS 0
 #define PR_NEGOTIATION_UPDATE 1
 #define PR_NEGOTIATION_FAIL 2
+
+/**
+ * enum pr_session_end_reason - Reason codes for ranging session end
+ */
+enum pr_session_end_reason {
+	PR_SESSION_END_TIMEOUT       = 0,
+	PR_SESSION_END_USER_ABORT    = 1,
+	PR_SESSION_END_PEER_COMPLETE = 2,
+	PR_SESSION_END_NEG_FAILED    = 3,
+};
 
 enum pr_pasn_role {
 	PR_ROLE_IDLE = 0,
@@ -590,6 +602,8 @@ struct pr_config {
 				   const u8 *peer_addr, u8 ranging_role,
 				   u8 protocol_type, u8 op_class, u8 op_channel,
 				   u8 self_format_bw, u8 peer_format_bw);
+
+	void (*device_found)(void *ctx, const struct pr_device *dev);
 };
 
 struct pr_data {
@@ -662,6 +676,7 @@ int pr_initiate_pasn_auth(struct pr_data *pr, const u8 *addr, int freq,
 			  int forced_pr_freq);
 int pr_pasn_auth_tx_status(struct pr_data *pr, const u8 *data, size_t data_len,
 			   bool acked);
+int pr_pasn_auth_retransmit(struct pr_data *pr, const u8 *addr);
 int pr_pasn_auth_rx(struct pr_data *pr, const struct ieee80211_mgmt *mgmt,
 		    size_t len, int freq);
 

@@ -22,9 +22,16 @@
 
 #ifdef CONFIG_PASN
 static void wpas_pr_pasn_timeout(void *eloop_ctx, void *timeout_ctx);
+static void wpas_pr_pasn_roc_total_timeout(void *eloop_ctx, void *timeout_ctx);
+static void wpas_pr_pasn_auth_work_done(struct wpa_supplicant *wpa_s);
+static void wpas_pr_pasn_auth_retry_timeout(void *eloop_ctx, void *timeout_ctx);
 
 /* Total listen window (ms) for the PASN responder ROC */
-#define PR_PASN_RESPONDER_ROC_DURATION 5000
+#define PR_PASN_RESPONDER_ROC_DURATION 10000
+/* Initiator PASN authentication timeout (s) */
+#define PR_PASN_AUTH_TIMEOUT           10
+/* Retry interval (ms) for unacked PASN Authentication frame 1 */
+#define PR_PASN_AUTH1_RETRY_INTERVAL_MS 100
 #endif /* CONFIG_PASN */
 
 
@@ -226,7 +233,8 @@ static int wpas_pr_op_class_to_chan_params(u8 op_class, u8 op_channel,
 static void
 wpas_pr_setup_edca_channels(struct wpa_supplicant *wpa_s,
 			    struct pr_channels *chan,
-			    u32 bw_bitmap, u32 preamble_bitmap)
+			    u32 bw_bitmap, u32 preamble_bitmap,
+			    bool allow_6ghz)
 {
 	struct hostapd_hw_modes *mode;
 	int cla = 0, i;
@@ -238,7 +246,7 @@ wpas_pr_setup_edca_channels(struct wpa_supplicant *wpa_s,
 
 		mode = get_mode(wpa_s->hw.modes, wpa_s->hw.num_modes, o->mode,
 				is_6ghz_op_class(o->op_class));
-		if (!mode || is_6ghz_op_class(o->op_class) ||
+		if (!mode || (!allow_6ghz && is_6ghz_op_class(o->op_class)) ||
 		    !wpas_pr_edca_is_valid_op_class(bw_bitmap, preamble_bitmap,
 						    o))
 			continue;
@@ -353,6 +361,14 @@ static int wpas_pr_pasn_send_mgmt(void *ctx, const u8 *data, size_t data_len,
 }
 
 
+static void wpas_pr_device_found(void *ctx, const struct pr_device *dev)
+{
+	struct wpa_supplicant *wpa_s = ctx;
+
+	wpas_notify_pr_device_found(wpa_s, dev);
+}
+
+
 static void wpas_pr_pasn_negotiation_started(void *ctx, const u8 *peer_addr,
 					     u8 role, u8 protocol_type)
 {
@@ -397,6 +413,7 @@ static void wpas_pr_ranging_session_timeout(void *eloop_ctx, void *timeout_ctx)
 	wpas_pr_clear_ranging_params(pr);
 
 	wpas_pr_pd_stop(wpa_s);
+	wpas_notify_pr_ranging_terminated(wpa_s, PR_SESSION_END_TIMEOUT);
 }
 
 
@@ -535,6 +552,7 @@ static void wpas_pr_ranging_params(void *ctx, const u8 *dev_addr,
 	 * Cleanup happens on COMPLETE event or session timeout.
 	 */
 	eloop_cancel_timeout(wpas_pr_pasn_timeout, wpa_s, NULL);
+	wpas_pr_pasn_auth_work_done(wpa_s);
 
 	/* Trigger ranging measurement after successful PASN authentication */
 	if (wpas_pr_trigger_ranging(wpa_s, peer_addr, freq, op_class,
@@ -663,7 +681,8 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 
 	wpas_pr_setup_edca_channels(wpa_s, &pr.edca_channels,
 				    capa->pd_bandwidths,
-				    capa->pd_preambles);
+				    capa->pd_preambles,
+				    pr.support_6ghz);
 	pr.ntb_format_and_bw =
 		wpas_pr_best_ntb_format_bw(capa->pd_bandwidths,
 					   capa->pd_preambles);
@@ -695,6 +714,7 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 	pr.pasn_result = wpas_pr_pasn_result;
 	pr.get_ranging_params = wpas_pr_ranging_params;
 	pr.set_keys = wpas_pr_pasn_set_keys;
+	pr.device_found = wpas_pr_device_found;
 	pr.clear_keys = wpas_pr_pasn_clear_keys;
 
 	pr.secure_he_ltf = wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SEC_LTF_STA;
@@ -768,6 +788,8 @@ void wpas_pr_deinit(struct wpa_supplicant *wpa_s)
 
 #ifdef CONFIG_PASN
 	eloop_cancel_timeout(wpas_pr_pasn_timeout, wpa_s, NULL);
+	eloop_cancel_timeout(wpas_pr_pasn_roc_total_timeout, wpa_s, NULL);
+	eloop_cancel_timeout(wpas_pr_pasn_auth_retry_timeout, wpa_s, NULL);
 #endif /* CONFIG_PASN */
 	eloop_cancel_timeout(wpas_pr_ranging_session_timeout, wpa_s, NULL);
 }
@@ -859,6 +881,8 @@ void wpas_pr_measurement_complete(struct wpa_supplicant *wpa_s,
 	wpas_notify_pr_ranging_complete(wpa_s, complete->cookie);
 	wpas_pr_clear_ranging_params(pr);
 	wpas_pr_pd_stop(wpa_s);
+	wpas_notify_pr_ranging_terminated(wpa_s,
+					  PR_SESSION_END_PEER_COMPLETE);
 }
 
 
@@ -980,6 +1004,25 @@ static void wpas_pr_pasn_cancel_auth_work(struct wpa_supplicant *wpa_s)
 
 
 /**
+ * wpas_pr_pasn_auth_work_done - Release PASN auth radio work
+ */
+static void wpas_pr_pasn_auth_work_done(struct wpa_supplicant *wpa_s)
+{
+	struct wpa_pr_pasn_auth_work *awork;
+
+	if (!wpa_s->pr_pasn_auth_work)
+		return;
+
+	awork = wpa_s->pr_pasn_auth_work->ctx;
+	wpas_pr_pasn_free_auth_work(awork);
+	wpa_s->pr_pasn_auth_work->ctx = NULL;
+	radio_work_done(wpa_s->pr_pasn_auth_work);
+	wpa_s->pr_pasn_auth_work = NULL;
+	eloop_cancel_timeout(wpas_pr_pasn_auth_retry_timeout, wpa_s, NULL);
+}
+
+
+/**
  * wpas_pr_pasn_roc_work_done - Idempotent helper to complete ROC radio work
  */
 static void wpas_pr_pasn_roc_work_done(struct wpa_supplicant *wpa_s)
@@ -998,6 +1041,40 @@ static void wpas_pr_pasn_roc_work_done(struct wpa_supplicant *wpa_s)
 
 
 /**
+ * wpas_pr_cancel_roc - Stop all responder ROC activity, both active and queued
+ *
+ * Cancels any in-progress driver ROC, releases the active radio work item,
+ * and removes any pending pr-pasn-roc work items that have not yet started.
+ * Safe to call when no ROC is active; all sub-operations are idempotent.
+ * Must NOT be called from within a pr-pasn-roc radio work callback (deinit
+ * path) as that would cause re-entrant radio_remove_works() ->
+ * radio_work_free().
+ */
+static void wpas_pr_cancel_roc(struct wpa_supplicant *wpa_s)
+{
+	wpa_drv_cancel_remain_on_channel(wpa_s);
+	wpa_s->off_channel_freq = 0;
+	wpa_s->roc_waiting_drv_freq = 0;
+	wpas_pr_pasn_roc_work_done(wpa_s);
+	radio_remove_works(wpa_s, "pr-pasn-roc", 0);
+}
+
+
+/**
+ * wpas_pr_pasn_abort_responder - Cancel the responder PASN session and clean
+ * up all associated state. Safe to call from any responder error path; calling
+ * eloop_cancel_timeout() on an already-expired timer is a no-op.
+ */
+static void wpas_pr_pasn_abort_responder(struct wpa_supplicant *wpa_s)
+{
+	eloop_cancel_timeout(wpas_pr_pasn_roc_total_timeout, wpa_s, NULL);
+	wpa_s->pr_responder_mode = false;
+	os_memset(wpa_s->pr_responder_src_addr, 0, ETH_ALEN);
+	wpas_pr_clear_ranging_params(wpa_s->global->pr);
+}
+
+
+/**
  * wpas_pr_pasn_roc_total_timeout - Total ROC budget expiry; stop responder
  */
 static void wpas_pr_pasn_roc_total_timeout(void *eloop_ctx, void *timeout_ctx)
@@ -1006,15 +1083,10 @@ static void wpas_pr_pasn_roc_total_timeout(void *eloop_ctx, void *timeout_ctx)
 
 	wpa_printf(MSG_DEBUG,
 		   "PR PASN: Total ROC budget expired, stopping responder listen");
-	wpa_s->pr_responder_mode = false;
-	os_memset(wpa_s->pr_responder_src_addr, 0, ETH_ALEN);
 
-	if (wpa_s->pr_roc_work) {
-		wpa_drv_cancel_remain_on_channel(wpa_s);
-		wpa_s->off_channel_freq = 0;
-		wpa_s->roc_waiting_drv_freq = 0;
-		wpas_pr_pasn_roc_work_done(wpa_s);
-	}
+	wpas_pr_cancel_roc(wpa_s);
+	wpas_pr_pasn_abort_responder(wpa_s);
+	wpas_notify_pr_ranging_terminated(wpa_s, PR_SESSION_END_NEG_FAILED);
 }
 
 
@@ -1044,10 +1116,7 @@ static void wpas_pr_pasn_roc_start_cb(struct wpa_radio_work *work, int deinit)
 		 * regardless of whether the work was started or not - the
 		 * ROC will never fire now.
 		 */
-		eloop_cancel_timeout(wpas_pr_pasn_roc_total_timeout,
-				     wpa_s, NULL);
-		wpa_s->pr_responder_mode = false;
-		os_memset(wpa_s->pr_responder_src_addr, 0, ETH_ALEN);
+		wpas_pr_pasn_abort_responder(wpa_s);
 		os_free(rwork);
 		work->ctx = NULL;
 		return;
@@ -1069,14 +1138,10 @@ static void wpas_pr_pasn_roc_start_cb(struct wpa_radio_work *work, int deinit)
 				      NULL : rwork->src_addr) < 0) {
 		wpa_printf(MSG_ERROR,
 			   "PR PASN: Failed to start ROC for responder");
-		eloop_cancel_timeout(wpas_pr_pasn_roc_total_timeout,
-				     wpa_s, NULL);
-		wpa_s->pr_responder_mode = false;
-		os_memset(wpa_s->pr_responder_src_addr, 0, ETH_ALEN);
-		os_free(rwork);
-		work->ctx = NULL;
-		radio_work_done(work);
-		wpa_s->pr_roc_work = NULL;
+		wpas_pr_pasn_roc_work_done(wpa_s);
+		wpas_pr_pasn_abort_responder(wpa_s);
+		wpas_notify_pr_ranging_terminated(wpa_s,
+						  PR_SESSION_END_NEG_FAILED);
 		return;
 	}
 
@@ -1100,6 +1165,11 @@ static void wpas_pr_schedule_responder_roc(struct wpa_supplicant *wpa_s,
 	}
 	rwork->freq = freq;
 
+	if (wpa_s->pr_responder_mode &&
+	    !is_zero_ether_addr(wpa_s->pr_responder_src_addr))
+		os_memcpy(rwork->src_addr, wpa_s->pr_responder_src_addr,
+			  ETH_ALEN);
+
 	if (!radio_add_work(wpa_s, freq, "pr-pasn-roc", 0,
 			    wpas_pr_pasn_roc_start_cb, rwork)) {
 		wpa_printf(MSG_INFO, "PR PASN: Failed to reschedule ROC");
@@ -1109,9 +1179,7 @@ static void wpas_pr_schedule_responder_roc(struct wpa_supplicant *wpa_s,
 	return;
 
 fail:
-	wpa_s->pr_responder_mode = false;
-	os_memset(wpa_s->pr_responder_src_addr, 0, ETH_ALEN);
-	eloop_cancel_timeout(wpas_pr_pasn_roc_total_timeout, wpa_s, NULL);
+	wpas_pr_pasn_abort_responder(wpa_s);
 }
 
 
@@ -1146,6 +1214,8 @@ static void wpas_pr_pasn_timeout(void *eloop_ctx, void *timeout_ctx)
 {
 	struct wpa_supplicant *wpa_s = eloop_ctx;
 
+	eloop_cancel_timeout(wpas_pr_pasn_auth_retry_timeout, wpa_s, NULL);
+
 	if (wpa_s->pr_pasn_auth_work) {
 		wpas_pr_pasn_cancel_auth_work(wpa_s);
 		wpa_s->pr_pasn_auth_work = NULL;
@@ -1159,7 +1229,10 @@ static void wpas_pr_pasn_timeout(void *eloop_ctx, void *timeout_ctx)
 	 */
 	wpas_pr_pd_stop(wpa_s);
 
+	wpas_pr_clear_ranging_params(wpa_s->global->pr);
+
 	wpa_printf(MSG_DEBUG, "PR: PASN timed out");
+	wpas_notify_pr_ranging_terminated(wpa_s, PR_SESSION_END_NEG_FAILED);
 }
 
 
@@ -1172,8 +1245,12 @@ static void wpas_pr_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	const u8 *peer_addr = NULL;
 
 	if (deinit) {
-		if (!work->started)
+		if (work->started) {
 			eloop_cancel_timeout(wpas_pr_pasn_timeout, wpa_s, NULL);
+			eloop_cancel_timeout(wpas_pr_pasn_auth_retry_timeout,
+					     wpa_s, NULL);
+			wpa_s->pr_pasn_auth_work = NULL;
+		}
 
 		wpas_pr_pasn_free_auth_work(awork);
 		work->ctx = NULL;
@@ -1193,7 +1270,8 @@ static void wpas_pr_pasn_auth_start_cb(struct wpa_radio_work *work, int deinit)
 	}
 
 	eloop_cancel_timeout(wpas_pr_pasn_timeout, wpa_s, NULL);
-	eloop_register_timeout(2, 0, wpas_pr_pasn_timeout, wpa_s, NULL);
+	eloop_register_timeout(PR_PASN_AUTH_TIMEOUT, 0, wpas_pr_pasn_timeout,
+			       wpa_s, NULL);
 	wpa_s->pr_pasn_auth_work = work;
 	return;
 
@@ -1203,6 +1281,7 @@ fail:
 	radio_work_done(work);
 	/* Stop PD wdev after radio_work_done() to avoid use-after-free */
 	wpas_pr_pd_stop(wpa_s);
+	wpas_pr_clear_ranging_params(wpa_s->global->pr);
 }
 
 
@@ -1570,11 +1649,35 @@ int wpas_pr_pasn_auth_tx_status(struct wpa_supplicant *wpa_s, const u8 *data,
 				size_t data_len, bool acked)
 {
 	struct pr_data *pr = wpa_s->global->pr;
+	int ret;
 
 	if (!wpa_s->pr_pasn_auth_work && is_zero_ether_addr(wpa_s->pd_addr))
 		return -1;
 
-	return pr_pasn_auth_tx_status(pr, data, data_len, acked);
+	ret = pr_pasn_auth_tx_status(pr, data, data_len, acked);
+	if (ret == 2) {
+		eloop_cancel_timeout(wpas_pr_pasn_auth_retry_timeout, wpa_s,
+				     NULL);
+		eloop_register_timeout(0,
+				       PR_PASN_AUTH1_RETRY_INTERVAL_MS * 1000,
+				       wpas_pr_pasn_auth_retry_timeout,
+				       wpa_s, NULL);
+		return 0;
+	}
+
+	return ret;
+}
+
+
+static void wpas_pr_pasn_auth_retry_timeout(void *eloop_ctx, void *timeout_ctx)
+{
+	struct wpa_supplicant *wpa_s = eloop_ctx;
+	struct pr_data *pr = wpa_s->global->pr;
+
+	if (!pr || !pr->pr_pasn_params)
+		return;
+
+	pr_pasn_auth_retransmit(pr, pr->pr_pasn_params->peer_addr);
 }
 
 
@@ -1604,6 +1707,7 @@ int wpas_pr_pasn_auth_rx(struct wpa_supplicant *wpa_s,
 			 int freq)
 {
 	struct pr_data *pr = wpa_s->global->pr;
+	int ret;
 
 	if (!pr)
 		return -2;
@@ -1634,18 +1738,13 @@ int wpas_pr_pasn_auth_rx(struct wpa_supplicant *wpa_s,
 			/*
 			 * Cancel ROC on the listening interface; the dedicated
 			 * PR interface (if created) will handle all subsequent
-			 * frames. Then complete the radio work item so the
-			 * radio is released for other operations.
-			 *
-			 * wpas_pr_cancel_remain_on_channel_cb() may also fire
-			 * asynchronously when the driver processes the cancel
-			 * request, but wpas_pr_pasn_roc_work_done() is
-			 * idempotent (no-op if pr_roc_work is already NULL).
+			 * frames. wpas_pr_cancel_roc() also flushes any pending
+			 * pr-pasn-roc chunks that were queued but not yet
+			 * started (M1 can arrive between two ROC chunks when
+			 * pr_roc_work is already NULL but a next chunk is
+			 * already queued).
 			 */
-			wpa_drv_cancel_remain_on_channel(wpa_s);
-			wpa_s->off_channel_freq = 0;
-			wpa_s->roc_waiting_drv_freq = 0;
-			wpas_pr_pasn_roc_work_done(wpa_s);
+			wpas_pr_cancel_roc(wpa_s);
 
 			/* Clear responder mode */
 			wpa_s->pr_responder_mode = false;
@@ -1656,7 +1755,18 @@ int wpas_pr_pasn_auth_rx(struct wpa_supplicant *wpa_s,
 		}
 	}
 
-	return pr_pasn_auth_rx(pr, mgmt, len, freq);
+	ret = pr_pasn_auth_rx(pr, mgmt, len, freq);
+
+	if (ret < 0) {
+		eloop_cancel_timeout(wpas_pr_pasn_timeout, wpa_s, NULL);
+		wpas_pr_pasn_auth_work_done(wpa_s);
+		wpas_pr_pd_stop(wpa_s);
+		wpas_pr_clear_ranging_params(wpa_s->global->pr);
+		wpas_notify_pr_ranging_terminated(wpa_s,
+						  PR_SESSION_END_NEG_FAILED);
+	}
+
+	return ret;
 }
 
 
@@ -1685,21 +1795,17 @@ void wpas_pr_abort_ranging(struct wpa_supplicant *wpa_s)
 	wpas_pr_pasn_cancel_auth_work(wpa_s);
 	wpa_s->pr_pasn_auth_work = NULL;
 	if (wpa_s->pr_responder_mode) {
-		eloop_cancel_timeout(wpas_pr_pasn_roc_total_timeout,
-				     wpa_s, NULL);
-		wpa_drv_cancel_remain_on_channel(wpa_s);
-		wpa_s->off_channel_freq = 0;
-		wpa_s->roc_waiting_drv_freq = 0;
-		wpas_pr_pasn_roc_work_done(wpa_s);
-		wpa_s->pr_responder_mode = false;
-		os_memset(wpa_s->pr_responder_src_addr, 0, ETH_ALEN);
+		wpas_pr_cancel_roc(wpa_s);
+		wpas_pr_pasn_abort_responder(wpa_s);
 	}
 
 	/* Stop PD wdev and cleanup all ranging resources */
 	wpas_pr_pd_stop(wpa_s);
 
+	eloop_cancel_timeout(wpas_pr_pasn_auth_retry_timeout, wpa_s, NULL);
 	/* Free ranging params so a new session can be started */
 	wpas_pr_clear_ranging_params(pr);
+	wpas_notify_pr_ranging_terminated(wpa_s, PR_SESSION_END_USER_ABORT);
 }
 
 #endif /* CONFIG_PASN */

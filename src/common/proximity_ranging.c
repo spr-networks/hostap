@@ -1008,9 +1008,12 @@ static int pr_process_channels(const u8 *channel_list, size_t channel_list_len,
 		os_memcpy(cl->channel, pos, cl->channels);
 		pos += channels;
 		ch->op_classes++;
+		if (ch->op_classes == PR_MAX_OP_CLASSES)
+			break;
 	}
 
-	if (ch->op_classes != op_class_count) {
+	if (ch->op_classes != op_class_count &&
+	    ch->op_classes < PR_MAX_OP_CLASSES) {
 		wpa_printf(MSG_INFO,
 			   "PR: Channel list count mismatch %lu != %d",
 			   ch->op_classes, op_class_count);
@@ -1206,6 +1209,9 @@ void pr_process_usd_elems(struct pr_data *pr, const u8 *ies, u16 ies_len,
 
 	if (msg.dira && msg.dira_len)
 		pr_validate_dira(pr, dev, msg.dira, msg.dira_len);
+
+	if (pr->cfg->device_found)
+		pr->cfg->device_found(pr->cfg->cb_ctx, dev);
 
 	pr_parse_free(&msg);
 }
@@ -1653,12 +1659,14 @@ static int pr_prepare_pasn_pr_elem(struct pr_data *pr, struct wpabuf *extra_ies,
 	if (ranging_type & PR_EDCA_BASED_RANGING) {
 		pr_get_edca_capabilities(pr, &edca_caps);
 		pr_buf_add_edca_capa_info(buf, &edca_caps);
-		pr_copy_channels(&op_channels, &edca_caps.channels, false);
+		pr_copy_channels(&op_channels, &edca_caps.channels,
+				 pr->cfg->support_6ghz);
 	} else if (ranging_type & PR_NTB_OPEN_BASED_RANGING ||
 		   ranging_type & PR_NTB_SECURE_LTF_BASED_RANGING) {
 		pr_get_ntb_capabilities(pr, &ntb_caps);
 		pr_buf_add_ntb_capa_info(buf, &ntb_caps);
-		pr_copy_channels(&op_channels, &ntb_caps.channels, false);
+		pr_copy_channels(&op_channels, &ntb_caps.channels,
+				 pr->cfg->support_6ghz);
 	} else {
 		wpa_printf(MSG_INFO, "PR: Unsupported ranging_type 0x%x",
 			   ranging_type);
@@ -1686,7 +1694,8 @@ static int pr_prepare_pasn_pr_elem(struct pr_data *pr, struct wpabuf *extra_ies,
 		op_mode.channels.op_class[0].channel[0] = forced_op_channel;
 		op_mode.channels.op_class[0].op_class = forced_op_class;
 	} else {
-		pr_copy_channels(&op_mode.channels, &op_channels, false);
+		pr_copy_channels(&op_mode.channels, &op_channels,
+				 pr->cfg->support_6ghz);
 	}
 
 	pr_buf_add_operation_mode(buf, &op_mode);
@@ -2110,6 +2119,14 @@ int pr_pasn_auth_tx_status(struct pr_data *pr, const u8 *data, size_t data_len,
 		   MAC2STR(mgmt->da), acked);
 
 	ret = wpa_pasn_auth_tx_status(pasn, data, data_len, acked);
+
+	/*
+	 * Authentication frame 1 was not acked; return to caller to schedule a
+	 * retransmission. Preserve pasn->frame for the retry.
+	 */
+	if (ret == 2)
+		return ret;
+
 	if (ret == 1 && acked && pr->cfg->pasn_result)
 		pr->cfg->pasn_result(pr->cfg->cb_ctx, dev->ranging_role,
 				     dev->protocol_type, dev->final_op_class,
@@ -2149,6 +2166,23 @@ out:
 	pasn->frame = NULL;
 
 	return ret;
+}
+
+
+int pr_pasn_auth_retransmit(struct pr_data *pr, const u8 *addr)
+{
+	struct pr_device *dev;
+	struct pasn_data *pasn;
+
+	dev = pr_get_device(pr, addr);
+	if (!dev || !dev->pasn || !dev->pasn->frame)
+		return -1;
+
+	pasn = dev->pasn;
+	wpa_printf(MSG_DEBUG, "PR PASN: retransmit Authentication frame 1 to "
+		   MACSTR, MAC2STR(addr));
+	return pasn->send_mgmt(pasn->cb_ctx, wpabuf_head(pasn->frame),
+			       wpabuf_len(pasn->frame), 0, pasn->freq, 1000);
 }
 
 
@@ -2229,6 +2263,9 @@ static int pr_process_pasn_ranging_wrapper(struct pr_data *pr,
 		goto end;
 	}
 
+	if (dev->discovery_type == PR_DISCOVERY_TYPE_OOB)
+		dev->pr_caps = caps;
+
 	pr_get_ranging_capabilities(pr, &caps);
 
 	if ((op_mode.protocol_type & PR_EDCA_BASED_RANGING) &&
@@ -2253,6 +2290,9 @@ static int pr_process_pasn_ranging_wrapper(struct pr_data *pr,
 			goto end;
 		}
 
+		if (dev->discovery_type == PR_DISCOVERY_TYPE_OOB)
+			dev->ntb_caps = ntb;
+
 		if (dev->ntb_caps.ista_support)
 			supp_ranging_role |= PR_ISTA_SUPPORT;
 		if (dev->ntb_caps.rsta_support)
@@ -2268,6 +2308,9 @@ static int pr_process_pasn_ranging_wrapper(struct pr_data *pr,
 				   "PR: EDCA capabilities not matching");
 			goto end;
 		}
+
+		if (dev->discovery_type == PR_DISCOVERY_TYPE_OOB)
+			dev->edca_caps = edca;
 
 		if (dev->edca_caps.ista_support)
 			supp_ranging_role |= PR_ISTA_SUPPORT;

@@ -1051,6 +1051,12 @@ static void p2p_search(struct p2p_data *p2p)
 		p2p_dbg(p2p, "Driver is still in Listen state - wait for it to end before continuing");
 		return;
 	}
+
+	if (p2p->pending_listen_freq) {
+		p2p_dbg(p2p, "Clear pending_listen_freq for p2p_search");
+		p2p->pending_listen_freq = 0;
+	}
+
 	p2p->cfg->stop_listen(p2p->cfg->cb_ctx);
 	p2p->pending_listen_wait_drv = false;
 
@@ -4176,6 +4182,17 @@ void p2p_listen_failed(struct p2p_data *p2p, unsigned int freq)
 
 	p2p_dbg(p2p, "Listen failed on freq=%u", freq);
 	p2p->pending_listen_freq = 0;
+	p2p->pending_listen_wait_drv = false;
+
+	if (p2p->state == P2P_SEARCH ||
+	    p2p->state == P2P_CONNECT_LISTEN ||
+	    p2p->state == P2P_WAIT_PEER_CONNECT ||
+	    p2p->state == P2P_WAIT_PEER_IDLE ||
+	    p2p->state == P2P_INVITE_LISTEN) {
+		p2p_dbg(p2p,
+			"Schedule timeout after listen failure to continue state machine");
+		p2p_set_timeout(p2p, 0, 100000);
+	}
 }
 
 
@@ -7139,7 +7156,7 @@ int p2p_pasn_auth_tx_status(struct p2p_data *p2p, const u8 *data,
 	pasn = dev->pasn;
 
 	ret = wpa_pasn_auth_tx_status(pasn, data, data_len, acked);
-	if (ret != 1 && !acked && pasn->frame)
+	if (ret == 2 && pasn->frame)
 		return pasn->send_mgmt(pasn->cb_ctx, wpabuf_head(pasn->frame),
 				       wpabuf_len(pasn->frame), 0, pasn->freq,
 				       1000);

@@ -4222,7 +4222,7 @@ SM_STATE(WPA_PTK, PTKCALCNEGOTIATING)
 	if (wpa_auth_validate_ml_kdes_m2(sm, &kde) < 0) {
 		wpa_sta_disconnect(wpa_auth, sm->addr,
 				   WLAN_REASON_PREV_AUTH_NOT_VALID);
-		return;
+		goto out;
 	}
 
 	if (vlan_id && wpa_key_mgmt_wpa_psk(sm->wpa_key_mgmt) &&
@@ -4621,7 +4621,7 @@ u8 * wpa_auth_ml_group_kdes(struct wpa_state_machine *sm, u8 *pos,
 	}
 
 	if (!sm->mgmt_frame_prot) {
-		wpa_printf(MSG_DEBUG, "RSN: MLO Group KDE len = %ld",
+		wpa_printf(MSG_DEBUG, "RSN: MLO Group KDE len = %td",
 			   pos - start);
 		return pos;
 	}
@@ -4664,7 +4664,7 @@ u8 * wpa_auth_ml_group_kdes(struct wpa_state_machine *sm, u8 *pos,
 	}
 
 	if (!sm->wpa_auth->conf.beacon_prot) {
-		wpa_printf(MSG_DEBUG, "RSN: MLO Group KDE len = %ld",
+		wpa_printf(MSG_DEBUG, "RSN: MLO Group KDE len = %td",
 			   pos - start);
 		return pos;
 	}
@@ -4707,7 +4707,7 @@ u8 * wpa_auth_ml_group_kdes(struct wpa_state_machine *sm, u8 *pos,
 		pos += ml_key_info.links[i].igtk_len;
 	}
 
-	wpa_printf(MSG_DEBUG, "RSN: MLO Group KDE len = %ld", pos - start);
+	wpa_printf(MSG_DEBUG, "RSN: MLO Group KDE len = %td", pos - start);
 	return pos;
 }
 
@@ -4901,7 +4901,7 @@ static u8 * wpa_auth_ml_kdes(struct wpa_state_machine *sm, u8 *pos)
 	}
 
 	wpa_printf(MSG_DEBUG,
-		   "RSN: MLO Link KDEs and RSN Override Link KDEs len = %ld",
+		   "RSN: MLO Link KDEs and RSN Override Link KDEs len = %td",
 		   pos - start);
 	pos = wpa_auth_ml_group_kdes(sm, pos, KDE_ALL_LINKS);
 #endif /* CONFIG_IEEE80211BE */
@@ -8082,6 +8082,7 @@ u8 * wpa_auth_eid_key_delivery(u8 *eid, size_t max_len,
 		gtk = gsm->GTK[gsm->GN - 1];
 		gtk_len = gsm->GTK_len;
 		hdr[0] = gsm->GN & 0x03; /* KeyID bits */
+		hdr[1] = 0;
 		kde = wpa_add_kde(kde, RSN_KEY_DATA_GROUPKEY, hdr, sizeof(hdr),
 				  gtk, gtk_len);
 		kde = ieee80211w_kde_add(sm, kde);

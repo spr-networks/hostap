@@ -6940,6 +6940,24 @@ static int nl80211_create_iface_once(struct wpa_driver_nl80211_data *drv,
 }
 
 
+static int nl80211_use_existing_iface(struct wpa_driver_nl80211_data *drv,
+				      const char *ifname,
+				      enum nl80211_iftype iftype,
+				      const u8 *addr)
+{
+	wpa_printf(MSG_DEBUG, "nl80211: Continue using existing interface %s",
+		   ifname);
+	if (addr && iftype != NL80211_IFTYPE_MONITOR &&
+	    linux_set_ifhwaddr(drv->global->ioctl_sock, ifname, addr) < 0 &&
+	    (linux_set_iface_flags(drv->global->ioctl_sock, ifname, 0) < 0 ||
+	     linux_set_ifhwaddr(drv->global->ioctl_sock, ifname, addr) < 0 ||
+	     linux_set_iface_flags(drv->global->ioctl_sock, ifname, 1) < 0))
+		return -1;
+
+	return -ENFILE;
+}
+
+
 int nl80211_create_iface(struct wpa_driver_nl80211_data *drv,
 			 const char *ifname, enum nl80211_iftype iftype,
 			 const u8 *addr, int wds,
@@ -6948,25 +6966,17 @@ int nl80211_create_iface(struct wpa_driver_nl80211_data *drv,
 {
 	int ret;
 
+	if (use_existing && if_nametoindex(ifname))
+		return nl80211_use_existing_iface(drv, ifname, iftype, addr);
+
 	ret = nl80211_create_iface_once(drv, ifname, iftype, addr, wds, handler,
 					arg);
 
 	/* if error occurred and interface exists already */
 	if (ret < 0 && if_nametoindex(ifname)) {
 		if (use_existing) {
-			wpa_printf(MSG_DEBUG, "nl80211: Continue using existing interface %s",
-				   ifname);
-			if (addr && iftype != NL80211_IFTYPE_MONITOR &&
-			    linux_set_ifhwaddr(drv->global->ioctl_sock, ifname,
-					       addr) < 0 &&
-			    (linux_set_iface_flags(drv->global->ioctl_sock,
-						   ifname, 0) < 0 ||
-			     linux_set_ifhwaddr(drv->global->ioctl_sock, ifname,
-						addr) < 0 ||
-			     linux_set_iface_flags(drv->global->ioctl_sock,
-						   ifname, 1) < 0))
-					return -1;
-			return -ENFILE;
+			return nl80211_use_existing_iface(drv, ifname, iftype,
+							  addr);
 		}
 		wpa_printf(MSG_INFO, "Try to remove and re-create %s", ifname);
 
@@ -7573,6 +7583,8 @@ static int nl80211_connect_common(struct wpa_driver_nl80211_data *drv,
 		}
 
 		drv->assoc_freq = params->freq.freq;
+	} else {
+		drv->assoc_freq = 0;
 	}
 
 	if (params->freq_hint) {
@@ -7929,6 +7941,9 @@ static int nl80211_connect_ext(struct i802_bss *bss,
 		connect_ext_feature_set(features,
 					QCA_CONNECT_EXT_FEATURE_OKC_PMKID_IN_ASSOC);
 	}
+
+	wpa_printf(MSG_DEBUG, "- Roam status synchronization support");
+	connect_ext_feature_set(features, QCA_CONNECT_EXT_FEATURE_ROAM_STATUS);
 
 	if (nla_put(msg, QCA_WLAN_VENDOR_ATTR_CONNECT_EXT_FEATURES,
 		    sizeof(features), features))
@@ -10811,11 +10826,23 @@ static int nl80211_mlo_signal_poll(void *priv,
 	mlo_si->valid_links = drv->sta_mlo_info.valid_links;
 
 	for_each_link(mlo_si->valid_links, i) {
+		/*
+		 * This should be requesting it not for each link, but for
+		 * the MLD address, and then parse out each link data.
+		 * However, that API isn't completed in the kernel yet,
+		 * and some non-upstream drivers erroneously implemented
+		 * a per-link query here. Be compatible with them for now,
+		 * but ignore if this fails since that happens upstream.
+		 *
+		 * Once a correct query is implemented outside the loop,
+		 * this should be skipped if the correct query returned
+		 * the necessary data.
+		 */
 		res = nl80211_get_link_signal(bss,
 					      drv->sta_mlo_info.links[i].bssid,
 					      &mlo_si->links[i].data);
-		if (res != 0)
-			return res;
+		if (res)
+			mlo_si->links[i].data.signal = -WPA_INVALID_NOISE;
 
 		mlo_si->links[i].center_frq1 = -1;
 		mlo_si->links[i].center_frq2 = -1;

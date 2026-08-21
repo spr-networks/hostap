@@ -243,6 +243,11 @@ def test_mbo_assoc_disallow(dev, apdev, params):
 
     dev[0].connect("MBO", key_mgmt="NONE", scan_freq="2412")
 
+    dev[0].request("DISCONNECT")
+    dev[0].wait_disconnected()
+    hapd1.disable()
+    hapd2.disable()
+
     filter = f'wlan.fc.type == 0 && wlan.fc.type_subtype == 0x00 && frame.number > {frame_number.rstrip()}'
     out = run_tshark(os.path.join(params['logdir'], "hwsim0.pcapng"),
                      filter, wait=False)

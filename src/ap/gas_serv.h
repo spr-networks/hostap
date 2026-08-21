@@ -68,6 +68,8 @@
 #define ANQP_REQ_MBO_CELL_DATA_CONN_PREF \
 	(BIT(29) << MBO_ANQP_SUBTYPE_CELL_CONN_PREF)
 
+#define GAS_DIALOG_MAX 8 /* Max concurrent dialog number */
+
 struct gas_dialog_info {
 	u8 valid;
 	struct wpabuf *sd_resp; /* Fragmented response */
@@ -78,12 +80,14 @@ struct gas_dialog_info {
 	int dpp; /* whether this is a DPP Config Response */
 };
 
-struct hostapd_data;
+struct gas_peer {
+	struct dl_list list; /* list entry in hapd->gas_peers */
+	u8 addr[ETH_ALEN];
+	u8 gas_dialog_next;
+	struct gas_dialog_info gas_dialog[GAS_DIALOG_MAX];
+};
 
-struct gas_dialog_info *
-gas_serv_dialog_find(struct hostapd_data *hapd, const u8 *addr,
-		     u8 dialog_token);
-void gas_serv_dialog_clear(struct gas_dialog_info *dialog);
+struct hostapd_data;
 
 int gas_serv_init(struct hostapd_data *hapd);
 void gas_serv_deinit(struct hostapd_data *hapd);

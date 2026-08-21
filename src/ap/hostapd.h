@@ -530,6 +530,11 @@ struct hostapd_data {
 
 	u64 scan_cookie; /* Scan instance identifier for the ongoing HT40 scan
 			  */
+
+#if defined(CONFIG_INTERWORKING) || defined(CONFIG_DPP)
+	bool gas_serv_initialized;
+	struct dl_list gas_peers; /* dl_list of struct gas_peer */
+#endif /* CONFIG_INTERWORKING || CONFIG_DPP */
 };
 
 
@@ -761,6 +766,35 @@ struct hostapd_iface {
 	/* Use assisted DFS functionality from the driver. This is used only
 	 * in wpa_supplicant builds for P2P GO functionality. */
 	bool assisted_dfs;
+
+#ifdef CONFIG_AFC
+	struct wpabuf *afc_request;
+	char *afc_response;
+	struct {
+		unsigned int request_id;
+		int timeout;
+		unsigned int num_freq_range;
+		struct afc_freq_range_elem {
+			int low_freq;
+			int high_freq;
+			/**
+			 * Maximum EIRP power spectral density received from
+			 * the AFC coordinator for this band
+			 */
+			double max_psd;
+		} *freq_range;
+		unsigned int num_chan_info;
+		struct afc_chan_info_elem {
+			int chan;
+			/**
+			 * Maximum EIRP power received from the AFC coordinator
+			 * for this channel for each op_class
+			 */
+			double power[5];
+		} *chan_info_list;
+		bool data_valid;
+	} afc;
+#endif /* CONFIG_AFC */
 };
 
 /* hostapd.c */
@@ -817,6 +851,38 @@ void hostapd_ocv_check_csa_sa_query(void *eloop_ctx, void *timeout_ctx);
 
 void hostapd_switch_color(struct hostapd_data *hapd, u64 bitmap);
 void hostapd_cleanup_cca_params(struct hostapd_data *hapd);
+#ifdef CONFIG_AFC
+int hostap_afc_get_chan_max_eirp_power(struct hostapd_iface *iface, bool psd,
+				       int *power);
+int hostapd_afc_handle_request(struct hostapd_iface *iface);
+void hostapd_afc_send_request(struct hostapd_iface *iface);
+void hostapd_afc_stop(struct hostapd_iface *iface);
+void hostap_afc_disable_channels(struct hostapd_iface *iface);
+#else /* CONFIG_AFC */
+static inline int
+hostap_afc_get_chan_max_eirp_power(struct hostapd_iface *iface, bool psd,
+				   int *power)
+{
+	return -EINVAL;
+}
+
+static inline int hostapd_afc_handle_request(struct hostapd_iface *iface)
+{
+	return 1;
+}
+
+static inline void hostapd_afc_send_request(struct hostapd_iface *iface)
+{
+}
+
+static inline void hostapd_afc_stop(struct hostapd_iface *iface)
+{
+}
+
+static inline void hostap_afc_disable_channels(struct hostapd_iface *iface)
+{
+}
+#endif /* CONFIG_AFC */
 
 /* utils.c */
 int hostapd_register_probereq_cb(struct hostapd_data *hapd,

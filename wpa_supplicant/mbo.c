@@ -493,6 +493,18 @@ void wpas_mbo_ie_trans_req(struct wpa_supplicant *wpa_s, const u8 *mbo_ie,
 	    mbo_ie[3] != MBO_OUI_TYPE)
 		return;
 
+	/* MBO mandates use of PMF when RSN is enabled and we disable MBO for an
+	 * association if PMF cannot be negotiated. However, that might not
+	 * happen if the AP does not advertise support for MBO and still ends up
+	 * including MBO element in BTM. Cover that unexpected behavior
+	 * explicitly here. */
+	if (wpa_s->key_mgmt != WPA_KEY_MGMT_NONE &&
+	    !wpa_sm_pmf_enabled(wpa_s->wpa)) {
+		wpa_printf(MSG_DEBUG,
+			   "MBO: Ignore MBO element in BTM request when PMF is not used");
+		return;
+	}
+
 	pos = mbo_ie + 4;
 	len -= 4;
 

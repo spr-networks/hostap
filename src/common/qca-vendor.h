@@ -1615,6 +1615,55 @@ enum qca_radiotap_vendor_ids {
  *
  *	The attributes used with this command are defined in
  *	enum qca_wlan_vendor_attr_crypto_test.
+ *
+ * @QCA_NL80211_VENDOR_SUBCMD_WOW: This vendor subcommand is used both as a
+ *	command and as an event. Userspace sends this command with
+ *	%QCA_WLAN_VENDOR_ATTR_WOW_OPERATION to select the WoWLAN (Wake on
+ *	Wireless LAN) operation to perform. The operation applies to the
+ *	interface on which the command is issued. This command is applicable
+ *	only in station mode.
+ *
+ *	The driver processes the operation asynchronously and later sends this
+ *	subcommand as an event carrying %QCA_WLAN_VENDOR_ATTR_WOW_STATUS to
+ *	notify userspace of the result of the requested operation.
+ *
+ *	The attributes used with this command are defined in
+ *	enum qca_wlan_vendor_attr_wow.
+ *
+ * @QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS: This vendor subcommand is used
+ *	both as a vendor event and as a vendor command to synchronize roam
+ *	authentication state between the driver/firmware and userspace when
+ *	the driver/firmware handles (re)association and userspace handles the
+ *	EAPOL exchange for the roam, e.g., an FT initial mobility domain
+ *	association to the AP with which the station is already associated.
+ *
+ *	In such cases, there is a window between the driver/firmware
+ *	completing IEEE 802.11 authentication with the target AP and userspace
+ *	being notified of the roam (e.g., through
+ *	%QCA_NL80211_VENDOR_SUBCMD_KEY_MGMT_ROAM_AUTH) during which EAPOL
+ *	frames for the new association may already arrive. Since no EAPOL
+ *	exchange takes place for a full FT protocol roam and Key Replay
+ *	Counter tracking is reset on the roam indication, userspace cannot
+ *	otherwise reliably distinguish an EAPOL-Key message 1 for the new
+ *	association from a PTK rekeying message using the previous
+ *	association's replay counter space.
+ *
+ *	This subcommand allows userspace to be notified of, and to acknowledge,
+ *	the authentication step before the (Re)Association Request frame is
+ *	sent, closing that race window. Userspace indicates support for this
+ *	subcommand with %QCA_CONNECT_EXT_FEATURE_ROAM_STATUS.
+ *
+ *	The action is indicated by %QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_ACTION;
+ *	see enum qca_wlan_roam_status_action for the direction and meaning of
+ *	each action value.
+ *
+ *	The attributes used with this subcommand are defined in
+ *	enum qca_wlan_vendor_attr_roam_status.
+ *
+ * @QCA_NL80211_VENDOR_SUBCMD_PREDICTIVE_ROAMING: Vendor subcommand to
+ *	control and manage the predictive roaming feature. The attributes
+ *	used with this subcommand are defined in
+ *	&enum qca_wlan_vendor_attr_predictive_roaming.
  */
 enum qca_nl80211_vendor_subcmds {
 	QCA_NL80211_VENDOR_SUBCMD_UNSPEC = 0,
@@ -1880,6 +1929,9 @@ enum qca_nl80211_vendor_subcmds {
 	QCA_NL80211_VENDOR_SUBCMD_TAS = 279,
 	QCA_NL80211_VENDOR_SUBCMD_HW_BLOCKED_CHANS = 280,
 	QCA_NL80211_VENDOR_SUBCMD_CRYPTO_TEST = 281,
+	QCA_NL80211_VENDOR_SUBCMD_WOW = 282,
+	QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS = 283,
+	QCA_NL80211_VENDOR_SUBCMD_PREDICTIVE_ROAMING = 284,
 };
 
 /* Compatibility defines for previously used subcmd names.
@@ -2287,6 +2339,13 @@ enum qca_wlan_vendor_attr_roam_auth {
 	 * Response frame were transmitted encrypted over the air.
 	 */
 	QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_ASSOC_ENCRYPTED = 16,
+	/* NLA_BINARY attribute, This attribute allows the driver to provide
+	 * KDEs (Key Delivery Elements) received from the AP in the EAPOL-Key
+	 * message 3/4. These KDEs are required by userspace for certain
+	 * operations, such as retrieving the SAE password identifier(s) needed
+	 * for the subsequent SAE connections.
+	 */
+	QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_AP_KDE_INFO = 17,
 
 	/* keep last */
 	QCA_WLAN_VENDOR_ATTR_ROAM_AUTH_AFTER_LAST,
@@ -2737,6 +2796,12 @@ enum qca_wlan_vendor_acs_hw_mode {
  *	%QCA_CONNECT_EXT_FEATURE_OKC_PMKID_IN_ASSOC to indicate mutual support
  *	between driver and supplicant.
  *
+ * @QCA_WLAN_VENDOR_FEATURE_LATENCY_BASED_OPM: Indicates that driver/firmware
+ *	supports QCA_WLAN_VENDOR_OPM_MODE_LATENCY_BASED which allows application
+ *	to configure latency tolerance value based on use-case. OPM mode is
+ *	configured through the
+ *	QCA_WLAN_VENDOR_ATTR_CONFIG_OPTIMIZED_POWER_MANAGEMENT attribute.
+ *
  * @NUM_QCA_WLAN_VENDOR_FEATURES: Number of assigned feature bits
  */
 enum qca_wlan_vendor_features {
@@ -2779,6 +2844,7 @@ enum qca_wlan_vendor_features {
 	QCA_WLAN_VENDOR_FEATURE_SUPPORT_P2P_GC_KEEP_AWAKE_DURING_ONE_SHOT_NOA = 36,
 	QCA_WLAN_VENDOR_FEATURE_SUPPORT_PMKSA_CACHING_PRIVACY = 37,
 	QCA_WLAN_VENDOR_FEATURE_OKC_PMKID_IN_ASSOC = 38,
+	QCA_WLAN_VENDOR_FEATURE_LATENCY_BASED_OPM = 39,
 	NUM_QCA_WLAN_VENDOR_FEATURES /* keep last */
 };
 
@@ -3001,6 +3067,11 @@ enum qca_access_policy {
  * driver will use the default value. Time unit is in milliseconds.
  * @QCA_WLAN_VENDOR_ATTR_TSF_PAD: Attribute used for padding for 64-bit
  * alignment.
+ * @QCA_WLAN_VENDOR_ATTR_TSF_FLAGS: Optional (u32)
+ * This attribute carries an extensible bitmap of parameters for the TSF
+ * capture command. It is applicable when the TSF command is %QCA_TSF_CAPTURE
+ * or %QCA_TSF_SYNC_GET. The flag bits that can be set in this bitmap are
+ * defined in enum qca_tsf_flags.
  */
 enum qca_vendor_attr_tsf_cmd {
 	QCA_WLAN_VENDOR_ATTR_TSF_INVALID = 0,
@@ -3009,6 +3080,7 @@ enum qca_vendor_attr_tsf_cmd {
 	QCA_WLAN_VENDOR_ATTR_TSF_SOC_TIMER_VALUE,
 	QCA_WLAN_VENDOR_ATTR_TSF_SYNC_INTERVAL,
 	QCA_WLAN_VENDOR_ATTR_TSF_PAD,
+	QCA_WLAN_VENDOR_ATTR_TSF_FLAGS,
 	QCA_WLAN_VENDOR_ATTR_TSF_AFTER_LAST,
 	QCA_WLAN_VENDOR_ATTR_TSF_MAX =
 	QCA_WLAN_VENDOR_ATTR_TSF_AFTER_LAST - 1
@@ -3053,6 +3125,18 @@ enum qca_tsf_cmd {
 	QCA_TSF_SYNC_START,
 	QCA_TSF_SYNC_STOP,
 	QCA_TSF_SYNC_GET_CSA_TIMESTAMP,
+};
+
+/**
+ * qca_tsf_flags - Represents the bitmap of flags possible for the
+ * %QCA_WLAN_VENDOR_ATTR_TSF_FLAGS attribute.
+ * @QCA_TSF_GPIO_TOGGLE_HIGH: Configure the target TSF GPIO output level to
+ * high.
+ * @QCA_TSF_GPIO_TOGGLE_LOW: Configure the target TSF GPIO output level to low.
+ */
+enum qca_tsf_flags {
+	QCA_TSF_GPIO_TOGGLE_HIGH = BIT(0),
+	QCA_TSF_GPIO_TOGGLE_LOW = BIT(1),
 };
 
 /**
@@ -10509,6 +10593,8 @@ enum qca_wlan_vendor_attr_wake_stats {
  * @QCA_WLAN_VENDOR_THERMAL_LEVEL_SEVERE: Throttle TX severely.
  * @QCA_WLAN_VENDOR_THERMAL_LEVEL_CRITICAL: Critical thermal level reached.
  * @QCA_WLAN_VENDOR_THERMAL_LEVEL_EMERGENCY: Emergency thermal level reached.
+ * @QCA_WLAN_VENDOR_THERMAL_LEVEL_EMERGENCY_L2: Second emergency thermal level
+ *	reached.
  */
 enum qca_wlan_vendor_thermal_level {
 	QCA_WLAN_VENDOR_THERMAL_LEVEL_NONE = 0,
@@ -10517,6 +10603,7 @@ enum qca_wlan_vendor_thermal_level {
 	QCA_WLAN_VENDOR_THERMAL_LEVEL_SEVERE = 3,
 	QCA_WLAN_VENDOR_THERMAL_LEVEL_CRITICAL = 4,
 	QCA_WLAN_VENDOR_THERMAL_LEVEL_EMERGENCY = 5,
+	QCA_WLAN_VENDOR_THERMAL_LEVEL_EMERGENCY_L2 = 6,
 };
 
 /**
@@ -14933,6 +15020,92 @@ enum qca_wlan_vendor_attr_get_sta_info {
 };
 
 /**
+ * enum qca_predictive_roam_operation - Operations for the predictive
+ * roaming vendor subcommand (%QCA_NL80211_VENDOR_SUBCMD_PREDICTIVE_ROAMING).
+ * The values of this enum are used in
+ * %QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_OPERATION_TYPE.
+ *
+ * @QCA_PREDICTIVE_ROAM_ENABLE: Enable the predictive roaming feature.
+ *	This is a simple on/off toggle; no additional attributes are required.
+ *	When enabled, the driver starts collecting predictive roaming stats.
+ *
+ * @QCA_PREDICTIVE_ROAM_DISABLE: Disable the predictive roaming feature.
+ *	This is a simple on/off toggle; no additional attributes are required.
+ *	The driver stops collecting predictive roaming metrics.
+ *
+ * @QCA_PREDICTIVE_ROAM_GET_STATS: Retrieve the predictive roaming
+ *	statistics. Valid only after %QCA_PREDICTIVE_ROAM_ENABLE has been
+ *	invoked. If invoked before %QCA_PREDICTIVE_ROAM_ENABLE or after
+ *	%QCA_PREDICTIVE_ROAM_DISABLE, the operation fails. The driver
+ *	returns cumulative metric counters since the STA associated, using
+ *	the attributes defined in &enum qca_wlan_vendor_attr_predictive_roaming.
+ */
+enum qca_predictive_roam_operation {
+	QCA_PREDICTIVE_ROAM_ENABLE = 0,
+	QCA_PREDICTIVE_ROAM_DISABLE = 1,
+	QCA_PREDICTIVE_ROAM_GET_STATS = 2,
+};
+
+/**
+ * enum qca_wlan_vendor_attr_predictive_roaming - Attributes used with
+ * %QCA_NL80211_VENDOR_SUBCMD_PREDICTIVE_ROAMING.
+ *
+ * These attributes are used to control the predictive roaming feature and
+ * to retrieve the traffic metrics collected by the driver.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_OPERATION_TYPE: u8 attribute.
+ *	Specifies the operation to perform. The value must be one of the
+ *	values defined in &enum qca_predictive_roam_operation.
+ *	Mandatory for all %QCA_NL80211_VENDOR_SUBCMD_PREDICTIVE_ROAMING
+ *	requests.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_BW_PKT_COUNT: Array of nested
+ *	attributes. Each element reports per-bandwidth traffic statistics
+ *	collected since the STA associated. The bandwidth index follows
+ *	the values defined in enum nl80211_chan_width.
+ *	See &enum qca_wlan_vendor_attr_bw_pkt.
+ *	Only present in the response to %QCA_PREDICTIVE_ROAM_GET_STATS.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_MAX_AVG_UL_DELAY: u32 attribute.
+ *	Maximum uplink packet delay in milliseconds. The driver periodically
+ *	samples the average uplink delay across all TX frames in each sampling
+ *	interval and maintains a rolling window of the most recent 10 such
+ *	samples. This attribute reports the maximum value across that window at
+ *	the time of the %QCA_PREDICTIVE_ROAM_GET_STATS request. An increasing
+ *	UL delay is used as a signal of link degradation by the predictive
+ *	roaming engine. Reports zero if no samples have been collected yet.
+ *	Only present in the response to %QCA_PREDICTIVE_ROAM_GET_STATS.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_TX_RETRIES: u32 attribute.
+ *	Cumulative number of TX retries since the STA associated. A high
+ *	retry count indicates poor link quality and may trigger a predictive
+ *	roam.
+ *	Only present in the response to %QCA_PREDICTIVE_ROAM_GET_STATS.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_TX_PHY_RATE_AVERAGE: u32 attribute.
+ *	Average TX PHY rate in kbps. The driver periodically computes the
+ *	average TX PHY rate over each sampling interval and maintains a
+ *	rolling window of the most recent 10 such interval averages. This
+ *	attribute reports the mean of that window at the time of the
+ *	%QCA_PREDICTIVE_ROAM_GET_STATS request.
+ *	Reports zero if no samples have been collected yet.
+ *	Only present in the response to %QCA_PREDICTIVE_ROAM_GET_STATS.
+ */
+enum qca_wlan_vendor_attr_predictive_roaming {
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_INVALID = 0,
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_OPERATION_TYPE = 1,
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_BW_PKT_COUNT = 2,
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_MAX_AVG_UL_DELAY = 3,
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_TX_RETRIES = 4,
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_TX_PHY_RATE_AVERAGE = 5,
+
+	/* keep last */
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_AFTER_LAST,
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_MAX =
+	QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_AFTER_LAST - 1,
+};
+
+/**
  * enum qca_wlan_vendor_attr_update_sta_info - Defines attributes
  * used by QCA_NL80211_VENDOR_SUBCMD_UPDATE_STA_INFO vendor command.
  *
@@ -15781,12 +15954,14 @@ enum qca_wlan_vendor_attr_mcc_quota {
  * @QCA_WLAN_ROAM_STATS_INVOKE_REASON_NUD_FAILURE: Neighbor unreachable
  *  detection failed when the roam trigger.
  * @QCA_WLAN_ROAM_STATS_INVOKE_REASON_USER_SPACE: Invoke from user space.
+ * @QCA_WLAN_ROAM_STATS_INVOKE_REASON_PREDICTIVE: Invoke from the predictive
+ *  roaming engine.
  */
-
 enum qca_wlan_roam_stats_invoke_reason {
 	QCA_WLAN_ROAM_STATS_INVOKE_REASON_UNDEFINED = 0,
 	QCA_WLAN_ROAM_STATS_INVOKE_REASON_NUD_FAILURE = 1,
 	QCA_WLAN_ROAM_STATS_INVOKE_REASON_USER_SPACE = 2,
+	QCA_WLAN_ROAM_STATS_INVOKE_REASON_PREDICTIVE = 3,
 };
 
 /**
@@ -20259,7 +20434,8 @@ enum qca_wlan_vendor_attr_mcs_pkt {
 
 /**
  * enum qca_wlan_vendor_attr_bw_pkt - Attributes used by
- * %QCA_WLAN_VENDOR_ATTR_GET_STA_INFO_BW_PKT_COUNT.
+ * %QCA_WLAN_VENDOR_ATTR_GET_STA_INFO_BW_PKT_COUNT and
+ * %QCA_WLAN_VENDOR_ATTR_PREDICTIVE_ROAM_BW_PKT_COUNT.
  *
  * @QCA_WLAN_VENDOR_ATTR_BW_PKT_BW_CHAN_WIDTH: u8 attribute. This
  * represents the value of bandwidth. This attribute uses values defined in
@@ -20275,6 +20451,10 @@ enum qca_wlan_vendor_attr_mcs_pkt {
  *
  * @QCA_WLAN_VENDOR_ATTR_BW_PKT_PAD: Attribute used for padding for 64-bit
  * alignment.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_BW_PKT_TX_MSDU_COUNT: u64 attribute. This represents
+ * the number of MSDUs transmitted with the bandwidth specified in
+ * %QCA_WLAN_VENDOR_ATTR_BW_PKT_BW_CHAN_WIDTH.
  */
 enum qca_wlan_vendor_attr_bw_pkt {
 	QCA_WLAN_VENDOR_ATTR_BW_PKT_INVALID = 0,
@@ -20282,6 +20462,7 @@ enum qca_wlan_vendor_attr_bw_pkt {
 	QCA_WLAN_VENDOR_ATTR_BW_PKT_TX_PACKET_COUNT = 2,
 	QCA_WLAN_VENDOR_ATTR_BW_PKT_RX_PACKET_COUNT = 3,
 	QCA_WLAN_VENDOR_ATTR_BW_PKT_PAD = 4,
+	QCA_WLAN_VENDOR_ATTR_BW_PKT_TX_MSDU_COUNT = 5,
 
 	QCA_WLAN_VENDOR_ATTR_BW_PKT_AFTER_LAST,
 	QCA_WLAN_VENDOR_ATTR_BW_PKT_MAX =
@@ -20617,6 +20798,14 @@ enum qca_wlan_vendor_attr_audio_transport_switch {
  * %QCA_WLAN_VENDOR_FEATURE_OKC_PMKID_IN_ASSOC and OKC is enabled in the
  * supplicant configuration.
  *
+ * @QCA_CONNECT_EXT_FEATURE_ROAM_STATUS: Indicates that the supplicant supports
+ * %QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS. When set, the supplicant handles
+ * %QCA_WLAN_ROAM_STATUS_ACTION_AUTH_DONE vendor events from the driver/firmware
+ * by deferring EAPOL frame processing until the matching roam indication is
+ * received, and sends %QCA_WLAN_ROAM_STATUS_ACTION_AUTH_ACK. The
+ * driver/firmware shall use %QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS only if this
+ * flag is set.
+ *
  * @NUM_QCA_WLAN_VENDOR_FEATURES: Number of assigned feature bits.
  */
 enum qca_wlan_connect_ext_features {
@@ -20624,6 +20813,7 @@ enum qca_wlan_connect_ext_features {
 	QCA_CONNECT_EXT_FEATURE_EXT_AUTH_EPPKE = 1,
 	QCA_CONNECT_EXT_FEATURE_EXT_AUTH_8021X = 2,
 	QCA_CONNECT_EXT_FEATURE_OKC_PMKID_IN_ASSOC = 3,
+	QCA_CONNECT_EXT_FEATURE_ROAM_STATUS = 4,
 	NUM_QCA_CONNECT_EXT_FEATURES /* keep last */
 };
 
@@ -25178,6 +25368,124 @@ enum qca_wlan_vendor_attr_crypto_test {
 	QCA_WLAN_VENDOR_ATTR_CRYPTO_TEST_AFTER_LAST,
 	QCA_WLAN_VENDOR_ATTR_CRYPTO_TEST_MAX =
 	QCA_WLAN_VENDOR_ATTR_CRYPTO_TEST_AFTER_LAST - 1,
+};
+
+/**
+ * enum qca_wlan_wow_operation - WoWLAN operation values used with
+ * %QCA_WLAN_VENDOR_ATTR_WOW_OPERATION.
+ *
+ * @QCA_WLAN_WOW_OPERATION_PRE_SUSPEND: Requests the driver to perform any
+ *	internal preparation needed prior to entering WoWLAN suspend.
+ * @QCA_WLAN_WOW_OPERATION_POST_RESUME: Requests the driver to perform any
+ *	internal restoration needed after leaving WoWLAN suspend.
+ */
+enum qca_wlan_wow_operation {
+	QCA_WLAN_WOW_OPERATION_PRE_SUSPEND = 0,
+	QCA_WLAN_WOW_OPERATION_POST_RESUME = 1,
+};
+
+/**
+ * enum qca_wlan_wow_status - WoWLAN operation status values used with
+ * %QCA_WLAN_VENDOR_ATTR_WOW_STATUS.
+ *
+ * @QCA_WLAN_WOW_STATUS_SUCCESS: The requested operation completed successfully.
+ * @QCA_WLAN_WOW_STATUS_FAILURE: The requested operation failed.
+ */
+enum qca_wlan_wow_status {
+	QCA_WLAN_WOW_STATUS_SUCCESS = 0,
+	QCA_WLAN_WOW_STATUS_FAILURE = 1,
+};
+
+/**
+ * enum qca_wlan_vendor_attr_wow - Attributes used by
+ * %QCA_NL80211_VENDOR_SUBCMD_WOW.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_WOW_OPERATION: u8 attribute. Selects the WoWLAN
+ *	operation to perform. Values are defined in enum qca_wlan_wow_operation.
+ *	Mandatory in the command sent from userspace.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_WOW_STATUS: u8 attribute. Sent by the driver in the
+ *	%QCA_NL80211_VENDOR_SUBCMD_WOW event to indicate the result of the
+ *	requested operation. Values are defined in enum qca_wlan_wow_status.
+ */
+enum qca_wlan_vendor_attr_wow {
+	QCA_WLAN_VENDOR_ATTR_WOW_INVALID = 0,
+	QCA_WLAN_VENDOR_ATTR_WOW_OPERATION = 1,
+	QCA_WLAN_VENDOR_ATTR_WOW_STATUS = 2,
+
+	/* keep last */
+	QCA_WLAN_VENDOR_ATTR_WOW_AFTER_LAST,
+	QCA_WLAN_VENDOR_ATTR_WOW_MAX =
+	QCA_WLAN_VENDOR_ATTR_WOW_AFTER_LAST - 1,
+};
+
+/**
+ * enum qca_wlan_roam_status_action - Action values for
+ * %QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_ACTION used with
+ * %QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS.
+ *
+ * @QCA_WLAN_ROAM_STATUS_ACTION_AUTH_DONE: Sent by the driver/firmware as a
+ *	vendor event to indicate that IEEE 802.11 authentication has been
+ *	completed with the target AP for a roam for which the driver/firmware
+ *	will subsequently send the (Re)Association Request frame, but for which
+ *	userspace is responsible for the EAPOL exchange (e.g., FT initial
+ *	mobility domain association to the AP with which the station is already
+ *	associated). Userspace is expected to arm its EAPOL deferral logic and
+ *	then acknowledge this event with a vendor command carrying action
+ *	%QCA_WLAN_ROAM_STATUS_ACTION_AUTH_ACK so that the driver/firmware knows
+ *	it can proceed with sending the (Re)Association Request frame. This
+ *	makes sure that userspace does not misinterpret an EAPOL-Key message 1
+ *	for the new association as a PTK rekeying message for the existing
+ *	association when both use the same BSSID and MLD MAC address.
+ *
+ * @QCA_WLAN_ROAM_STATUS_ACTION_AUTH_ACK: Sent by userspace as a vendor
+ *	command to acknowledge a %QCA_WLAN_ROAM_STATUS_ACTION_AUTH_DONE event
+ *	once userspace has armed its EAPOL deferral logic. Userspace must send
+ *	exactly one AUTH_ACK for each AUTH_DONE event received before the
+ *	driver/firmware proceeds with the (Re)Association Request frame.
+ *
+ * @QCA_WLAN_ROAM_STATUS_ACTION_ROAM_ABORT: Sent by the driver/firmware as a
+ *	vendor event to indicate that the roam attempt for which the most
+ *	recent %QCA_WLAN_ROAM_STATUS_ACTION_AUTH_DONE event was sent has been
+ *	aborted, e.g., due to a failure to complete (re)association or because
+ *	the AUTH_ACK was not received within an implementation-defined timeout.
+ *	This event is sent only after a %QCA_WLAN_ROAM_STATUS_ACTION_AUTH_DONE
+ *	event and only until either a (Re)Association Response frame is received
+ *	for the same roam attempt or this event is sent.
+ */
+enum qca_wlan_roam_status_action {
+	QCA_WLAN_ROAM_STATUS_ACTION_AUTH_DONE = 0,
+	QCA_WLAN_ROAM_STATUS_ACTION_AUTH_ACK = 1,
+	QCA_WLAN_ROAM_STATUS_ACTION_ROAM_ABORT = 2,
+};
+
+/**
+ * enum qca_wlan_vendor_attr_roam_status - Attributes used with
+ * %QCA_NL80211_VENDOR_SUBCMD_ROAM_STATUS.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_ACTION: u8 attribute. Indicates the
+ *	action associated with this event or command. Mandatory in both the
+ *	vendor event and the vendor command directions. Values are defined in
+ *	enum qca_wlan_roam_status_action.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_BSSID: 6-byte MAC address attribute. The
+ *	link-level BSSID of the AP for which the roam authentication status is
+ *	being indicated. Mandatory in all cases.
+ *
+ * @QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AP_MLD_ADDR: 6-byte MAC address
+ *	attribute. AP MLD MAC address of the AP. Optional; present only for
+ *	ML connections.
+ */
+enum qca_wlan_vendor_attr_roam_status {
+	QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_INVALID = 0,
+	QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_ACTION = 1,
+	QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_BSSID = 2,
+	QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AP_MLD_ADDR = 3,
+
+	/* keep last */
+	QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AFTER_LAST,
+	QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_MAX =
+	QCA_WLAN_VENDOR_ATTR_ROAM_STATUS_AFTER_LAST - 1,
 };
 
 #endif /* QCA_VENDOR_H */

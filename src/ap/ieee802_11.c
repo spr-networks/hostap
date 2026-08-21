@@ -152,7 +152,8 @@ static size_t hostapd_supp_rates(struct hostapd_data *hapd, u8 *buf)
 #endif /* CONFIG_IEEE80211AX */
 
 #ifdef CONFIG_IEEE80211BE
-	if (hapd->iconf->ieee80211be && hapd->iconf->require_eht)
+	if (hapd->iconf->ieee80211be && !hapd->conf->disable_11be &&
+	    (hapd->iconf->require_eht || hapd->conf->bss_require_eht))
 		*pos++ = 0x80 | BSS_MEMBERSHIP_SELECTOR_EHT_PHY;
 #endif /* CONFIG_IEEE80211BE */
 
@@ -390,7 +391,7 @@ static int send_auth_reply(struct hostapd_data *hapd, struct sta_info *sta,
 	 */
 	if (auth_alg == WLAN_AUTH_802_1X &&
 	    (resp == WLAN_STATUS_802_1_X_AUTH_SUCCESS ||
-	     sta->eap_auth_data.add_mic)) {
+	     (sta && sta->eap_auth_data.add_mic))) {
 		mic_len = wpa_mic_len(sta->eap_auth_data.akm,
 				      sta->eap_auth_data.pmk_len,
 				      RSN_HASH_NOT_SPECIFIED);
@@ -466,7 +467,7 @@ static int send_auth_reply(struct hostapd_data *hapd, struct sta_info *sta,
 #ifdef CONFIG_IEEE8021X_AUTH
 	if (auth_alg == WLAN_AUTH_802_1X &&
 	    (resp == WLAN_STATUS_802_1_X_AUTH_SUCCESS ||
-	     sta->eap_auth_data.add_mic)) {
+	     (sta && sta->eap_auth_data.add_mic))) {
 		const u8 *frame, *data, *rsne, *rsnxe;
 		u8 data_buf[500], mic[WPA_1X_MAX_MIC_LEN];
 		size_t frame_len, data_len;
@@ -3911,8 +3912,11 @@ static void hapd_initialize_pasn(struct hostapd_data *hapd,
 		pasn_set_own_mld_addr(pasn, hapd->mld->mld_addr);
 #endif /* CONFIG_IEEE80211BE && CONFIG_ENC_ASSOC */
 	pasn_set_peer_addr(pasn, sta->addr);
-	pasn_set_wpa_key_mgmt(pasn, hapd->conf->wpa_key_mgmt);
-	pasn_set_rsn_pairwise(pasn, hapd->conf->rsn_pairwise);
+	pasn_set_wpa_key_mgmt(pasn, hapd->conf->wpa_key_mgmt |
+			      hapd->conf->rsn_override_key_mgmt |
+			      hapd->conf->rsn_override_key_mgmt_2);
+	pasn_set_rsn_pairwise(pasn, hapd->conf->rsn_pairwise |
+			      hapd->conf->rsn_override_pairwise);
 	pasn_set_mfp(pasn, hapd->conf->ieee80211w);
 	os_free(pasn->pasn_groups);
 	pasn->pasn_groups = int_array_dup(hapd->conf->pasn_groups);
@@ -4095,7 +4099,7 @@ static void handle_auth_pasn(struct hostapd_data *hapd, struct sta_info *sta,
 #ifdef CONFIG_P2P
 	struct ieee802_11_elems elems;
 
-	if (len < 24) {
+	if (len < offsetof(struct ieee80211_mgmt, u.auth.variable)) {
 		wpa_printf(MSG_DEBUG, "PASN: Too short Management frame");
 		return;
 	}
@@ -4343,7 +4347,9 @@ static void handle_auth(struct hostapd_data *hapd,
 #endif /* CONFIG_PASN */
 #ifdef CONFIG_ENC_ASSOC
 	      (hapd->conf->wpa &&
-	       (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_EPPKE) &&
+	       ((hapd->conf->wpa_key_mgmt |
+		 hapd->conf->rsn_override_key_mgmt |
+		 hapd->conf->rsn_override_key_mgmt_2) & WPA_KEY_MGMT_EPPKE) &&
 	       hapd->conf->assoc_frame_encryption &&
 	       auth_alg == WLAN_AUTH_EPPKE) ||
 #endif /* CONFIG_ENC_ASSOC */
@@ -4583,10 +4589,10 @@ static void handle_auth(struct hostapd_data *hapd,
 		     !ap_sta_is_authorized(sta)) && sta->wpa_sm) {
 			struct wpa_state_machine *sm = sta->wpa_sm;
 
+			clear_wpa_sm_for_each_partner_link(hapd, sta);
 			clear_wpa_sm_for_all_sta(hapd, sm);
 			wpa_auth_sta_deinit(sm);
 			sta->wpa_sm = NULL;
-			clear_wpa_sm_for_each_partner_link(hapd, sta);
 		}
 	}
 #endif /* CONFIG_IEEE80211BE */
@@ -5536,7 +5542,8 @@ static int __check_assoc_ies(struct hostapd_data *hapd, struct sta_info *sta,
 		if (resp != WLAN_STATUS_SUCCESS)
 			goto out;
 
-		if (hapd->iconf->require_eht && !(sta->flags & WLAN_STA_EHT)) {
+		if ((hapd->iconf->require_eht || hapd->conf->bss_require_eht) &&
+		    !(sta->flags & WLAN_STA_EHT)) {
 			hostapd_logger(hapd, sta->addr,
 				       HOSTAPD_MODULE_IEEE80211,
 				       HOSTAPD_LEVEL_INFO,
@@ -5920,11 +5927,17 @@ skip_pmkid_update:
 		    sta->sae && !sta->sae->h2e &&
 		    ieee802_11_rsnx_capab_len(elems->rsnxe, elems->rsnxe_len,
 					      WLAN_RSNX_CAPAB_SAE_H2E)) {
-			wpa_printf(MSG_INFO, "SAE: " MACSTR
-				   " indicates support for SAE H2E, but did not use it",
-				   MAC2STR(sta->addr));
-			resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
-			goto out;
+			if (hapd->conf->sae_accept_h2e_without_use) {
+				wpa_printf(MSG_INFO, "SAE: " MACSTR
+					   " indicates support for SAE H2E, but did not use it - accepting due to sae_accept_h2e_without_use",
+					   MAC2STR(sta->addr));
+			} else {
+				wpa_printf(MSG_INFO, "SAE: " MACSTR
+					   " indicates support for SAE H2E, but did not use it",
+					   MAC2STR(sta->addr));
+				resp = WLAN_STATUS_UNSPECIFIED_FAILURE;
+				goto out;
+			}
 		}
 #endif /* CONFIG_SAE */
 
@@ -6138,6 +6151,7 @@ out:
 		struct wpa_state_machine *sm = sta->wpa_sm;
 
 #ifdef CONFIG_IEEE80211BE
+		clear_wpa_sm_for_each_partner_link(hapd, sta);
 		clear_wpa_sm_for_all_sta(hapd, sm);
 #endif /* CONFIG_IEEE80211BE */
 
@@ -9314,42 +9328,59 @@ u8 * hostapd_eid_txpower_envelope(struct hostapd_data *hapd, u8 *eid)
 	 */
 	if (is_6ghz_op_class(iconf->op_class)) {
 		enum max_tx_pwr_interpretation tx_pwr_intrpn;
+		int err;
+		int max_eirp_psd = REG_PSD_MAX_TXPOWER_FOR_DEFAULT_CLIENT * 2;
+		int max_eirp_power = iconf->reg_def_cli_eirp;
 
 		/* Same Maximum Transmit Power for all 20 MHz bands */
 		tx_pwr_count = 0;
 		tx_pwr_intrpn = REGULATORY_CLIENT_EIRP_PSD;
 
 		/* Default Transmit Power Envelope for Global Operating Class */
-		if (hapd->iconf->reg_def_cli_eirp_psd != -1)
-			tx_pwr = hapd->iconf->reg_def_cli_eirp_psd;
-		else
-			tx_pwr = REG_PSD_MAX_TXPOWER_FOR_DEFAULT_CLIENT * 2;
+		err = hostap_afc_get_chan_max_eirp_power(iface, true,
+							 &max_eirp_psd);
+		if (err < 0) {
+			if (hapd->iconf->reg_def_cli_eirp_psd != -1)
+				max_eirp_psd =
+					hapd->iconf->reg_def_cli_eirp_psd;
+			else
+				max_eirp_psd =
+					REG_PSD_MAX_TXPOWER_FOR_DEFAULT_CLIENT * 2;
+		}
 
 		eid = hostapd_add_tpe_info(eid, tx_pwr_count, tx_pwr_intrpn,
-					   REG_DEFAULT_CLIENT, tx_pwr);
+					   REG_DEFAULT_CLIENT, max_eirp_psd);
 
 		/* Indoor Access Point must include an additional TPE for
 		 * subordinate devices */
 		if (he_reg_is_indoor(iconf->he_6ghz_reg_pwr_type)) {
-			/* TODO: Extract PSD limits from channel data */
-			if (hapd->iconf->reg_sub_cli_eirp_psd != -1)
-				tx_pwr = hapd->iconf->reg_sub_cli_eirp_psd;
-			else
-				tx_pwr = REG_PSD_MAX_TXPOWER_FOR_SUBORDINATE_CLIENT * 2;
+			if (err < 0) {
+				/* non-AFC connection */
+				if (hapd->iconf->reg_sub_cli_eirp_psd != -1)
+					max_eirp_psd =
+						hapd->iconf->reg_sub_cli_eirp_psd;
+				else
+					max_eirp_psd =
+						REG_PSD_MAX_TXPOWER_FOR_SUBORDINATE_CLIENT * 2;
+			}
 			eid = hostapd_add_tpe_info(eid, tx_pwr_count,
 						   tx_pwr_intrpn,
 						   REG_SUBORDINATE_CLIENT,
-						   tx_pwr);
+						   max_eirp_psd);
 		}
 
-		if (iconf->reg_def_cli_eirp != -1 &&
-		    he_reg_is_sp(iconf->he_6ghz_reg_pwr_type))
-			eid = hostapd_add_tpe_info(
-				eid, tx_pwr_count, REGULATORY_CLIENT_EIRP,
-				REG_DEFAULT_CLIENT,
-				hapd->iconf->reg_def_cli_eirp);
+		if (hostap_afc_get_chan_max_eirp_power(iface, false,
+						       &max_eirp_power)) {
+			max_eirp_power = iconf->reg_def_cli_eirp;
+			if (max_eirp_power == -1 ||
+			    !he_reg_is_sp(iconf->he_6ghz_reg_pwr_type))
+				return eid;
+		}
 
-		return eid;
+		return hostapd_add_tpe_info(eid, tx_pwr_count,
+					    REGULATORY_CLIENT_EIRP,
+					    REG_DEFAULT_CLIENT,
+					    max_eirp_power);
 	}
 #endif /* CONFIG_IEEE80211AX */
 

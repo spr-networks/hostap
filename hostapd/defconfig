@@ -434,3 +434,6 @@ CONFIG_DPP2=y
 # used as part of Robust AV Streaming. At present, this enables DSCP Policy
 # capability handling in hostapd.
 #CONFIG_ROBUST_AV=y
+
+# Automated Frequency Coordination for 6 GHz outdoor
+#CONFIG_AFC=y

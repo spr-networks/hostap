@@ -840,7 +840,7 @@ def test_ap_acs_exclude_6g_non_psc(dev, apdev, params):
         freq = hapd.get_status_field("freq")
         if int(freq) not in [5975, 6055, 6135, 6215, 6295, 6375, 6455, 6535,
                              6615, 6695, 6775, 6855, 6935, 7015, 7095]:
-            raise Exception("Unexpected frequency: %d" % freq)
+            raise Exception("Unexpected frequency: %s" % freq)
         dev[0].set("sae_groups", "")
         dev[0].connect("test-acs", psk="12345678", key_mgmt="SAE-EXT-KEY",
                        ieee80211w="2", scan_freq=freq)

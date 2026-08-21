@@ -110,6 +110,7 @@ const char * event_to_string(enum wpa_event_type event)
 	E2S(NAN_CHAN_EVACUATION);
 	E2S(PEER_MEASUREMENT_RESULT);
 	E2S(PEER_MEASUREMENT_COMPLETE);
+	E2S(ROAM_STATUS);
 	}
 
 	return "UNKNOWN";

@@ -973,6 +973,13 @@ static int eap_ttls_parse_avp(u8 *pos, size_t left,
 	u8 avp_flags, *dpos;
 	size_t dlen;
 
+	if (left < sizeof(*avp)) {
+		wpa_printf(MSG_WARNING,
+			   "EAP-TTLS: Truncated AVP (left=%zu < %zu)",
+			   left, sizeof(*avp));
+		return -1;
+	}
+
 	avp = (struct ttls_avp *) pos;
 	avp_code = be_to_host32(avp->avp_code);
 	avp_length = be_to_host32(avp->avp_length);

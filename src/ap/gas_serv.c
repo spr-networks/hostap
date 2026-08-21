@@ -21,6 +21,10 @@
 #include "gas_serv.h"
 
 
+static void gas_serv_peer_timeout(void *eloop_ctx, void *timeout_ctx);
+static void gas_serv_dialog_clear(struct gas_dialog_info *dia);
+
+
 #ifdef CONFIG_DPP
 static void gas_serv_write_dpp_adv_proto(struct wpabuf *buf)
 {
@@ -43,56 +47,107 @@ static void convert_to_protected_dual(struct wpabuf *msg)
 }
 
 
+static struct gas_peer * gas_serv_get_peer(struct hostapd_data *hapd,
+					   const u8 *addr)
+{
+	struct gas_peer *peer;
+
+	dl_list_for_each(peer, &hapd->gas_peers, struct gas_peer, list) {
+		if (ether_addr_equal(addr, peer->addr))
+			return peer;
+	}
+
+	return NULL;
+}
+
+
+static struct gas_peer * gas_serv_add_peer(struct hostapd_data *hapd,
+					   const u8 *addr)
+{
+	struct gas_peer *peer;
+
+	if (dl_list_len(&hapd->gas_peers) >= hapd->conf->gas_max_peers) {
+		wpa_printf(MSG_DEBUG, "ANQP: No room for additional GAS peers");
+		return NULL;
+	}
+
+	peer = os_zalloc(sizeof(*peer));
+	if (!peer)
+		return NULL;
+
+	wpa_printf(MSG_DEBUG, "ANQP: Add peer entry for " MACSTR,
+		   MAC2STR(peer->addr));
+	os_memcpy(peer->addr, addr, ETH_ALEN);
+	dl_list_add(&hapd->gas_peers, &peer->list);
+
+	return peer;
+}
+
+
+static void gas_serv_remove_peer(struct hostapd_data *hapd,
+				 struct gas_peer *peer)
+{
+	int i;
+
+	wpa_printf(MSG_DEBUG, "ANQP: Remove peer entry for " MACSTR,
+		   MAC2STR(peer->addr));
+	eloop_cancel_timeout(gas_serv_peer_timeout, hapd, peer);
+	dl_list_del(&peer->list);
+	for (i = 0; i < GAS_DIALOG_MAX; i++)
+		gas_serv_dialog_clear(&peer->gas_dialog[i]);
+	os_free(peer);
+}
+
+
+static void gas_serv_peer_timeout(void *eloop_ctx, void *timeout_ctx)
+{
+	struct hostapd_data *hapd = eloop_ctx;
+	struct gas_peer *peer = timeout_ctx;
+
+	wpa_printf(MSG_DEBUG, "ANQP: Peer entry for " MACSTR " expired",
+		   MAC2STR(peer->addr));
+	gas_serv_remove_peer(hapd, peer);
+}
+
+
 static struct gas_dialog_info *
 gas_dialog_create(struct hostapd_data *hapd, const u8 *addr, u8 dialog_token)
 {
-	struct sta_info *sta;
+	struct gas_peer *peer;
 	struct gas_dialog_info *dia = NULL;
 	int i, j;
 
-	sta = ap_get_sta(hapd, addr);
-	if (!sta) {
+	peer = gas_serv_get_peer(hapd, addr);
+	if (!peer) {
 		/*
-		 * We need a STA entry to be able to maintain state for
+		 * We need a peer entry to be able to maintain state for
 		 * the GAS query.
 		 */
-		wpa_printf(MSG_DEBUG, "ANQP: Add a temporary STA entry for "
-			   "GAS query");
-		sta = ap_sta_add(hapd, addr);
-		if (!sta) {
-			wpa_printf(MSG_DEBUG, "Failed to add STA " MACSTR
+		wpa_printf(MSG_DEBUG,
+			   "ANQP: Add a temporary peer entry for GAS query");
+		peer = gas_serv_add_peer(hapd, addr);
+		if (!peer) {
+			wpa_printf(MSG_DEBUG, "Failed to add peer " MACSTR
 				   " for GAS query", MAC2STR(addr));
 			return NULL;
 		}
-		sta->flags |= WLAN_STA_GAS;
-		/*
-		 * The default inactivity is 300 seconds. We don't need
-		 * it to be that long. Use five second timeout and increase this
-		 * with the comeback_delay for testing cases.
-		 */
-		ap_sta_session_timeout(hapd, sta,
-				       hapd->conf->gas_comeback_delay / 1024 +
-				       5);
+
+		eloop_register_timeout(hapd->conf->gas_comeback_delay / 1024 +
+				       5, 0, gas_serv_peer_timeout, hapd, peer);
 	} else {
-		ap_sta_replenish_timeout(hapd, sta, 5);
+		eloop_replenish_timeout(5, 0, gas_serv_peer_timeout,
+					hapd, peer);
 	}
 
-	if (sta->gas_dialog == NULL) {
-		sta->gas_dialog = os_calloc(GAS_DIALOG_MAX,
-					    sizeof(struct gas_dialog_info));
-		if (sta->gas_dialog == NULL)
-			return NULL;
-	}
-
-	for (i = sta->gas_dialog_next, j = 0; j < GAS_DIALOG_MAX; i++, j++) {
+	for (i = peer->gas_dialog_next, j = 0; j < GAS_DIALOG_MAX; i++, j++) {
 		if (i == GAS_DIALOG_MAX)
 			i = 0;
-		if (sta->gas_dialog[i].valid)
+		if (peer->gas_dialog[i].valid)
 			continue;
-		dia = &sta->gas_dialog[i];
+		dia = &peer->gas_dialog[i];
 		dia->valid = 1;
 		dia->dialog_token = dialog_token;
-		sta->gas_dialog_next = (++i == GAS_DIALOG_MAX) ? 0 : i;
+		peer->gas_dialog_next = (++i == GAS_DIALOG_MAX) ? 0 : i;
 		return dia;
 	}
 
@@ -104,25 +159,26 @@ gas_dialog_create(struct hostapd_data *hapd, const u8 *addr, u8 dialog_token)
 }
 
 
-struct gas_dialog_info *
+static struct gas_dialog_info *
 gas_serv_dialog_find(struct hostapd_data *hapd, const u8 *addr,
 		     u8 dialog_token)
 {
-	struct sta_info *sta;
+	struct gas_peer *peer;
 	int i;
 
-	sta = ap_get_sta(hapd, addr);
-	if (!sta) {
-		wpa_printf(MSG_DEBUG, "ANQP: could not find STA " MACSTR,
+	peer = gas_serv_get_peer(hapd, addr);
+	if (!peer) {
+		wpa_printf(MSG_DEBUG, "ANQP: could not find peer " MACSTR,
 			   MAC2STR(addr));
 		return NULL;
 	}
-	for (i = 0; sta->gas_dialog && i < GAS_DIALOG_MAX; i++) {
-		if (sta->gas_dialog[i].dialog_token != dialog_token ||
-		    !sta->gas_dialog[i].valid)
+	for (i = 0; i < GAS_DIALOG_MAX; i++) {
+		if (peer->gas_dialog[i].dialog_token != dialog_token ||
+		    !peer->gas_dialog[i].valid)
 			continue;
-		ap_sta_replenish_timeout(hapd, sta, 5);
-		return &sta->gas_dialog[i];
+		eloop_replenish_timeout(5, 0, gas_serv_peer_timeout,
+					hapd, peer);
+		return &peer->gas_dialog[i];
 	}
 	wpa_printf(MSG_DEBUG, "ANQP: Could not find dialog for "
 		   MACSTR " dialog_token %u", MAC2STR(addr), dialog_token);
@@ -130,7 +186,7 @@ gas_serv_dialog_find(struct hostapd_data *hapd, const u8 *addr,
 }
 
 
-void gas_serv_dialog_clear(struct gas_dialog_info *dia)
+static void gas_serv_dialog_clear(struct gas_dialog_info *dia)
 {
 	wpabuf_free(dia->sd_resp);
 	os_memset(dia, 0, sizeof(*dia));
@@ -140,20 +196,19 @@ void gas_serv_dialog_clear(struct gas_dialog_info *dia)
 static void gas_serv_free_dialogs(struct hostapd_data *hapd,
 				  const u8 *sta_addr)
 {
-	struct sta_info *sta;
+	struct gas_peer *peer;
 	int i;
 
-	sta = ap_get_sta(hapd, sta_addr);
-	if (sta == NULL || sta->gas_dialog == NULL)
+	peer = gas_serv_get_peer(hapd, sta_addr);
+	if (!peer)
 		return;
 
 	for (i = 0; i < GAS_DIALOG_MAX; i++) {
-		if (sta->gas_dialog[i].valid)
+		if (peer->gas_dialog[i].valid)
 			return;
 	}
 
-	os_free(sta->gas_dialog);
-	sta->gas_dialog = NULL;
+	gas_serv_remove_peer(hapd, peer);
 }
 
 
@@ -1933,12 +1988,26 @@ static void gas_serv_rx_public_action(void *ctx, const u8 *buf, size_t len,
 
 int gas_serv_init(struct hostapd_data *hapd)
 {
+	if (hapd->gas_serv_initialized)
+		return 0;
 	hapd->public_action_cb2 = gas_serv_rx_public_action;
 	hapd->public_action_cb2_ctx = hapd;
+	dl_list_init(&hapd->gas_peers);
+	hapd->gas_serv_initialized = true;
 	return 0;
 }
 
 
 void gas_serv_deinit(struct hostapd_data *hapd)
 {
+	struct gas_peer *peer, *tmp;
+
+	if (!hapd->gas_serv_initialized)
+		return;
+
+	dl_list_for_each_safe(peer, tmp, &hapd->gas_peers, struct gas_peer,
+			      list)
+		gas_serv_remove_peer(hapd, peer);
+
+	hapd->gas_serv_initialized = false;
 }

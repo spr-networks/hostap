@@ -1406,7 +1406,8 @@ static struct wpa_ssid * wpas_dpp_add_network(struct wpa_supplicant *wpa_s,
 		if (res == 0 &&
 		    !(capa.key_mgmt_iftype[WPA_IF_STATION] &
 		      WPA_DRIVER_CAPA_KEY_MGMT_SAE) &&
-		    !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SAE)) {
+		    !(wpa_s->drv_flags & WPA_DRIVER_FLAGS_SAE) &&
+		    !(wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SAE_OFFLOAD_STA)) {
 			wpa_printf(MSG_DEBUG,
 				   "DPP: SAE not supported by the driver");
 			return NULL;
@@ -5847,6 +5848,8 @@ void wpas_dpp_push_button_stop(struct wpa_supplicant *wpa_s)
 		wpas_abort_ongoing_scan(wpa_s);
 		wpa_s->scan_res_handler = NULL;
 	}
+
+	offchannel_send_action_done(wpa_s);
 }
 
 #endif /* CONFIG_DPP3 */

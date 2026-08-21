@@ -467,6 +467,7 @@ static int wpa_find_assoc_pmkid_okc(struct wpa_supplicant *wpa_s,
 				     struct rsn_pmksa_cache_entry *cur_pmksa,
 				     int authorized)
 {
+#if !defined(CONFIG_NO_WPA)
 	struct rsn_pmksa_cache_entry *okc_entry;
 	u8 derived_pmkid[PMKID_LEN];
 	const u8 *aa;
@@ -564,6 +565,7 @@ static int wpa_find_assoc_pmkid_okc(struct wpa_supplicant *wpa_s,
 
 	wpa_dbg(wpa_s, MSG_DEBUG,
 		"RSN: OKC derived PMKID does not match any PMKID in (Re)Associaton Request frame RSNE");
+#endif /* !CONFIG_NO_WPA */
 	return -1;
 }
 
@@ -2751,6 +2753,12 @@ static int _wpa_supplicant_event_scan_results(struct wpa_supplicant *wpa_s,
 		wpa_dbg(wpa_s, MSG_DEBUG, "Do not use results from externally requested scan operation for network selection");
 		wpa_scan_results_free(scan_res);
 		return 0;
+	}
+
+	if (data && data->scan_info.aborted) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"Scan was aborted - do not use the incomplete scan results to trigger new operations");
+		goto scan_work_done;
 	}
 
 	if (sme_proc_obss_scan(wpa_s) > 0)
@@ -5025,8 +5033,10 @@ static int wpa_supplicant_event_assoc(struct wpa_supplicant *wpa_s,
 		wpa_supplicant_set_state(wpa_s, WPA_COMPLETED);
 		eapol_sm_notify_portValid(wpa_s->eapol, true);
 		eapol_sm_notify_eap_success(wpa_s->eapol, true);
-	} else if ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_PSK) &&
-		   wpa_key_mgmt_wpa_psk(wpa_s->key_mgmt)) {
+	} else if (((wpa_s->drv_flags & WPA_DRIVER_FLAGS_4WAY_HANDSHAKE_PSK) &&
+		    wpa_key_mgmt_wpa_psk(wpa_s->key_mgmt)) ||
+		   ((wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_OWE_OFFLOAD_STA) &&
+		    wpa_s->key_mgmt == WPA_KEY_MGMT_OWE)) {
 		if (already_authorized) {
 			/*
 			 * We are done; the driver will take care of RSN 4-way
@@ -5309,11 +5319,11 @@ static void wpa_supplicant_event_disassoc_finish(struct wpa_supplicant *wpa_s,
 #ifdef CONFIG_DPP2
 	wpas_dpp_send_conn_status_result(wpa_s, DPP_STATUS_AUTH_FAILURE);
 #endif /* CONFIG_DPP2 */
+	wpa_supplicant_mark_disassoc(wpa_s);
 	if (wpa_supplicant_dynamic_keys(wpa_s)) {
 		wpa_dbg(wpa_s, MSG_DEBUG, "Disconnect event - remove keys");
 		wpa_clear_keys(wpa_s, wpa_s->bssid);
 	}
-	wpa_supplicant_mark_disassoc(wpa_s);
 
 	if (curr)
 		wpa_bss_remove(wpa_s, curr, "Connection to AP lost");
@@ -5883,6 +5893,9 @@ static void wpas_event_deauth(struct wpa_supplicant *wpa_s,
 	}
 
 	wpa_reset_ft_completed(wpa_s->wpa);
+
+	if (wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME)
+		sme_event_deauth(wpa_s, info);
 
 	wpas_event_disconnect(wpa_s, addr, reason_code,
 			      locally_generated, ie, ie_len, 1);
@@ -6867,6 +6880,55 @@ static int wpas_pasn_auth(struct wpa_supplicant *wpa_s,
 	return wpas_pasn_auth_rx(wpa_s, mgmt, len);
 }
 #endif /* CONFIG_PASN */
+
+
+static void wpas_roam_status(struct wpa_supplicant *wpa_s,
+			     struct roam_auth_status *roam)
+{
+	const u8 *connected_addr = wpa_s->valid_links ?
+		wpa_s->ap_mld_addr : wpa_s->bssid;
+	const u8 *event_addr;
+
+	if (!is_zero_ether_addr(roam->ap_mld_addr)) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"roam auth status: action=%d from " MACSTR
+			" ap_mld_addr=" MACSTR,
+			roam->action, MAC2STR(roam->bssid),
+			MAC2STR(roam->ap_mld_addr));
+		event_addr = roam->ap_mld_addr;
+	} else {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"roam auth status: action=%d from " MACSTR,
+			roam->action, MAC2STR(roam->bssid));
+		event_addr = roam->bssid;
+	}
+
+	if (!ether_addr_equal(event_addr, connected_addr)) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"roam auth status: event_addr=" MACSTR
+			" does not match connected_addr=" MACSTR
+			" - ignoring",
+			MAC2STR(event_addr), MAC2STR(connected_addr));
+		return;
+	}
+
+	if (roam->action == ROAM_AUTH_STATUS_ACTION_AUTH_DONE) {
+		/*
+		 * Defer EAPOL frame processing until the matching roam
+		 * indication is received to avoid misinterpreting an
+		 * EAPOL-Key message 1 for the new association as a PTK
+		 * rekeying message for the current association. The
+		 * AUTH_DONE acknowledgement is handled internally in the
+		 * driver wrapper.
+		 */
+		wpa_s->ext_auth_to_same_bss =
+			wpa_s->wpa_state > WPA_ASSOCIATED;
+	} else if (roam->action == ROAM_AUTH_STATUS_ACTION_ROAM_ABORT) {
+		wpa_s->ext_auth_to_same_bss = false;
+		wpabuf_free(wpa_s->pending_eapol_rx);
+		wpa_s->pending_eapol_rx = NULL;
+	}
+}
 
 
 void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
@@ -7905,6 +7967,10 @@ void wpa_supplicant_event(void *ctx, enum wpa_event_type event,
 					 &data->nan_chan_evacuation_info);
 		break;
 #endif /* CONFIG_NAN */
+	case EVENT_ROAM_STATUS:
+		if (data)
+			wpas_roam_status(wpa_s, &data->roam_auth_status);
+		break;
 	default:
 		wpa_msg(wpa_s, MSG_INFO, "Unknown event %d", event);
 		break;
