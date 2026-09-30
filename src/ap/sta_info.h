@@ -92,18 +92,6 @@ struct eap_over_auth_data {
 };
 
 #define EHT_ML_MAX_STA_PROF_LEN 1024
-struct mld_info {
-	bool mld_sta;
-
-	struct ml_common_info {
-		u8 mld_addr[ETH_ALEN];
-		u16 medium_sync_delay;
-		u16 eml_capa;
-		u16 mld_capa;
-	} common_info;
-
-	struct mld_link_info links[MAX_NUM_MLD_LINKS];
-};
 
 struct dscp_policy_state {
 	size_t offset;
@@ -118,6 +106,11 @@ struct sta_info {
 	be32 ipaddr;
 	struct dl_list ip6addr; /* list head for struct ip6addr */
 	u16 aid; /* STA's unique AID (1 .. 2007) or 0 if not yet assigned */
+#ifdef CONFIG_IEEE80211BE
+	u16 wds_ifname_id; /* WDS interface name identifier (1 .. 2007) for MLO
+			    * WDS stations, used to generate unique interface
+			    * names. 0 if not yet assigned. */
+#endif /* CONFIG_IEEE80211BE */
 	u16 disconnect_reason_code; /* RADIUS server override */
 	unsigned long long flags; /* Bitfield of WLAN_STA_* */
 	u16 capability;
@@ -343,6 +336,7 @@ struct sta_info {
 
 #ifdef CONFIG_PASN
 	struct pasn_data *pasn;
+	bool sec_prof_used;
 #endif /* CONFIG_PASN */
 
 #ifdef CONFIG_IEEE80211BE

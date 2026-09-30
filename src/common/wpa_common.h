@@ -29,6 +29,8 @@
 
 #define OWE_DH_GROUP 19
 
+#define PASN_GROUP_NOT_SPECIFIED 0
+
 enum rsn_hash_alg {
 	RSN_HASH_NOT_SPECIFIED,
 	RSN_HASH_SHA1,
@@ -87,7 +89,8 @@ WPA_CIPHER_BIP_CMAC_256)
 #define RSN_AUTH_KEY_MGMT_FT_SAE RSN_SELECTOR(0x00, 0x0f, 0xac, 9)
 #define RSN_AUTH_KEY_MGMT_802_1X_SUITE_B RSN_SELECTOR(0x00, 0x0f, 0xac, 11)
 #define RSN_AUTH_KEY_MGMT_802_1X_SUITE_B_192 RSN_SELECTOR(0x00, 0x0f, 0xac, 12)
-#define RSN_AUTH_KEY_MGMT_FT_802_1X_SHA384 RSN_SELECTOR(0x00, 0x0f, 0xac, 13)
+#define RSN_AUTH_KEY_MGMT_FT_802_1X_SUITE_B_192 \
+	RSN_SELECTOR(0x00, 0x0f, 0xac, 13)
 #define RSN_AUTH_KEY_MGMT_FILS_SHA256 RSN_SELECTOR(0x00, 0x0f, 0xac, 14)
 #define RSN_AUTH_KEY_MGMT_FILS_SHA384 RSN_SELECTOR(0x00, 0x0f, 0xac, 15)
 #define RSN_AUTH_KEY_MGMT_FT_FILS_SHA256 RSN_SELECTOR(0x00, 0x0f, 0xac, 16)
@@ -96,12 +99,13 @@ WPA_CIPHER_BIP_CMAC_256)
 #define RSN_AUTH_KEY_MGMT_FT_PSK_SHA384 RSN_SELECTOR(0x00, 0x0f, 0xac, 19)
 #define RSN_AUTH_KEY_MGMT_PSK_SHA384 RSN_SELECTOR(0x00, 0x0f, 0xac, 20)
 #define RSN_AUTH_KEY_MGMT_PASN RSN_SELECTOR(0x00, 0x0f, 0xac, 21)
-#define RSN_AUTH_KEY_MGMT_FT_802_1X_SHA384_UNRESTRICTED \
-	RSN_SELECTOR(0x00, 0x0f, 0xac, 22)
+#define RSN_AUTH_KEY_MGMT_FT_802_1X_SHA384 RSN_SELECTOR(0x00, 0x0f, 0xac, 22)
 #define RSN_AUTH_KEY_MGMT_802_1X_SHA384 RSN_SELECTOR(0x00, 0x0f, 0xac, 23)
 #define RSN_AUTH_KEY_MGMT_SAE_EXT_KEY RSN_SELECTOR(0x00, 0x0f, 0xac, 24)
 #define RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY RSN_SELECTOR(0x00, 0x0f, 0xac, 25)
 #define RSN_AUTH_KEY_MGMT_EPPKE RSN_SELECTOR(0x00, 0x0f, 0xac, 29)
+#define RSN_AUTH_KEY_MGMT_PQC RSN_SELECTOR(0x00, 0x0f, 0xac, 31)
+#define RSN_AUTH_KEY_MGMT_FT_PQC RSN_SELECTOR(0x00, 0x0f, 0xac, 32)
 
 #define RSN_AUTH_KEY_MGMT_CCKM RSN_SELECTOR(0x00, 0x40, 0x96, 0x00)
 #define RSN_AUTH_KEY_MGMT_DPP RSN_SELECTOR(0x50, 0x6f, 0x9a, 0x02)
@@ -481,12 +485,12 @@ struct rsn_rdie {
 
 int wpa_eapol_key_mic(const u8 *key, size_t key_len, int akmp,
 		      enum rsn_hash_alg hash, int ver,
-		      const u8 *buf, size_t len, u8 *mic);
+		      const u8 *buf, size_t len, u8 *mic, u16 pasn_group);
 int wpa_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const char *label,
 		   const u8 *addr1, const u8 *addr2,
 		   const u8 *nonce1, const u8 *nonce2,
 		   struct wpa_ptk *ptk, int akmp, int cipher,
-		   const u8 *z, size_t z_len, size_t kdk_len);
+		   const u8 *z, size_t z_len, size_t kdk_len, u16 pasn_group);
 int fils_rmsk_to_pmk(int akmp, const u8 *rmsk, size_t rmsk_len,
 		     const u8 *snonce, const u8 *anonce, const u8 *dh_ss,
 		     size_t dh_ss_len, u8 *pmk, size_t *pmk_len);
@@ -752,6 +756,8 @@ struct wpa_eapol_ie_parse {
 	size_t nan_nik_len;
 	const u8 *nan_key_lifetime;
 	size_t nan_key_lifetime_len;
+	const u8 *security_profile;
+	size_t security_profile_len;
 	u16 valid_mlo_gtks; /* bitmap of valid link GTK KDEs */
 	const u8 *mlo_gtk[MAX_NUM_MLD_LINKS];
 	size_t mlo_gtk_len[MAX_NUM_MLD_LINKS];
@@ -790,8 +796,9 @@ int wpa_pick_group_cipher(int ciphers);
 int wpa_parse_cipher(const char *value);
 int wpa_write_ciphers(char *start, char *end, int ciphers, const char *delim);
 int wpa_select_ap_group_cipher(int wpa, int wpa_pairwise, int rsn_pairwise);
-unsigned int wpa_mic_len(int akmp, size_t pmk_len, enum rsn_hash_alg hash);
-unsigned int wpa_kek_len(int akmp, size_t pmk_len);
+unsigned int wpa_mic_len(int akmp, size_t pmk_len, enum rsn_hash_alg hash,
+			 u16 pasn_group);
+unsigned int wpa_kek_len(int akmp, size_t pmk_len, u16 pasn_group);
 int wpa_use_akm_defined(int akmp);
 int wpa_use_cmac(int akmp);
 int wpa_use_aes_key_wrap(int akmp);
@@ -825,7 +832,8 @@ void wpa_pasn_build_auth_header(struct wpabuf *buf, const u8 *bssid,
 				u8 trans_seq, u16 status, bool is_eppke);
 
 int wpa_pasn_add_rsne(struct wpabuf *buf, const u8 *pmkid,
-		      int akmp, int cipher);
+		      int akmp, int cipher, unsigned int random_pmkid_count);
+int wpa_rsne_inject_random_pmkids(u8 **pos, unsigned int count);
 
 void wpa_pasn_add_parameter_ie(struct wpabuf *buf, u16 pasn_group,
 			       u8 wrapped_data_format,
@@ -854,5 +862,21 @@ int wpa_auth_802_1x_pmk_to_ptk(const u8 *pmk, size_t pmk_len, const u8 *spa,
 			       size_t dhss_len, struct wpa_ptk *ptk,
 			       size_t kdk_len);
 void wpa_add_supported_groups(struct wpabuf *buf, const int *groups);
+
+/* Security Profile entry (IEEE P802.11bn/D2.0) */
+struct security_profile_entry {
+	int number;
+	int key_mgmt;
+	int pairwise_cipher;
+	bool ieee8021x_auth_frame;
+	bool assoc_frame_encrypt;
+	bool pmksa_caching_privacy;
+	int pqc_profile;
+};
+
+
+
+int sec_prof_implied_key_mgmt(const int *profiles);
+const struct security_profile_entry * sec_prof_get(int p);
 
 #endif /* WPA_COMMON_H */

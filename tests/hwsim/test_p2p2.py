@@ -409,8 +409,6 @@ def test_p2p_pcc_auto_go_and_pcc_client_join(dev, apdev):
     if dev[1].group_request("P2P_GET_PASSPHRASE") != res['passphrase']:
         raise Exception("passphrase mismatch(2)")
 
-    time.sleep(2)
-
     cli = dev[0]
     id2 = cli.p2pdev_add_network()
     cli.p2pdev_set_network_quoted(id2, "ssid", res['ssid'])
@@ -504,11 +502,11 @@ def test_p2p_auto_go_and_client_join_sae(dev, apdev):
     dev[0].wait_go_ending_session()
     dev[0].dump_monitor()
 
-def test_p2p_pairing_verification(dev, apdev):
+def test_p2p_pairing_verification(dev, apdev, params):
     """P2P Pairing with Verification"""
 
     """wpa_supplicant config file for pairing verification"""
-    config = "/tmp/test_p2p.conf"
+    config = os.path.join(params['logdir'], 'p2p_pairing_verification.conf')
     if os.path.exists(config):
         os.remove(config)
 
@@ -746,6 +744,67 @@ def test_p2p_auto_go_pcc_with_p2p2_cli(dev, apdev):
 
     dev[0].remove_group()
     dev[1].dump_monitor()
+
+def run_p2p_r2_pcc_go_and_pcc_client_join(go, cli):
+    """Start a PCC Auto GO and join with a PCC client using SAE"""
+    set_p2p2_configs(go)
+    set_p2p2_configs(cli)
+
+    cmd = "P2P_GROUP_ADD p2p2 p2pmode=2 freq=2437"
+    if "FAIL" in go.global_request(cmd):
+        raise Exception("P2P_GROUP_ADD failed")
+    ev = go.wait_global_event(["P2P-GROUP-STARTED"], timeout=10)
+    if ev is None:
+        raise Exception("Group formation timed out")
+
+    res = go.group_form_result(ev)
+    if go.get_group_status_field("passphrase", extra="WPS") != res['passphrase']:
+        raise Exception("passphrase mismatch")
+    if go.group_request("P2P_GET_PASSPHRASE") != res['passphrase']:
+        raise Exception("passphrase mismatch(2)")
+
+    id2 = cli.p2pdev_add_network()
+    cli.p2pdev_set_network_quoted(id2, "ssid", res['ssid'])
+    cli.p2pdev_set_network_quoted(id2, "psk", res['passphrase'])
+    cli.p2pdev_set_network(id2, "mode", "0")
+    cli.p2pdev_set_network(id2, "disabled", "2")
+    cmd = "P2P_GROUP_ADD persistent=" + str(id2) + " p2p2 p2pmode=2 freq=2437"
+    if "FAIL" in cli.global_request(cmd):
+        raise Exception("P2P_GROUP_ADD join on client failed")
+
+    ev = cli.wait_global_event(["P2P-GROUP-STARTED"], timeout=10)
+    if ev is None:
+        raise Exception("Group formation timed out (client)")
+    go.wait_sta(addr=cli.own_addr(), wait_4way_hs=True)
+
+    key_mgmt = cli.get_status_field("key_mgmt")
+    if key_mgmt != "SAE":
+        raise Exception("Unexpected key_mgmt: " + key_mgmt)
+    pmf = cli.get_status_field("pmf")
+    if pmf != "2":
+        raise Exception("Unexpected pmf: " + pmf)
+
+    hwsim_utils.test_connectivity_p2p(go, cli)
+
+    go.remove_group()
+    cli.wait_go_ending_session()
+    cli.dump_monitor()
+
+def test_p2p_r2_pcc_auto_go_and_pcc_client_sae(dev, apdev):
+    """PCC Auto GO and PCC client join using SAE"""
+    check_p2p2_capab(dev[0])
+    check_p2p2_capab(dev[1])
+    run_p2p_r2_pcc_go_and_pcc_client_join(dev[0], dev[1])
+
+def test_p2p_r2_pcc_auto_go_and_pcc_client_sae_no_group_iface(dev, apdev):
+    """PCC Auto GO and PCC client SAE join with p2p_no_group_iface=1"""
+    check_p2p2_capab(dev[0])
+    check_p2p2_capab(dev[1])
+    dev[0].global_request("SET p2p_no_group_iface 1")
+    try:
+        run_p2p_r2_pcc_go_and_pcc_client_join(dev[0], dev[1])
+    finally:
+        dev[0].global_request("SET p2p_no_group_iface 0")
 
 def test_p2p_bootstrapping_comeback_pairing(dev, apdev):
     """P2P bootstrapping with comeback and pairing"""

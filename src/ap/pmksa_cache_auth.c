@@ -334,7 +334,7 @@ pmksa_cache_auth_create_entry(const u8 *pmk, size_t pmk_len, const u8 *pmkid,
 		return NULL;
 	os_memcpy(entry->pmk, pmk, pmk_len);
 	entry->pmk_len = pmk_len;
-	if (kck && kck_len && kck_len < WPA_KCK_MAX_LEN) {
+	if (kck && kck_len && kck_len <= WPA_KCK_MAX_LEN) {
 		os_memcpy(entry->kck, kck, kck_len);
 		entry->kck_len = kck_len;
 	}

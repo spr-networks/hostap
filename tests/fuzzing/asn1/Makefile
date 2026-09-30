@@ -21,3 +21,6 @@ asn1: $(OBJS) $(LIBS)
 clean: common-clean
 	$(MAKE) -C $(SRC) clean
 	rm -f asn1 *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: asn1
+	./asn1 corpus/*

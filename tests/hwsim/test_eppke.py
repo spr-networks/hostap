@@ -128,7 +128,7 @@ def test_eppke_mld_ap_with_base_akm_sae_ext_non_mld_client(dev, apdev):
             dev[0].set("pasn_groups", "")
             dev[0].set("sae_pwe", "0")
 
-def run_eppke_mld_three_links(dev, apdev, key_mgmt):
+def run_eppke_mld(dev, apdev, key_mgmt, links):
     with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
         HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
 
@@ -145,89 +145,23 @@ def run_eppke_mld_three_links(dev, apdev, key_mgmt):
         params['pmksa_caching_privacy'] = '1'
         params['eap_using_authentication_frames'] = '1'
         params['rsn_pairwise'] = "CCMP GCMP-256"
-        hapd0 = eht_mld_enable_ap(hapd_iface, 0, params)
 
-        params['channel'] = '6'
-        hapd1 = eht_mld_enable_ap(hapd_iface, 1, params)
-
-        params['channel'] = '11'
-        hapd1 = eht_mld_enable_ap(hapd_iface, 2, params)
-
-        wpas.set("pasn_groups", "")
-        wpas.set("sae_pwe", "1")
-        wpas.connect(ssid, sae_password=passphrase, scan_freq="2412 2437 2462",
-                     key_mgmt=key_mgmt, ieee80211w="2", beacon_prot="1",
-                     pairwise="CCMP GCMP-256")
-        eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
-                          valid_links=7, active_links=7)
-        hapd0.wait_sta();
-        sta = hapd0.get_sta(wpas.own_addr())
-        if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
-            raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
-        hwsim_utils.test_connectivity(wpas, hapd0)
-
-def run_eppke_mld_two_links(dev, apdev, key_mgmt):
-    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
-        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
-
-        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
-        wpas.interface_add(wpas_iface)
-
-        passphrase = '1234567890'
-        ssid = "test-eppke-authentication"
-        params = eht_mld_ap_wpa2_params(ssid, passphrase,
-                                        key_mgmt=key_mgmt, mfp="2", pwe='1',
-                                        beacon_prot=1)
-        params['wpa_key_mgmt'] = params['wpa_key_mgmt'] + ' ' + 'EPPKE'
-        params['assoc_frame_encryption'] = '1'
-        params['pmksa_caching_privacy'] = '1'
-        params['eap_using_authentication_frames'] = '1'
-        params['rsn_pairwise'] = "CCMP GCMP-256"
-        hapd0 = eht_mld_enable_ap(hapd_iface, 0, params)
-
-        params['channel'] = '6'
-        hapd1 = eht_mld_enable_ap(hapd_iface, 1, params)
+        freqs = []
+        hapds = []
+        for link in range(links):
+            freqs.append(str(2412 + 5 * link))
+            params["channel"] = str(link + 1)
+            hapds.append(eht_mld_enable_ap(hapd_iface, link, params))
+        hapd0 = hapds[0]
 
         wpas.set("pasn_groups", "")
         wpas.set("sae_pwe", "1")
-        wpas.connect(ssid, sae_password=passphrase, scan_freq="2412 2437",
+        wpas.connect(ssid, sae_password=passphrase, scan_freq=" ".join(freqs),
                      key_mgmt=key_mgmt, ieee80211w="2", beacon_prot="1",
                      pairwise="CCMP GCMP-256")
+        exp_links = 2 ** links - 1
         eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
-                          valid_links=3, active_links=3)
-        hapd0.wait_sta();
-        sta = hapd0.get_sta(wpas.own_addr())
-        if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
-            raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
-        hwsim_utils.test_connectivity(wpas, hapd0)
-
-def run_eppke_mld_one_link(dev, apdev, key_mgmt):
-    check_eppke_capab(dev[0])
-    with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
-        HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
-
-        wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
-        wpas.interface_add(wpas_iface)
-
-        passphrase = '1234567890'
-        ssid = "test-eppke-authentication"
-        params = eht_mld_ap_wpa2_params(ssid, passphrase,
-                                        key_mgmt=key_mgmt, mfp="2", pwe='1',
-                                        beacon_prot=1)
-        params['wpa_key_mgmt'] = params['wpa_key_mgmt'] + ' ' + 'EPPKE'
-        params['assoc_frame_encryption'] = '1'
-        params['pmksa_caching_privacy'] = '1'
-        params['eap_using_authentication_frames'] = '1'
-        params['rsn_pairwise'] = "CCMP GCMP-256"
-        hapd0 = eht_mld_enable_ap(hapd_iface, 0, params)
-
-        wpas.set("pasn_groups", "")
-        wpas.set("sae_pwe", "1")
-        wpas.connect(ssid, sae_password=passphrase, scan_freq="2412",
-                     key_mgmt=key_mgmt, ieee80211w="2", beacon_prot="1",
-                     pairwise="CCMP GCMP-256")
-        eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
-                          valid_links=1, active_links=1)
+                          valid_links=exp_links, active_links=exp_links)
         hapd0.wait_sta();
         sta = hapd0.get_sta(wpas.own_addr())
         if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
@@ -236,15 +170,31 @@ def run_eppke_mld_one_link(dev, apdev, key_mgmt):
 
 def test_eppke_with_base_akm_sae_ext_single_link(dev, apdev):
     """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using single link"""
-    run_eppke_mld_one_link(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE")
+    run_eppke_mld(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE", links=1)
 
 def test_eppke_with_base_akm_sae_ext_two_link(dev, apdev):
     """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using two links"""
-    run_eppke_mld_two_links(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE")
+    run_eppke_mld(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE", links=2)
 
 def test_eppke_with_base_akm_sae_three_link(dev, apdev):
-    """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using two links"""
-    run_eppke_mld_three_links(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE")
+    """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using three links"""
+    run_eppke_mld(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE", links=3)
+
+def test_eppke_with_base_akm_sae_4_link(dev, apdev):
+    """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using 4 links"""
+    run_eppke_mld(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE", links=4)
+
+def test_eppke_with_base_akm_sae_5_link(dev, apdev):
+    """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using 5 links"""
+    run_eppke_mld(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE", links=5)
+
+def test_eppke_with_base_akm_sae_6_link(dev, apdev):
+    """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using 6 links"""
+    run_eppke_mld(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE", links=6)
+
+def test_eppke_with_base_akm_sae_7_link(dev, apdev):
+    """EPPKE authentication with an MLD AP with base AKM SAE-EXT and MLD client using 7 links"""
+    run_eppke_mld(dev, apdev, key_mgmt="SAE-EXT-KEY EPPKE", links=7)
 
 def test_eppke_ap_with_base_akm_sae_ext_non_mld_client_pmksa_cached(dev, apdev):
     """EPPKE authentication with a Non-MLO AP with base AKM SAE-EXT-KEY and non-MLD client"""
@@ -623,27 +573,29 @@ def test_eppke_ap_gtk_rekey_with_base_akm_sae_ext_key_two_link(dev, apdev):
             raise Exception("GTK rekey timed out")
         hwsim_utils.test_connectivity(wpas, hapd0)
 
-def test_eppke_ap_ptk_rekey_with_base_akm_sae_ext_non_mld_client(dev, apdev):
-    """EPPKE AP and PTK rekey"""
+def run_eppke_ap_ptk_rekey_with_base_akm_sae_ext_non_mld_client(dev, apdev,
+                                                                group=None):
     check_eppke_capab(dev[0])
     ssid = "test-eppke-authentication"
     passphrase = '1234567890'
-    params = hostapd.wpa3_params(ssid=ssid,
-				 password = passphrase)
-    params['wpa_key_mgmt'] = params['wpa_key_mgmt'] + ' ' + 'SAE-EXT-KEY EPPKE'
+    params = hostapd.wpa3_params(ssid=ssid, password=passphrase,
+                                 wpa_key_mgmt='SAE-EXT-KEY EPPKE')
     params['assoc_frame_encryption'] = '1'
     params['pmksa_caching_privacy'] = '1'
-    params['eap_using_authentication_frames'] = '1'
-    params['sae_pwe'] = '2'
+    params['sae_pwe'] = '1'
     params['wpa_ptk_rekey'] = '2'
+    if group:
+        params['pasn_groups'] = str(group)
     hapd = hostapd.add_ap(apdev[0], params)
 
     try:
-        dev[0].set("pasn_groups", "")
+        dev[0].set("pasn_groups", str(group) if group else "")
         dev[0].set("sae_pwe", "1")
         dev[0].connect(ssid, sae_password=passphrase, scan_freq="2412",
                        key_mgmt="SAE-EXT-KEY EPPKE", ieee80211w="2",
                        beacon_prot="1", pairwise="CCMP")
+        s = wpas.get_status()
+        eppke_check_key_len(group if group else 19, s, "initial")
         hapd.wait_sta();
         sta = hapd.get_sta(dev[0].own_addr())
         if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
@@ -653,11 +605,29 @@ def test_eppke_ap_ptk_rekey_with_base_akm_sae_ext_non_mld_client(dev, apdev):
         ev = dev[0].wait_event(["WPA: Key negotiation completed"])
         if ev is None:
             raise Exception("PTK rekey timed out")
+        s = wpas.get_status()
+        eppke_check_key_len(group if group else 19, s, "rekey")
         hwsim_utils.test_connectivity(dev[0], hapd)
 
     finally:
         dev[0].set("pasn_groups", "")
         dev[0].set("sae_pwe", "0")
+
+def test_eppke_ap_ptk_rekey_with_base_akm_sae_ext_non_mld_client(dev, apdev):
+    """EPPKE AP and PTK rekey"""
+    run_eppke_sae_ptk_rekey(dev, apdev, None)
+
+def test_eppke_ap_ptk_rekey_with_base_akm_sae_ext_non_mld_client_19(dev, apdev):
+    """EPPKE AP and PTK rekey - group 19"""
+    run_eppke_sae_ptk_rekey(dev, apdev, 19)
+
+def test_eppke_ap_ptk_rekey_with_base_akm_sae_ext_non_mld_client_20(dev, apdev):
+    """EPPKE AP and PTK rekey - group 20"""
+    run_eppke_sae_ptk_rekey(dev, apdev, 20)
+
+def test_eppke_ap_ptk_rekey_with_base_akm_sae_ext_non_mld_client_21(dev, apdev):
+    """EPPKE AP and PTK rekey - group 21"""
+    run_eppke_sae_ptk_rekey(dev, apdev, 21)
 
 def test_eppke_ap_with_non_eppke_non_mld_client(dev, apdev):
     """Negative test: SAE authentication with an EPPKE AP and non-EPPKE non-MLD client"""
@@ -741,6 +711,7 @@ def test_eppke_fallback_no_sae_ext_key_in_ap_rsne(dev, apdev):
     try:
         dev[0].set("pasn_groups", "")
         dev[0].set("sae_pwe", "1")
+        dev[0].set("sae_groups", "")
         dev[0].connect(ssid, sae_password=passphrase, scan_freq="2412",
                        key_mgmt="SAE SAE-EXT-KEY EPPKE", ieee80211w="2",
                        beacon_prot="1", pairwise="CCMP")
@@ -1305,6 +1276,126 @@ def test_eppke_without_base_akm_mld_ap(dev, apdev):
             raise HwsimSkip("MLD not supported")
         raise
 
+def eppke_check_key_len(group, vals, text):
+    pmk_len = 32
+    kck_len = 32
+    if group == 19:
+        kek_len = 16
+        mic_len = 16
+    elif group == 20:
+        kek_len = 32
+        mic_len = 24
+    if group == 21:
+        kek_len = 32
+        mic_len = 32
+
+    pmk = int(vals['pmk_len'])
+    kck = int(vals['kck_len'])
+    kek = int(vals['kek_len'])
+    mic = int(vals['mic_len'])
+
+    if pmk_len != pmk:
+        raise Exception("Unexpected PMK length: %u != %u (%s)" % (pmk, pmk_len, text))
+    if kck_len != kck:
+        raise Exception("Unexpected KCK length: %u != %u (%s)" % (kck, kck_len, text))
+    if kek_len != kek:
+        raise Exception("Unexpected KEK length: %u != %u (%s)" % (kek, kek_len, text))
+    if mic_len != mic:
+        raise Exception("Unexpected MIC length: %u != %u (%s)" % (mic, mic_len, text))
+
+def run_eppke_without_base_akm_with_rekey(dev, apdev, group, gtk=False,
+                                          ptk=False):
+    """EPPKE authentication without base AKM with GTK/PTK rekey and different groups"""
+    check_eppke_capab(dev[0])
+    ssid = "test-eppke-nobaseakm-mld"
+
+    try:
+        with HWSimRadio(use_mlo=True) as (hapd_radio, hapd_iface), \
+             HWSimRadio(use_mlo=True) as (wpas_radio, wpas_iface):
+            wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+            wpas.interface_add(wpas_iface)
+
+            params = hostapd.wpa2_params(ssid=ssid, wpa_key_mgmt="EPPKE",
+                                         ieee80211w="2")
+            params['ieee80211n'] = '1'
+            params['ieee80211ax'] = '1'
+            params['ieee80211be'] = '1'
+            params['channel'] = '1'
+            params['hw_mode'] = 'g'
+            params['group_mgmt_cipher'] = "AES-128-CMAC"
+            params['beacon_prot'] = '1'
+            params['assoc_frame_encryption'] = '1'
+            params['pmksa_caching_privacy'] = '1'
+            params['eppke_unauth'] = '1'
+            params['pasn_groups'] = str(group)
+
+            if gtk:
+               params['wpa_group_rekey'] = '1'
+
+            if ptk:
+               params['wpa_ptk_rekey'] = '1'
+
+            hapd0 = eht_mld_enable_ap(hapd_iface, 0, params)
+
+            params['channel'] = '6'
+            hapd1 = eht_mld_enable_ap(hapd_iface, 1, params)
+
+            wpas.set("pasn_groups", str(group))
+            wpas.connect(ssid, scan_freq="2412 2437", key_mgmt="EPPKE",
+                         ieee80211w="2", beacon_prot="1", pairwise="CCMP")
+            s = wpas.get_status()
+            eppke_check_key_len(group, s, "initial")
+            eht_verify_status(wpas, hapd0, 2412, 20, is_ht=True, mld=True,
+                              valid_links=3, active_links=3)
+            hapd0.wait_sta()
+            sta = hapd0.get_sta(wpas.own_addr())
+            if sta["AKMSuiteSelector"] != '00-0f-ac-29' or \
+               sta["auth_alg"] != '9':
+                raise Exception(
+                    "Incorrect Auth Algo/AKMSuiteSelector value")
+            if gtk:
+               ev = wpas.wait_event(["RSN: Group rekeying completed"],
+                                    timeout=11)
+               if ev is None:
+                  raise Exception("GTK rekey timed out")
+
+            if ptk:
+               ev = wpas.wait_event(["WPA: Key negotiation completed"])
+               if ev is None:
+                  raise Exception("PTK rekey timed out")
+
+            hwsim_utils.test_connectivity(wpas, hapd0)
+            s = wpas.get_status()
+            eppke_check_key_len(group, s, "rekey")
+    except Exception as e:
+        if "MLD not supported" in str(e) or "Failed to add" in str(e):
+            raise HwsimSkip("MLD not supported")
+        raise
+
+def test_eppke_without_base_akm_with_gtk_rekey_19(dev, apdev):
+    """EPPKE authentication without base AKM with GTK rekey and group 19"""
+    run_eppke_without_base_akm_with_rekey(dev, apdev, 19, gtk=True, ptk=False)
+
+def test_eppke_without_base_akm_with_gtk_rekey_20(dev, apdev):
+    """EPPKE authentication without base AKM with GTK rekey and group 20"""
+    run_eppke_without_base_akm_with_rekey(dev, apdev, 20, gtk=True, ptk=False)
+
+def test_eppke_without_base_akm_with_gtk_rekey_21(dev, apdev):
+    """EPPKE authentication without base AKM with GTK rekey and group 21"""
+    run_eppke_without_base_akm_with_rekey(dev, apdev, 21, gtk=True, ptk=False)
+
+def test_eppke_without_base_akm_with_ptk_rekey_19(dev, apdev):
+    """EPPKE authentication without base AKM with PTK rekey and group 19"""
+    run_eppke_without_base_akm_with_rekey(dev, apdev, 19, gtk=False, ptk=True)
+
+def test_eppke_without_base_akm_with_ptk_rekey_20(dev, apdev):
+    """EPPKE authentication without base AKM with PTK rekey and group 20"""
+    run_eppke_without_base_akm_with_rekey(dev, apdev, 20, gtk=False, ptk=True)
+
+def test_eppke_without_base_akm_with_ptk_rekey_21(dev, apdev):
+    """EPPKE authentication without base AKM with PTK rekey and group 21"""
+    run_eppke_without_base_akm_with_rekey(dev, apdev, 21, gtk=False, ptk=True)
+
 def test_eppke_mixed_concurrent(dev, apdev):
     """One STA uses EPPKE (auth_alg=9), another uses SAE-EXT-KEY (auth_alg=3) simultaneously"""
     check_eppke_capab(dev[0])
@@ -1436,3 +1527,67 @@ def test_eppke_rsno(dev, apdev):
         dev[0].set("pasn_groups", "")
         dev[0].set("sae_pwe", "0")
         dev[0].set("rsn_overriding", "0")
+
+def run_eppke_sae_ptk_rekey(dev, apdev, group):
+    check_eppke_capab(dev[0])
+    ssid = "test-eppke-authentication"
+    passphrase = '1234567890'
+    params = hostapd.wpa3_params(ssid=ssid, password=passphrase,
+                                 wpa_key_mgmt='SAE-EXT-KEY EPPKE')
+    params['assoc_frame_encryption'] = '1'
+    params['pmksa_caching_privacy'] = '1'
+    params['sae_pwe'] = '2'
+    params['wpa_ptk_rekey'] = '2'
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    try:
+        dev[0].set("pasn_groups", "")
+        dev[0].set("sae_pwe", "1")
+        dev[0].set("preassoc_mac_addr", "1")
+        dev[0].set("rand_addr_lifetime", "0")
+        dev[0].connect(ssid, sae_password=passphrase, scan_freq="2412",
+                       key_mgmt="SAE-EXT-KEY EPPKE", ieee80211w="2",
+                       beacon_prot="1", pairwise="CCMP", pmksa_privacy="1",
+                       mac_addr="1")
+        hapd.wait_sta();
+        sta = hapd.get_sta(dev[0].own_addr())
+        if sta["AKMSuiteSelector"] != '00-0f-ac-24' or sta["auth_alg"] != '9':
+            raise Exception("Incorrect Auth Algo/AKMSuiteSelector value")
+        hwsim_utils.test_connectivity(dev[0], hapd)
+
+        for i in range(3):
+            prev_addr = dev[0].own_addr()
+            dev[0].request("DISCONNECT")
+            dev[0].wait_disconnected()
+            # Let driver fully process disconnect before MAC address change
+            time.sleep(0.5)
+            dev[0].request("RECONNECT")
+            dev[0].wait_connected(timeout=15, error="Reconnect timed out")
+            new_addr = dev[0].own_addr()
+            if new_addr == prev_addr:
+                raise Exception("MAC address did not change on iteration %d" % i)
+            val = dev[0].get_status_field('sae_group')
+            if val is not None:
+                raise Exception("SAE group claimed to have been used: " + val)
+            sta = hapd.get_sta(new_addr)
+            if sta['auth_alg'] != '9' or sta['AKMSuiteSelector'] != '00-0f-ac-24':
+                raise Exception("Incorrect Auth Algo/AKMSuiteSelector value after PMKSA caching")
+            hwsim_utils.test_connectivity(dev[0], hapd)
+
+    finally:
+        dev[0].set("pasn_groups", "")
+        dev[0].set("preassoc_mac_addr", "0")
+        dev[0].set("rand_addr_lifetime", "60")
+        dev[0].set("sae_pwe", "0")
+
+def test_eppke_sae_ptk_rekey_group_19(dev, apdev):
+    """EPPKE[SAE] authentication and PTK rekeying with group 19"""
+    run_eppke_sae_ptk_rekey(dev, apdev, 19)
+
+def test_eppke_sae_ptk_rekey_group_20(dev, apdev):
+    """EPPKE[SAE] authentication and PTK rekeying with group 20"""
+    run_eppke_sae_ptk_rekey(dev, apdev, 20)
+
+def test_eppke_sae_ptk_rekey_group_21(dev, apdev):
+    """EPPKE[SAE] authentication and PTK rekeying with group 21"""
+    run_eppke_sae_ptk_rekey(dev, apdev, 21)

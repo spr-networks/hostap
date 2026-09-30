@@ -582,6 +582,14 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 
 #ifdef CONFIG_P2P
 	if (ssid->p2p_mode == WPA_P2P_MODE_WFD_PCC) {
+		/*
+		 * WPA_PROTO_RSN is required here: the RSNOE mechanism
+		 * (rsn_override_key_mgmt) is only valid under RSN. The generic
+		 * path above would have derived WPA_PROTO_RSN from ssid->proto,
+		 * but it is skipped because wpa_key_mgmt_wpa_psk(SAE|PASN) is
+		 * false.
+		 */
+		bss->wpa = WPA_PROTO_RSN;
 		bss->wpa_key_mgmt = WPA_KEY_MGMT_PSK;
 		bss->rsn_override_key_mgmt = WPA_KEY_MGMT_SAE |
 			WPA_KEY_MGMT_PASN;
@@ -589,6 +597,12 @@ static int wpa_supplicant_conf_ap(struct wpa_supplicant *wpa_s,
 		bss->rsn_override_pairwise = WPA_CIPHER_CCMP;
 		bss->rsn_override_mfp = 2;
 		bss->rsn_override_omit_rsnxe = 1;
+		if (ssid->passphrase) {
+			os_free(bss->ssid.wpa_passphrase);
+			bss->ssid.wpa_passphrase = os_strdup(ssid->passphrase);
+			if (!bss->ssid.wpa_passphrase)
+				return -1;
+		}
 	}
 #endif /* CONFIG_P2P */
 
@@ -1089,7 +1103,7 @@ int wpa_supplicant_create_ap(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-	os_memcpy(wpa_s->ap_iface->conf->wmm_ac_params,
+	os_memcpy(wpa_s->ap_iface->conf->bss[0]->wmm_ac_params,
 		  wpa_s->conf->wmm_ac_params,
 		  sizeof(wpa_s->conf->wmm_ac_params));
 

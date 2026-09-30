@@ -68,6 +68,9 @@ struct nan_data * nan_init(const struct nan_config *cfg)
 #endif /* CONFIG_PASN */
 
 	dl_list_init(&nan->peer_list);
+	dl_list_init(&nan->self_nik_list);
+	dl_list_init(&nan->peer_nik_list);
+	dl_list_init(&nan->group_nik_list);
 
 	wpa_printf(MSG_DEBUG, "NAN: Initialized");
 
@@ -244,6 +247,9 @@ static void nan_del_peer(struct nan_data *nan, struct nan_peer *peer)
 
 	wpabuf_free(peer->bootstrap.npba);
 	peer->bootstrap.npba = NULL;
+	os_free(peer->bootstrap.pairing_setup_info);
+	peer->bootstrap.pairing_setup_info = NULL;
+	peer->bootstrap.pairing_setup_info_len = 0;
 	nan_bootstrap_reset(nan, peer);
 	dl_list_del(&peer->list);
 	nan_peer_flush_avail(&peer->info);
@@ -255,7 +261,7 @@ static void nan_del_peer(struct nan_data *nan, struct nan_peer *peer)
 	nan_ndl_reset(nan, peer);
 	nan_peer_flush_sec(&peer->info);
 	eloop_cancel_timeout(nan_peer_state_timeout, nan, peer);
-	nan_pairing_deinit_peer(peer);
+	nan_pairing_deinit_peer(nan, peer, true);
 	os_free(peer);
 }
 
@@ -444,6 +450,7 @@ void nan_flush(struct nan_data *nan)
 	wpa_printf(MSG_DEBUG, "NAN: Reset internal state");
 
 	nan_peer_clear_all(nan);
+	nan_flush_niks(nan);
 	wpabuf_free(nan->sched.elems);
 	os_memset(&nan->sched, 0, sizeof(nan->sched));
 }
@@ -1372,6 +1379,61 @@ static void nan_parse_npba(struct nan_data *nan, struct nan_peer *peer,
 }
 
 
+void nan_parse_pbea(struct nan_data *nan, struct nan_peer *peer,
+		    struct nan_attrs *attrs)
+{
+	u8 control;
+	const u8 *pos = attrs->pbea;
+	size_t remaining = attrs->pbea_len;
+
+	if (!pos || remaining == 0)
+		return;
+
+	control = *pos++;
+	remaining--;
+
+	if (control & BIT(0)) {
+		if (remaining < 2) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: PBEA too short for Extended PBM");
+			return;
+		}
+		peer->bootstrap.extended_pbm = WPA_GET_LE16(pos);
+		pos += 2;
+		remaining -= 2;
+		wpa_printf(MSG_DEBUG,
+			   "NAN: PBEA extended bootstrapping methods: 0x%04x",
+			   peer->bootstrap.extended_pbm);
+	}
+
+	if (control & BIT(1)) {
+		u16 psi_len;
+
+		if (remaining < 2) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: PBEA too short for Pairing Setup Info");
+			return;
+		}
+
+		psi_len = WPA_GET_LE16(pos);
+		pos += 2;
+		remaining -= 2;
+
+		if (psi_len > remaining) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: PBEA Pairing Setup Info truncated: len=%u remaining=%zu",
+				   psi_len, remaining);
+			return;
+		}
+
+		os_free(peer->bootstrap.pairing_setup_info);
+		peer->bootstrap.pairing_setup_info = os_memdup(pos, psi_len);
+		peer->bootstrap.pairing_setup_info_len =
+			peer->bootstrap.pairing_setup_info ? psi_len : 0;
+	}
+}
+
+
 static void nan_parse_nira(struct nan_data *nan, struct nan_peer *peer,
 			   struct nan_attrs *attrs)
 {
@@ -1429,10 +1491,21 @@ int nan_parse_device_attrs(struct nan_data *nan, struct nan_peer *peer,
 	}
 
 	nan_merge_peer_info(nan, peer, &peer->info, &info);
+	if (attrs.conn_capa_valid) {
+		peer->info.conn_capa = attrs.conn_capa;
+		peer->info.conn_capa_valid = true;
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Stored conn_capa for peer " MACSTR
+			   ": bitmap=0x%04x (IDP=%d)",
+			   MAC2STR(peer->nmi_addr),
+			   peer->info.conn_capa,
+			   !!(peer->info.conn_capa & NAN_CONN_CAPA_IDP));
+	}
 	nan_parse_peer_device_capa(nan, peer, &attrs);
 	nan_parse_peer_elem_container(nan, peer, &attrs);
 	nan_parse_peer_dev_capa_ext(nan, peer, &attrs);
 	nan_parse_npba(nan, peer, &attrs);
+	nan_parse_pbea(nan, peer, &attrs);
 	nan_parse_nira(nan, peer, &attrs);
 
 	nan_peer_dump(nan, peer);
@@ -1493,6 +1566,7 @@ static struct nan_peer * nan_alloc_peer(struct nan_data *nan)
 
 
 int nan_add_peer(struct nan_data *nan, const u8 *addr,
+		 const u8 *a3, unsigned int freq,
 		 const u8 *device_attrs, size_t device_attrs_len)
 {
 	struct nan_peer *peer;
@@ -1517,10 +1591,70 @@ int nan_add_peer(struct nan_data *nan, const u8 *addr,
 		os_memcpy(peer->nmi_addr, addr, ETH_ALEN);
 	}
 
+	/* Per Wi-Fi Aware spec R5, Table 5 (Address field definition for NAN
+	 * SDFs frames in USD), mark the peer as non-cluster when A3 does not
+	 * match our cluster ID. This covers a USD publisher (A3 == NAN
+	 * Network ID) and a USD subscriber (A3 == self-assigned Cluster ID,
+	 * spec section 2.8.2). When NAN is not started any peer is non-cluster.
+	 * Once set, non_cluster is not cleared; a USD publisher's Follow-up
+	 * copies A3 from the Subscribe, which carries the subscriber's Cluster
+	 * ID and must not overwrite the established state. Store A3 as
+	 * peer_cluster_id when peer is clustered, for use as BSSID in unicast
+	 * frames.
+	 */
+	if (a3) {
+		bool is_non_cluster;
+
+		is_non_cluster = !nan->nan_started ||
+			!ether_addr_equal(a3, nan->cluster_id);
+
+		if (is_non_cluster) {
+			peer->non_cluster = true;
+			os_memset(peer->peer_cluster_id, 0, ETH_ALEN);
+		} else if (!peer->non_cluster) {
+			os_memcpy(peer->peer_cluster_id, a3, ETH_ALEN);
+		}
+	}
+
+	/* Store SDF reception frequency for PASN frame delivery. */
+	if (freq)
+		peer->freq = freq;
+
+	wpa_printf(MSG_DEBUG, "NAN: peer: " MACSTR " non_cluster=%d freq=%u",
+		   MAC2STR(addr), peer->non_cluster, peer->freq);
+
 	nan_parse_device_attrs(nan, peer, device_attrs, device_attrs_len);
 
 	os_get_reltime(&peer->last_seen);
 	return 0;
+}
+
+
+bool nan_peer_no_shared_cluster(struct nan_data *nan, const u8 *addr)
+{
+	struct nan_peer *peer;
+
+	if (!nan || !addr)
+		return false;
+
+	/* Self is non-cluster if NAN is not started */
+	if (!nan->nan_started)
+		return true;
+
+	peer = nan_get_peer(nan, addr);
+	return peer && peer->non_cluster;
+}
+
+
+bool nan_peer_nm_tk_installed(struct nan_data *nan, const u8 *addr)
+{
+	struct nan_peer *peer;
+
+	if (!nan || !addr)
+		return false;
+
+	peer = nan_get_peer(nan, addr);
+	return peer && peer->pairing.nm_tk_installed;
 }
 
 
@@ -1763,16 +1897,23 @@ bool nan_process_followup(struct nan_data *nan, const u8 *addr, const u8 *buf,
 		return false;
 	}
 
-	if (attrs.npba && attrs.npba_len)
+	if (attrs.npba && attrs.npba_len) {
+		struct nan_peer *peer = nan_get_peer(nan, addr);
+
+		if (peer)
+			nan_parse_pbea(nan, peer, &attrs);
+
 		ret = nan_bootstrap_handle_rx(nan, addr, attrs.npba,
 					      attrs.npba_len, buf, len, handle,
 					      req_instance_id);
+	}
 #ifdef CONFIG_PASN
-	else if (attrs.shared_key_desc)
+	else if (attrs.shared_key_desc) {
 		ret = nan_pairing_followup_rx(nan, addr,
 					      (const struct nan_shared_key *)
 					      attrs.shared_key_desc,
 					      attrs.shared_key_desc_len);
+	}
 #endif /* CONFIG_PASN */
 
 	nan_attrs_clear(nan, &attrs);
@@ -2356,7 +2497,8 @@ int nan_action_rx(struct nan_data *nan, const struct ieee80211_mgmt *mgmt,
 	if (ret)
 		return ret;
 
-	ret = nan_add_peer(nan, mgmt->sa, mgmt->u.action.u.naf.variable,
+	ret = nan_add_peer(nan, mgmt->sa, NULL, 0,
+			   mgmt->u.action.u.naf.variable,
 			   len - IEEE80211_MIN_ACTION_LEN(naf));
 	if (ret)
 		wpa_printf(MSG_DEBUG, "NAN: Failed to parse peer from NAF");
@@ -2776,6 +2918,137 @@ int nan_peer_get_tk(struct nan_data *nan, const u8 *addr,
 		return -1;
 
 	return nan_sec_get_tk(nan, peer, peer_ndi, local_ndi, tk, tk_len, csid);
+}
+
+
+int nan_peer_get_conn_capa(struct nan_data *nan, const u8 *addr,
+			   u16 *capa, bool *valid)
+{
+	struct nan_peer *peer;
+
+	if (!nan || !addr || !capa || !valid)
+		return -1;
+
+	peer = nan_get_peer(nan, addr);
+	if (!peer)
+		return -1;
+
+	*capa = peer->info.conn_capa;
+	*valid = peer->info.conn_capa_valid;
+	return 0;
+}
+
+
+int nan_peer_store_pairing_tk(struct nan_data *nan, const u8 *addr,
+			      const u8 *tk, size_t tk_len)
+{
+	struct nan_peer *peer;
+
+	if (!nan || !addr || !tk || !tk_len || tk_len > NAN_TK_MAX_LEN)
+		return -1;
+
+	peer = nan_get_peer(nan, addr);
+	if (!peer) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: store_pairing_tk: Peer " MACSTR " not found",
+			   MAC2STR(addr));
+		return -1;
+	}
+
+	os_memcpy(peer->pairing.tk, tk, tk_len);
+	peer->pairing.tk_len = tk_len;
+	wpa_printf(MSG_DEBUG,
+		   "NAN: store_pairing_tk: Stored TK len=%zu for " MACSTR,
+		   tk_len, MAC2STR(addr));
+	return 0;
+}
+
+
+int nan_peer_get_pairing_tk(struct nan_data *nan, const u8 *addr,
+			    u8 *tk, size_t *tk_len)
+{
+	struct nan_peer *peer;
+
+	if (!nan || !addr || !tk || !tk_len)
+		return -1;
+
+	peer = nan_get_peer(nan, addr);
+	if (!peer) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: get_pairing_tk: Peer " MACSTR " not found",
+			   MAC2STR(addr));
+		return -1;
+	}
+
+	if (!peer->pairing.tk_len) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: get_pairing_tk: No TK stored for " MACSTR,
+			   MAC2STR(addr));
+		return -1;
+	}
+
+	os_memcpy(tk, peer->pairing.tk, peer->pairing.tk_len);
+	*tk_len = peer->pairing.tk_len;
+	wpa_printf(MSG_DEBUG,
+		   "NAN: get_pairing_tk: Returning TK len=%zu for " MACSTR,
+		   *tk_len, MAC2STR(addr));
+	return 0;
+}
+
+
+int nan_peer_store_pairing_pmkid(struct nan_data *nan, const u8 *addr,
+				 const u8 *pmkid)
+{
+	struct nan_peer *peer;
+
+	if (!nan || !addr || !pmkid)
+		return -1;
+
+	peer = nan_get_peer(nan, addr);
+	if (!peer) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: store_pairing_pmkid: Peer " MACSTR
+			   " not found", MAC2STR(addr));
+		return -1;
+	}
+
+	os_memcpy(peer->pairing.npkid, pmkid, PMKID_LEN);
+	peer->pairing.npkid_valid = true;
+	wpa_printf(MSG_DEBUG,
+		   "NAN: store_pairing_pmkid: Stored PMKID for " MACSTR,
+		   MAC2STR(addr));
+	return 0;
+}
+
+
+int nan_peer_get_pairing_pmkid(struct nan_data *nan, const u8 *addr,
+			       u8 *pmkid)
+{
+	struct nan_peer *peer;
+
+	if (!nan || !addr || !pmkid)
+		return -1;
+
+	peer = nan_get_peer(nan, addr);
+	if (!peer) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: get_pairing_pmkid: Peer " MACSTR " not found",
+			   MAC2STR(addr));
+		return -1;
+	}
+
+	if (!peer->pairing.npkid_valid) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: get_pairing_pmkid: No PMKID stored for "
+			   MACSTR, MAC2STR(addr));
+		return -1;
+	}
+
+	os_memcpy(pmkid, peer->pairing.npkid, PMKID_LEN);
+	wpa_printf(MSG_DEBUG,
+		   "NAN: get_pairing_pmkid: Returning PMKID for " MACSTR,
+		   MAC2STR(addr));
+	return 0;
 }
 
 
@@ -3546,6 +3819,35 @@ void nan_set_sched_update_pending(struct nan_data *nan, bool pending)
 }
 
 
+void nan_set_supported_bands(struct nan_data *nan, u8 supported_bands)
+{
+	if (!nan || !nan->cfg)
+		return;
+
+	nan->cfg->dev_capa.supported_bands = supported_bands;
+	wpa_printf(MSG_DEBUG,
+		   "NAN: dev_capa.supported_bands updated to 0x%02x",
+		   nan->cfg->dev_capa.supported_bands);
+}
+
+
+void nan_set_ndpe_support(struct nan_data *nan, bool enable)
+{
+	if (!nan || !nan->cfg)
+		return;
+
+	if (enable)
+		nan->cfg->dev_capa.capa |= NAN_DEV_CAPA_NDPE_ATTR_SUPP;
+	else
+		nan->cfg->dev_capa.capa &= ~NAN_DEV_CAPA_NDPE_ATTR_SUPP;
+
+	wpa_printf(MSG_DEBUG,
+		   "NAN: NDPE support %s (dev_capa.capa=0x%02x)",
+		   enable ? "enabled" : "disabled",
+		   nan->cfg->dev_capa.capa);
+}
+
+
 void nan_local_sched_update(struct nan_data *nan, struct nan_schedule *sched)
 {
 	struct nan_peer *peer;
@@ -3673,5 +3975,387 @@ void nan_terminate_ndi_ndps(struct nan_data *nan, const u8 *ndi_addr)
 		 */
 		nan_ndp_setup_stop(nan, peer);
 		nan_terminate_ndps_for_ndi(nan, peer, ndi_addr);
+	}
+}
+
+
+int nan_add_nik(struct nan_data *nan, const u8 *nik, enum nan_nik_type type,
+		bool possessed_nik)
+{
+	struct nan_nik_entry *entry, *cur;
+	struct dl_list *list;
+
+	if (!nan || !nik)
+		return -1;
+
+	switch (type) {
+	case NAN_NIK_TYPE_PEER:
+		list = &nan->peer_nik_list;
+		break;
+	case NAN_NIK_TYPE_SELF:
+		list = &nan->self_nik_list;
+		break;
+	case NAN_NIK_TYPE_GROUP:
+		list = &nan->group_nik_list;
+		break;
+	default:
+		return -1;
+	}
+
+	dl_list_for_each(cur, list, struct nan_nik_entry, list) {
+		if (os_memcmp(cur->nik, nik, NAN_NIK_LEN) == 0) {
+			cur->possessed_nik = possessed_nik;
+			return 0;
+		}
+	}
+
+	entry = os_zalloc(sizeof(*entry));
+	if (!entry)
+		return -1;
+	os_memcpy(entry->nik, nik, NAN_NIK_LEN);
+	entry->possessed_nik = possessed_nik;
+	dl_list_init(&entry->associated_nik);
+	dl_list_add(list, &entry->list);
+
+	return 0;
+}
+
+
+static void nan_flush_nik_list(struct dl_list *list)
+{
+	struct nan_nik_entry *entry, *tmp;
+
+	dl_list_for_each_safe(entry, tmp, list, struct nan_nik_entry, list) {
+		struct nan_assoc_nik_entry *an, *an_tmp;
+
+		dl_list_for_each_safe(an, an_tmp, &entry->associated_nik,
+				      struct nan_assoc_nik_entry, list) {
+			dl_list_del(&an->list);
+			bin_clear_free(an, sizeof(*an));
+		}
+		dl_list_del(&entry->list);
+		bin_clear_free(entry, sizeof(*entry));
+	}
+}
+
+
+void nan_flush_niks(struct nan_data *nan)
+{
+	if (!nan)
+		return;
+
+	wpa_printf(MSG_DEBUG, "NAN: Flush NIKs");
+	nan_flush_nik_list(&nan->self_nik_list);
+	nan_flush_nik_list(&nan->peer_nik_list);
+	nan_flush_nik_list(&nan->group_nik_list);
+}
+
+
+int nan_add_assoc_self_nik(struct nan_data *nan, enum nan_nik_type type,
+			   const u8 *nik, const u8 *self_nik)
+{
+	struct dl_list *list;
+	struct nan_nik_entry *entry;
+
+	if (!nan || !nik || !self_nik)
+		return -1;
+
+	switch (type) {
+	case NAN_NIK_TYPE_PEER:
+		list = &nan->peer_nik_list;
+		break;
+	case NAN_NIK_TYPE_GROUP:
+		list = &nan->group_nik_list;
+		break;
+	default:
+		return -1;
+	}
+
+	dl_list_for_each(entry, list, struct nan_nik_entry, list) {
+		if (os_memcmp(entry->nik, nik, NAN_NIK_LEN) == 0) {
+			struct nan_assoc_nik_entry *an;
+
+			dl_list_for_each(an, &entry->associated_nik,
+					 struct nan_assoc_nik_entry, list) {
+				if (os_memcmp(an->nik, self_nik, NAN_NIK_LEN) ==
+				    0)
+					return 0;
+			}
+
+			an = os_zalloc(sizeof(*an));
+			if (!an)
+				return -1;
+			os_memcpy(an->nik, self_nik, NAN_NIK_LEN);
+			dl_list_add(&entry->associated_nik, &an->list);
+			return 0;
+		}
+	}
+
+	return -1;
+}
+
+
+static size_t nan_count_nik_list(struct dl_list *list)
+{
+	struct nan_nik_entry *entry;
+	u8 count = 0;
+
+	dl_list_for_each(entry, list, struct nan_nik_entry, list) {
+		if (entry->possessed_nik) {
+			count++;
+			if (count == 255)
+				break;
+		}
+	}
+	if (count == 0)
+		return 0;
+
+	/* 1 byte type + 1 byte count + count * tag_len */
+	return 2 + count * NAN_NIRA_TAG_LEN;
+}
+
+
+static void nan_write_nik_list(struct nan_data *nan,
+			       struct dl_list *list,
+			       enum nan_tag_type type,
+			       const u8 *irsa_nonce,
+			       u8 **buf)
+{
+	struct nan_nik_entry *entry;
+	struct wpabuf *tag_buf;
+	u8 *header = *buf;
+	u8 count = 0;
+
+	*buf += 2; /* reserve space for type + count */
+
+	dl_list_for_each(entry, list, struct nan_nik_entry, list) {
+		if (!entry->possessed_nik)
+			continue;
+
+		tag_buf = nan_crypto_derive_irsa_tag(entry->nik, NAN_NIK_LEN,
+						     nan->cfg->nmi_addr,
+						     irsa_nonce);
+		if (tag_buf) {
+			os_memcpy(*buf, wpabuf_head(tag_buf), NAN_NIRA_TAG_LEN);
+			wpabuf_free(tag_buf);
+		} else {
+			os_memset(*buf, 0, NAN_NIRA_TAG_LEN);
+		}
+		*buf += NAN_NIRA_TAG_LEN;
+		count++;
+		if (count == 255)
+			break;
+	}
+
+	if (count == 0) {
+		*buf = header;
+		return;
+	}
+
+	header[0] = type;
+	header[1] = count;
+}
+
+
+int nan_irsa_get_nonce_tag_tlv(struct nan_data *nan, u8 *irsa_nonce,
+			       u8 **irsa_tag_tlv, u16 *irsa_tag_tlv_len)
+{
+	size_t total_len, written;
+	u8 *pos;
+
+	if (!nan)
+		return -1;
+
+	if (os_get_random(irsa_nonce, NAN_NIRA_NONCE_LEN) < 0)
+		return -1;
+
+	total_len = nan_count_nik_list(&nan->self_nik_list) +
+		nan_count_nik_list(&nan->peer_nik_list) +
+		nan_count_nik_list(&nan->group_nik_list);
+
+	if (total_len == 0 || total_len > 65535) {
+		*irsa_tag_tlv = NULL;
+		*irsa_tag_tlv_len = 0;
+		return 0;
+	}
+
+	*irsa_tag_tlv = os_malloc(total_len);
+	if (!*irsa_tag_tlv)
+		return -1;
+
+	pos = *irsa_tag_tlv;
+	if (nan_count_nik_list(&nan->self_nik_list))
+		nan_write_nik_list(nan, &nan->self_nik_list,
+				   NAN_TAG_TYPE_SN, irsa_nonce, &pos);
+	if (nan_count_nik_list(&nan->peer_nik_list))
+		nan_write_nik_list(nan, &nan->peer_nik_list,
+				   NAN_TAG_TYPE_DN, irsa_nonce, &pos);
+	if (nan_count_nik_list(&nan->group_nik_list))
+		nan_write_nik_list(nan, &nan->group_nik_list,
+				   NAN_TAG_TYPE_GN, irsa_nonce, &pos);
+
+	*irsa_tag_tlv_len = (u16) total_len;
+
+	written = (size_t) (pos - *irsa_tag_tlv);
+	if (written != total_len) {
+		os_free(*irsa_tag_tlv);
+		*irsa_tag_tlv = NULL;
+		*irsa_tag_tlv_len = 0;
+		return -1;
+	}
+
+	return 0;
+}
+
+
+void nan_rsia_get_rsids(struct nan_data *nan, const u8 *service_id,
+			const u8 *irsa_tag_tlv,
+			u16 irsa_tag_tlv_len, u8 *rsid_num,
+			u8 **rsid_list, u8 *rsid_list_len, bool is_unicast,
+			bool *has_zero_rsid)
+{
+	const u8 *pos, *end;
+	u8 *out_pos;
+	unsigned int total_tags = 0;
+	u8 hash[8]; /* SipHash-2-4 returns 64-bit output */
+	u8 data[NAN_SERVICE_ID_LEN + NAN_NIRA_TAG_LEN];
+	static const u8 zero_rsid[NAN_RSID_LEN] = { 0, 0, 0, 0, 0, 0 };
+
+	if (!nan || !service_id || !rsid_num || !rsid_list || !rsid_list_len)
+		return;
+
+	*rsid_num = 0;
+	*rsid_list = NULL;
+	*rsid_list_len = 0;
+	if (has_zero_rsid)
+		*has_zero_rsid = false;
+
+	if (!irsa_tag_tlv || irsa_tag_tlv_len == 0)
+		return;
+
+	end = irsa_tag_tlv + irsa_tag_tlv_len;
+	os_memcpy(data, service_id, NAN_SERVICE_ID_LEN);
+
+	/* First pass: count total tags to determine allocation size */
+	pos = irsa_tag_tlv;
+	while (end - pos >= 2) {
+		u8 count = pos[1];
+
+		if (2 + count * NAN_NIRA_TAG_LEN > end - pos) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Invalid IRSA Tag TLV length");
+			return;
+		}
+		total_tags += count;
+		pos += 2 + count * NAN_NIRA_TAG_LEN;
+	}
+
+	if (total_tags == 0 || total_tags * NAN_RSID_LEN > 255)
+		return;
+
+	*rsid_list = os_malloc(total_tags * NAN_RSID_LEN);
+	if (!*rsid_list)
+		return;
+
+	/* Second pass: compute RSIDs */
+	out_pos = *rsid_list;
+	pos = irsa_tag_tlv;
+
+	while (end - pos >= 2) {
+		u8 type = pos[0];
+		u8 count = pos[1];
+		const u8 *tags = pos + 2;
+		struct dl_list *nik_list = NULL;
+		struct nan_nik_entry *entry;
+		int i = 0;
+
+		pos += 2 + count * NAN_NIRA_TAG_LEN;
+
+		switch (type) {
+		case NAN_TAG_TYPE_SN:
+			nik_list = &nan->self_nik_list;
+			break;
+		case NAN_TAG_TYPE_DN:
+			nik_list = &nan->peer_nik_list;
+			break;
+		case NAN_TAG_TYPE_GN:
+			nik_list = &nan->group_nik_list;
+			break;
+		default:
+			wpa_printf(MSG_DEBUG, "NAN: Unknown NIK type %d", type);
+			continue;
+		}
+
+		if (dl_list_empty(nik_list)) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: NIK list empty for type %d but tags present",
+				   type);
+			continue;
+		}
+
+		/*
+		 * For unicast SDF TX, iterate all NIKs regardless of the
+		 * possessed_nik flag so the peer can match any of our NIKs.
+		 * For multicast SDF TX, only possessed NIKs are used.
+		 */
+		dl_list_for_each(entry, nik_list, struct nan_nik_entry, list) {
+			if (!is_unicast && !entry->possessed_nik)
+				continue;
+			if (i >= count)
+				break;
+
+			/* RSID = Truncate-48(SipHash-2-4(NIK, SID || Tag)) */
+			os_memcpy(data + NAN_SERVICE_ID_LEN,
+				  tags + i * NAN_NIRA_TAG_LEN,
+				  NAN_NIRA_TAG_LEN);
+
+			if (siphash_2_4(entry->nik, data, sizeof(data),
+					hash) == 0) {
+				os_memcpy(out_pos, hash, NAN_RSID_LEN);
+				/* A zero RSID requires regeneration with a new
+				 * nonce. */
+				if (has_zero_rsid &&
+				    os_memcmp(out_pos, zero_rsid,
+					      NAN_RSID_LEN) == 0) {
+					wpa_printf(MSG_DEBUG,
+						   "NAN: All-zero RSID derived; nonce regeneration required");
+					*has_zero_rsid = true;
+				}
+				out_pos += NAN_RSID_LEN;
+			} else {
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Failed to compute RSID");
+			}
+			i++;
+		}
+		if (i < count)
+			wpa_printf(MSG_DEBUG,
+				   "NAN: NIK list has fewer entries (%d) than tag count (%d)",
+				   i, count);
+	}
+
+	*rsid_num = (u8) ((out_pos - *rsid_list) / NAN_RSID_LEN);
+	*rsid_list_len = *rsid_num * NAN_RSID_LEN;
+	if (*rsid_num == 0) {
+		os_free(*rsid_list);
+		*rsid_list = NULL;
+	}
+}
+
+
+struct dl_list * nan_get_nik_list(struct nan_data *nan, enum nan_nik_type type)
+{
+	if (!nan)
+		return NULL;
+
+	switch (type) {
+	case NAN_NIK_TYPE_PEER:
+		return &nan->peer_nik_list;
+	case NAN_NIK_TYPE_SELF:
+		return &nan->self_nik_list;
+	case NAN_NIK_TYPE_GROUP:
+		return &nan->group_nik_list;
+	default:
+		return NULL;
 	}
 }

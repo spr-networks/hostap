@@ -2416,7 +2416,7 @@ static u8 * wpa_ft_process_rdie(struct wpa_state_machine *sm,
 	wpa_hexdump(MSG_MSGDUMP, "FT: Resource descriptor IE(s)",
 		    ies, ies_len);
 
-	if (end - pos < (int) sizeof(*rdie)) {
+	if (end - pos < 2 + (int) sizeof(*rdie)) {
 		wpa_printf(MSG_ERROR, "FT: Not enough room for response RDIE");
 		return pos;
 	}

@@ -58,3 +58,6 @@ wnm: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f wnm *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: wnm
+	./wnm corpus/*

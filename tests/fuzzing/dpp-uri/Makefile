@@ -41,3 +41,6 @@ dpp-uri: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f dpp-uri *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: dpp-uri
+	./dpp-uri corpus/*

@@ -251,6 +251,9 @@
 #define WLAN_STATUS_DENIED_UHR_NOT_SUPPORTED 157
 #define WLAN_STATUS_REJECTED_ST_EXEC_TARGET_NOT_PREPARED 158
 #define WLAN_STATUS_REJECTED_INVALID_SECURITY_PROFILE 159
+#define WLAN_STATUS_POW_REQUIRED 166
+#define WLAN_STATUS_UNSUPPORTED_ML_KEM_PARAMETER 167
+#define WLAN_STATUS_INVALID_ML_KEM_PARAMETER 168
 
 /* Reason codes (IEEE Std 802.11-2020, 9.4.1.7, Table 9-90) */
 #define WLAN_REASON_UNSPECIFIED 1
@@ -492,6 +495,7 @@
 #define WLAN_EID_S1G_CAPABILITIES 217
 #define WLAN_EID_VENDOR_SPECIFIC 221
 #define WLAN_EID_S1G_OPERATION 232
+#define WLAN_EID_EXT_LENGTH 227
 #define WLAN_EID_CAG_NUMBER 237
 #define WLAN_EID_AP_CSN 239
 #define WLAN_EID_FILS_INDICATION 240
@@ -557,6 +561,7 @@
 #define WLAN_EID_EXT_TX_POWER_INDICATION 159
 #define WLAN_EID_EXT_SUPPORTED_GROUPS 161
 #define WLAN_EID_EXT_SECURITY_PROFILE 162
+#define WLAN_EID_EXT_POW 164
 
 /* Extended Capabilities field */
 #define WLAN_EXT_CAPAB_20_40_COEX 0
@@ -640,6 +645,7 @@
 #define WLAN_EXT_CAPAB_MSCS 85
 #define WLAN_EXT_CAPAB_SAE_PK_EXCLUSIVELY 88
 #define WLAN_EXT_CAPAB_KNOWN_STA_IDENTIFICATION 102
+#define WLAN_EXT_CAPAB_EXT_LEN_ELEMENT 117
 
 /* Extended RSN Capabilities */
 /* bits 0-3: Field length (n-1) */
@@ -658,6 +664,46 @@
 #define WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY 29
 #define WLAN_RSNX_CAPAB_SAE_PW_ID_CHANGE 34
 #define WLAN_RSNX_CAPAB_UNAUTH_EPPKE 36
+
+/* Security Profile element fields (IEEE P802.11bn/D2.0, 9.4.2.369) */
+/* Reduced RSN Capabilities field bits (Figure 9-aa75) */
+#define SEC_PROF_REDUCED_RSN_CAPA_EXT_KEY_ID		BIT(0)
+#define SEC_PROF_REDUCED_RSN_CAPA_OCVC			BIT(1)
+
+/* Security Profile Indication field (Figure 9-aa76):
+ * Bits 0-3: Number of Octets Of Security Profile Bitmap
+ * Bits 4-7: Number Of Vendor Specific Security Profiles
+ */
+#define SEC_PROF_IND_BITMAP_OCTETS(ind)  ((ind) & 0x0f)
+#define SEC_PROF_IND_VENDOR_COUNT(ind)   (((ind) >> 4) & 0x0f)
+
+/*
+ * Security Profile Number values (IEEE P802.11bn/D2.0, Table 9-bb18).
+ * All profiles use pairwise cipher GCMP-256 (00-0F-AC:9) and MFPR=1.
+ * AKM suites are 00-0F-AC:<value below>.
+ */
+#define SEC_PROF_EPPKE_NO_AUTH		0  /* EPPKE (29), no mutual auth */
+#define SEC_PROF_EPPKE_SAE		1  /* EPPKE (29) + SAE (24) */
+#define SEC_PROF_EPPKE_FT_SAE		2  /* EPPKE (29) + FT/SAE (25) */
+#define SEC_PROF_8021X_AUTH		3  /* 802.1X (5), EAP over Auth */
+#define SEC_PROF_8021X_FT_AUTH		4  /* 802.1X+FT (3), EAP over Auth */
+#define SEC_PROF_8021X_SHA384_AUTH	5  /* 802.1X SHA384 (23),
+					    * EAP over Auth */
+#define SEC_PROF_8021X_FT384_AUTH	6  /* 802.1X+FT SHA384 (22),
+					    * EAP over AUTH */
+#define SEC_PROF_8021X_SUITEB_AUTH	7  /* 802.1X Suite-B (12),
+					    * EAP over Auth */
+#define SEC_PROF_OWE			8  /* OWE/None (18) */
+#define SEC_PROF_SAE			9  /* SAE (24) */
+/* 10-119: Reserved */
+#define SEC_PROF_MAX			119
+
+static inline bool sec_prof_is_sae(int p)
+{
+	return p == SEC_PROF_EPPKE_SAE ||
+		p == SEC_PROF_EPPKE_FT_SAE ||
+		p == SEC_PROF_SAE;
+}
 
 /* Multiple BSSID element subelements */
 #define WLAN_MBSSID_SUBELEMENT_NONTRANSMITTED_BSSID_PROFILE 0

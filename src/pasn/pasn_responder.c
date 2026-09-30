@@ -20,7 +20,6 @@
 #include "crypto/sha512.h"
 #include "crypto/random.h"
 #include "crypto/crypto.h"
-#include "ap/hostapd.h"
 #include "ap/comeback_token.h"
 #include "ap/ieee802_1x.h"
 #include "ap/pmksa_cache_auth.h"
@@ -363,7 +362,7 @@ static struct wpabuf * pasn_get_fils_wd(struct pasn_data *pasn)
 	wpabuf_put_le16(buf, WLAN_STATUS_SUCCESS);
 
 	/* Own RSNE */
-	wpa_pasn_add_rsne(buf, NULL, pasn->akmp, pasn->cipher);
+	wpa_pasn_add_rsne(buf, NULL, pasn->akmp, pasn->cipher, 0);
 
 	/* FILS Nonce */
 	wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
@@ -402,6 +401,7 @@ static struct wpabuf * pasn_get_wrapped_data(struct pasn_data *pasn)
 #endif /* CONFIG_ENC_ASSOC */
 	case WPA_KEY_MGMT_SAE:
 	case WPA_KEY_MGMT_SAE_EXT_KEY:
+	case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
 #ifdef CONFIG_SAE
 		return pasn_get_sae_wd(pasn);
 #else /* CONFIG_SAE */
@@ -462,6 +462,7 @@ pasn_derive_keys(struct pasn_data *pasn,
 #ifdef CONFIG_SAE
 		case WPA_KEY_MGMT_SAE:
 		case WPA_KEY_MGMT_SAE_EXT_KEY:
+		case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
 			if (pasn->sae.state == SAE_COMMITTED) {
 				pmk_len = pasn->sae.pmk_len;
 				os_memcpy(pmk, pasn->sae.pmk, pmk_len);
@@ -487,7 +488,8 @@ pasn_derive_keys(struct pasn_data *pasn,
 	if (pasn->derive_kek) {
 		if (!pasn->kek_len)
 			pasn->kek_len = wpa_kek_len(pasn->akmp,
-						    pasn->pmk_len);
+						    pasn->pmk_len,
+						    pasn->group);
 		wpa_printf(MSG_DEBUG, "PASN: kek_len=%zu", pasn->kek_len);
 	}
 #endif /* CONFIG_ENC_ASSOC */
@@ -620,6 +622,7 @@ int handle_auth_pasn_resp(struct pasn_data *pasn, const u8 *own_addr,
 		pmkid = pmksa->pmkid;
 #ifdef CONFIG_SAE
 	} else if (pasn->akmp == WPA_KEY_MGMT_SAE ||
+		   pasn->akmp == WPA_KEY_MGMT_FT_SAE_EXT_KEY ||
 		   pasn->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
 		wpa_printf(MSG_DEBUG, "PASN: Use SAE PMKID");
 		pmkid = pasn->sae.pmkid;
@@ -649,7 +652,7 @@ int handle_auth_pasn_resp(struct pasn_data *pasn, const u8 *own_addr,
 #endif /* CONFIG_ENC_ASSOC */
 	} else {
 		if (wpa_pasn_add_rsne(buf, pmkid,
-				      pasn->akmp, pasn->cipher) < 0)
+				      pasn->akmp, pasn->cipher, 0) < 0)
 			goto fail;
 	}
 	/* No need to derive PMK if PMKSA is given */
@@ -730,7 +733,7 @@ int handle_auth_pasn_resp(struct pasn_data *pasn, const u8 *own_addr,
 			goto fail;
 
 		if (wpa_pasn_add_rsne(rsn_buf, pmkid,
-				      pasn->akmp, pasn->cipher) < 0)
+				      pasn->akmp, pasn->cipher, 0) < 0)
 			goto fail;
 
 		rsn_ie = wpabuf_head_u8(rsn_buf);
@@ -909,11 +912,26 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 	}
 #endif /* CONFIG_ENC_ASSOC */
 
-	if (!(rsn_data.key_mgmt & pasn->wpa_key_mgmt) ||
-	    !(rsn_data.pairwise_cipher & pasn->rsn_pairwise)) {
-		wpa_printf(MSG_DEBUG, "PASN: Mismatch in AKMP/cipher");
+	if (!(rsn_data.key_mgmt & pasn->wpa_key_mgmt)) {
+		wpa_printf(MSG_DEBUG, "PASN: Mismatch in AKMP");
 		status = WLAN_STATUS_INVALID_RSNE;
 		goto send_resp;
+	}
+
+	if (pasn->sec_prof_enabled && pasn->sec_prof_used) {
+		if (!(rsn_data.pairwise_cipher & WPA_CIPHER_GCMP_256)) {
+			wpa_printf(MSG_DEBUG,
+				   "PASN: Pairwise cipher not allowed for security profile");
+			status = WLAN_STATUS_INVALID_RSNE;
+			goto send_resp;
+		}
+	} else {
+		if (!(rsn_data.pairwise_cipher & pasn->rsn_pairwise)) {
+			wpa_printf(MSG_DEBUG,
+				   "PASN: Mismatch in pairwise cipher");
+			status = WLAN_STATUS_INVALID_RSNE;
+			goto send_resp;
+		}
 	}
 
 	pasn->akmp = rsn_data.key_mgmt;
@@ -1079,6 +1097,7 @@ int handle_auth_pasn_1(struct pasn_data *pasn,
 
 #ifdef CONFIG_SAE
 		if (pasn->akmp == WPA_KEY_MGMT_SAE ||
+		    pasn->akmp == WPA_KEY_MGMT_FT_SAE_EXT_KEY ||
 		    pasn->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
 			ret = pasn_wd_handle_sae_commit(pasn, own_addr,
 							peer_addr,
@@ -1343,6 +1362,7 @@ int handle_auth_pasn_3(struct pasn_data *pasn, const u8 *own_addr,
 
 #ifdef CONFIG_SAE
 		if (pasn->akmp == WPA_KEY_MGMT_SAE ||
+		    pasn->akmp == WPA_KEY_MGMT_FT_SAE_EXT_KEY ||
 		    pasn->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
 			ret = pasn_wd_handle_sae_confirm(pasn, peer_addr,
 							 wrapped_data);

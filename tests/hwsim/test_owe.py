@@ -1191,3 +1191,84 @@ def test_owe_sa_query(dev, apdev):
     dev[0].request("PMKSA_FLUSH")
     dev[0].request("REASSOCIATE")
     dev[0].wait_connected(timeout=10, error="Timeout on re-connection")
+
+def test_owe_only_mixed_eppke_profile(dev, apdev):
+    """OWE AP with owe_only and mixed OWE+EPPKE station profile"""
+    check_owe_capab(dev[0])
+    ssid = "test-eppke-profile-owe-ap"
+    params = hostapd.wpa2_params(ssid=ssid, passphrase=None,
+                                 wpa_key_mgmt="OWE", ieee80211w="2")
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    dev[0].connect(ssid, scan_freq="2412", key_mgmt="OWE EPPKE",
+                   ieee80211w="2", pairwise="CCMP", owe_only="1")
+    hapd.wait_sta()
+
+    status = dev[0].get_status()
+    if status['key_mgmt'] != 'OWE':
+        raise Exception("Unexpected key_mgmt: " + status['key_mgmt'])
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+def test_owe_transition_mixed_eppke_profile(dev, apdev):
+    """OWE transition mode with mixed OWE+EPPKE station profile"""
+    check_owe_capab(dev[0])
+
+    transition_bssid = apdev[1]['bssid']
+    params = {"ssid": "owe-random",
+              "wpa": "2",
+              "wpa_key_mgmt": "OWE",
+              "rsn_pairwise": "CCMP",
+              "ieee80211w": "2",
+              "owe_transition_bssid": transition_bssid,
+              "owe_transition_ssid": '"owe-test"',
+              "ignore_broadcast_ssid": "1"}
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    transition_bssid = apdev[0]['bssid']
+    params = {"ssid": "owe-test",
+              "owe_transition_bssid": transition_bssid,
+              "owe_transition_ssid": '"owe-random"'}
+    hapd_open = hostapd.add_ap(apdev[1], params)
+
+    dev[0].scan_for_bss(hapd.own_addr(), freq="2412")
+    dev[0].scan_for_bss(hapd_open.own_addr(), freq="2412")
+    dev[0].connect("owe-test", scan_freq="2412", key_mgmt="OWE EPPKE",
+                   ieee80211w="2", pairwise="CCMP")
+    hapd.wait_sta()
+
+    status = dev[0].get_status()
+    if status['key_mgmt'] != 'OWE':
+        raise Exception("Unexpected key_mgmt: " + status['key_mgmt'])
+    hwsim_utils.test_connectivity(dev[0], hapd)
+
+def test_owe_transition_mixed_eppke_profile_owe_only(dev, apdev):
+    """OWE transition mode with mixed OWE+EPPKE station profile and owe_only=1"""
+    check_owe_capab(dev[0])
+
+    transition_bssid = apdev[1]['bssid']
+    params = {"ssid": "owe-random",
+              "wpa": "2",
+              "wpa_key_mgmt": "OWE",
+              "rsn_pairwise": "CCMP",
+              "ieee80211w": "2",
+              "owe_transition_bssid": transition_bssid,
+              "owe_transition_ssid": '"owe-test"',
+              "ignore_broadcast_ssid": "1"}
+    hapd = hostapd.add_ap(apdev[0], params)
+
+    transition_bssid = apdev[0]['bssid']
+    params = {"ssid": "owe-test",
+              "owe_transition_bssid": transition_bssid,
+              "owe_transition_ssid": '"owe-random"'}
+    hapd_open = hostapd.add_ap(apdev[1], params)
+
+    dev[0].scan_for_bss(hapd.own_addr(), freq="2412")
+    dev[0].scan_for_bss(hapd_open.own_addr(), freq="2412")
+    dev[0].connect("owe-test", scan_freq="2412", key_mgmt="OWE EPPKE",
+                   ieee80211w="2", pairwise="CCMP", owe_only="1")
+    hapd.wait_sta()
+
+    status = dev[0].get_status()
+    if status['key_mgmt'] != 'OWE':
+        raise Exception("Unexpected key_mgmt: " + status['key_mgmt'])
+    hwsim_utils.test_connectivity(dev[0], hapd)

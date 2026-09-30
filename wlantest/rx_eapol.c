@@ -57,7 +57,7 @@ static size_t determine_mic_len(struct wlantest_sta *sta)
 		break;
 	}
 
-	return wpa_mic_len(sta->key_mgmt, pmk_len, hash);
+	return wpa_mic_len(sta->key_mgmt, pmk_len, hash, group);
 }
 
 
@@ -82,7 +82,8 @@ static int check_mic(struct wlantest_sta *sta, const u8 *kck, size_t kck_len,
 
 	if (wpa_eapol_key_mic(kck, kck_len, sta->key_mgmt,
 			      RSN_HASH_NOT_SPECIFIED, ver, buf, len,
-			      (u8 *) (key + 1)) == 0 &&
+			      (u8 *) (key + 1),
+			      PASN_GROUP_NOT_SPECIFIED) == 0 &&
 	    os_memcmp(rx_mic, key + 1, mic_len) == 0)
 		ret = 0;
 
@@ -248,7 +249,8 @@ static int try_pmk(struct wlantest *wt, struct wlantest_bss *bss,
 				  "Pairwise key expansion",
 				  aa, sa, sta->anonce,
 				  sta->snonce, &ptk, sta->key_mgmt,
-				  sta->pairwise_cipher, NULL, 0, kdk_len) < 0 ||
+				  sta->pairwise_cipher, NULL, 0, kdk_len,
+				  PASN_GROUP_NOT_SPECIFIED) < 0 ||
 		   check_mic(sta, ptk.kck, ptk.kck_len, ver, data, len) < 0) {
 		return -1;
 	}
@@ -1469,7 +1471,7 @@ static void rx_data_eapol_key(struct wlantest *wt, const u8 *bssid,
 
 		/* Group 20 */
 		alt_mic_len = wpa_mic_len(sta->key_mgmt, 48,
-					  RSN_HASH_SHA384);
+					  RSN_HASH_SHA384, 20);
 		alt_key_data_length = WPA_GET_BE16(mic + alt_mic_len);
 		alt_key_data = mic + alt_mic_len + 2;
 		if (len >= sizeof(*hdr) + alt_mic_len + 2 &&
@@ -1488,7 +1490,7 @@ static void rx_data_eapol_key(struct wlantest *wt, const u8 *bssid,
 
 		/* Group 21 */
 		alt_mic_len = wpa_mic_len(sta->key_mgmt, 64,
-					  RSN_HASH_SHA512);
+					  RSN_HASH_SHA512, 21);
 		alt_key_data_length = WPA_GET_BE16(mic + alt_mic_len);
 		alt_key_data = mic + alt_mic_len + 2;
 		if (len >= sizeof(*hdr) + alt_mic_len + 2 &&

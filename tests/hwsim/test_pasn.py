@@ -1451,3 +1451,53 @@ def test_pasn_group_negotiation_downgrade_attack(dev, apdev):
     # carries the real supported groups {19, 20, 21}. The station detects that
     # the previously rejected group 19 reappears and aborts.
     check_pasn_sta_groups(dev[0], hapd, expected_status=1)
+
+def run_pasn_ltf_keyseed_required(apdev, ap_secure_ltf, sta_secure_ltf,
+                                  expected_status):
+    params = pasn_ap_params("PASN", "CCMP", "19")
+    if ap_secure_ltf:
+        params['driver_params'] = "secure_ltf=1"
+    hapd = start_pasn_ap(apdev[0], params)
+
+    wpas = WpaSupplicant(global_iface='/tmp/wpas-wlan5')
+    if sta_secure_ltf:
+        wpas.interface_add("wlan5", drv_params="secure_ltf=1")
+    else:
+        wpas.interface_add("wlan5")
+    check_pasn_capab(wpas)
+
+    wpas.flush_scan_cache()
+    wpas.scan(type="ONLY", freq=2412)
+    bssid = hapd.own_addr()
+
+    cmd = "PASN_DRIVER auth bssid=%s akmp=PASN cipher=CCMP ltf_keyseed_required" % bssid
+    resp = wpas.request(cmd)
+    if "OK" not in resp:
+        raise Exception("Failed to queue PASN authentication")
+
+    ev = wpas.wait_event(["PASN-AUTH-STATUS"], timeout=10)
+    if ev is None:
+        raise Exception("No PASN-AUTH-STATUS event received")
+    if bssid.upper() not in ev.upper():
+        raise Exception("Unexpected BSSID in PASN-AUTH-STATUS: " + ev)
+    if "status=%d" % expected_status not in ev:
+        raise Exception("Unexpected status in PASN-AUTH-STATUS (expected %d): %s" %
+                        (expected_status, ev))
+
+def test_pasn_ltf_keyseed_required_success(dev, apdev):
+    """PASN: ltf_keyseed_required succeeds when both sides support Secure LTF"""
+    run_pasn_ltf_keyseed_required(apdev,
+                                  ap_secure_ltf=True, sta_secure_ltf=True,
+                                  expected_status=0)
+
+def test_pasn_ltf_keyseed_required_no_sta_secure_ltf(dev, apdev):
+    """PASN: ltf_keyseed_required fails when local device lacks Secure LTF"""
+    run_pasn_ltf_keyseed_required(apdev,
+                                  ap_secure_ltf=True, sta_secure_ltf=False,
+                                  expected_status=1)
+
+def test_pasn_ltf_keyseed_required_no_ap_secure_ltf(dev, apdev):
+    """PASN: ltf_keyseed_required fails when peer AP lacks Secure LTF"""
+    run_pasn_ltf_keyseed_required(apdev,
+                                  ap_secure_ltf=False, sta_secure_ltf=True,
+                                  expected_status=1)

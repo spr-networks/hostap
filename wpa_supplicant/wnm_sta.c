@@ -9,6 +9,7 @@
 #include "utils/includes.h"
 
 #include "utils/common.h"
+#include "utils/eloop.h"
 #include "common/ieee802_11_defs.h"
 #include "common/ieee802_11_common.h"
 #include "common/wpa_ctrl.h"
@@ -48,6 +49,20 @@ static int ieee80211_11_set_tfs_ie(struct wpa_supplicant *wpa_s,
 	wpa_printf(MSG_DEBUG, "%s: TFS set operation %d", __func__, oper);
 
 	return wpa_drv_wnm_oper(wpa_s, oper, addr, (u8 *) buf, &len);
+}
+
+
+static void wnmsleep_mode_exit_timeout(void *eloop_ctx, void *sock_ctx)
+{
+	struct wpa_supplicant *wpa_s = eloop_ctx;
+
+	if (wpa_s->wpa_state <= WPA_ASSOCIATED ||
+	    wpa_s->wnmsleep_state != WNM_SLEEP_WAIT_RESP_EXIT)
+		return;
+
+	wpa_printf(MSG_INFO,
+		   "WNM: Timeout on WNM Sleep Mode Response (exit) - deauthenticate");
+	wpa_supplicant_deauthenticate(wpa_s, WLAN_REASON_DEAUTH_LEAVING);
 }
 
 
@@ -189,11 +204,17 @@ int ieee802_11_send_wnmsleep_req(struct wpa_supplicant *wpa_s,
 	res = wpa_drv_send_action(wpa_s, wpa_s->assoc_freq, 0, wpa_s->bssid,
 				  wpa_s->own_addr, wpa_s->bssid,
 				  &mgmt->u.action.category, len, 0);
-	if (res < 0)
+	if (res < 0) {
 		wpa_printf(MSG_DEBUG, "Failed to send WNM-Sleep Request "
 			   "(action=%d, intval=%d)", action, intval);
-	else
-		wpa_s->wnmsleep_used = 1;
+	} else if (action == WNM_SLEEP_MODE_ENTER) {
+		wpa_s->wnmsleep_state = WNM_SLEEP_WAIT_RESP_ENTER;
+	} else if (action == WNM_SLEEP_MODE_EXIT) {
+		wpa_s->wnmsleep_state = WNM_SLEEP_WAIT_RESP_EXIT;
+		eloop_cancel_timeout(wnmsleep_mode_exit_timeout, wpa_s, NULL);
+		eloop_register_timeout(5, 0, wnmsleep_mode_exit_timeout,
+				       wpa_s, NULL);
+	}
 
 	os_free(wnmsleep_ie);
 	os_free(wnmtfs_ie);
@@ -208,6 +229,8 @@ static void wnm_sleep_mode_enter_success(struct wpa_supplicant *wpa_s,
 					 const u8 *tfsresp_ie_start,
 					 const u8 *tfsresp_ie_end)
 {
+	wpa_sm_notify_wnm_sleep_mode(wpa_s->wpa, true);
+
 	wpa_drv_wnm_oper(wpa_s, WNM_SLEEP_ENTER_CONFIRM,
 			 wpa_s->bssid, NULL, NULL);
 	/* remove GTK/IGTK ?? */
@@ -234,6 +257,8 @@ static void wnm_sleep_mode_exit_success(struct wpa_supplicant *wpa_s,
 {
 	u8 *ptr, *end;
 	u8 gtk_len;
+
+	wpa_sm_notify_wnm_sleep_mode(wpa_s->wpa, false);
 
 	wpa_drv_wnm_oper(wpa_s, WNM_SLEEP_EXIT_CONFIRM,  wpa_s->bssid,
 			 NULL, NULL);
@@ -324,7 +349,8 @@ static void ieee802_11_rx_wnmsleep_resp(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_OCV */
 	size_t left;
 
-	if (!wpa_s->wnmsleep_used) {
+	if (wpa_s->wnmsleep_state != WNM_SLEEP_WAIT_RESP_ENTER &&
+	    wpa_s->wnmsleep_state != WNM_SLEEP_WAIT_RESP_EXIT) {
 		wpa_printf(MSG_DEBUG,
 			   "WNM: Ignore WNM-Sleep Mode Response frame since WNM-Sleep Mode operation has not been requested");
 		return;
@@ -379,6 +405,16 @@ static void ieee802_11_rx_wnmsleep_resp(struct wpa_supplicant *wpa_s,
 		return;
 	}
 
+	if (!((wnmsleep_ie->action_type == WNM_SLEEP_MODE_ENTER &&
+	       wpa_s->wnmsleep_state == WNM_SLEEP_WAIT_RESP_ENTER) ||
+	      (wnmsleep_ie->action_type == WNM_SLEEP_MODE_EXIT &&
+	       wpa_s->wnmsleep_state == WNM_SLEEP_WAIT_RESP_EXIT))) {
+		wpa_printf(MSG_DEBUG,
+			   "WNM: Ignore WNM Sleep Mode Response frame with unexpected Action Type %u",
+			   wnmsleep_ie->action_type);
+		return;
+	}
+
 #ifdef CONFIG_OCV
 	if (wnmsleep_ie->action_type == WNM_SLEEP_MODE_EXIT &&
 	    wpa_sm_ocv_enabled(wpa_s->wpa)) {
@@ -400,7 +436,7 @@ static void ieee802_11_rx_wnmsleep_resp(struct wpa_supplicant *wpa_s,
 	}
 #endif /* CONFIG_OCV */
 
-	wpa_s->wnmsleep_used = 0;
+	wpa_s->wnmsleep_state = WNM_SLEEP_IDLE;
 
 	if (wnmsleep_ie->status == WNM_STATUS_SLEEP_ACCEPT ||
 	    wnmsleep_ie->status == WNM_STATUS_SLEEP_EXIT_ACCEPT_GTK_UPDATE) {
@@ -424,6 +460,13 @@ static void ieee802_11_rx_wnmsleep_resp(struct wpa_supplicant *wpa_s,
 			wpa_drv_wnm_oper(wpa_s, WNM_SLEEP_EXIT_FAIL,
 					 wpa_s->bssid, NULL, NULL);
 	}
+}
+
+
+void wnm_sleep_mode_clear(struct wpa_supplicant *wpa_s)
+{
+	eloop_cancel_timeout(wnmsleep_mode_exit_timeout, wpa_s, NULL);
+	wpa_s->wnmsleep_state = WNM_SLEEP_IDLE;
 }
 
 
@@ -1219,7 +1262,7 @@ int wnm_scan_process(struct wpa_supplicant *wpa_s, bool pre_scan_check)
 
 #ifndef CONFIG_NO_ROAMING
 	/* Apply normal roaming rules if we can stay with the current BSS */
-	if (current_bss && bss != current_bss &&
+	if (current_bss && bss && bss != current_bss &&
 	    wpa_scan_res_match(wpa_s, 0, current_bss, wpa_s->current_ssid,
 			       1, 0, false) &&
 	    !wpa_supplicant_need_to_roam_within_ess(wpa_s, current_bss, bss,

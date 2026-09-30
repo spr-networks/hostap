@@ -48,6 +48,7 @@
 #define DEFAULT_EXTENDED_KEY_ID 0
 #define DEFAULT_SCAN_RES_VALID_FOR_CONNECT 5
 #define DEFAULT_MLD_CONNECT_BAND_PREF MLD_CONNECT_BAND_PREF_AUTO
+#define DEFAULT_SECURITY_PROFILES 0
 
 #include "config_ssid.h"
 #include "wps/wps.h"
@@ -1939,6 +1940,16 @@ struct wpa_config {
 	 * 1: Prefer ranging responder role
 	 */
 	int pr_preferred_role;
+
+	/**
+	 * security_profiles - Enable support for security profiles
+	 *
+	 * IEEE P802.11bn/D2.0 defines a new mechanism for negotiating RSN
+	 * parameters using a Security Profile element. Support for that
+	 * functionality can be enabled (if supported by the driver and the
+	 * target AP) using this parameter.
+	 */
+	bool security_profiles;
 };
 
 

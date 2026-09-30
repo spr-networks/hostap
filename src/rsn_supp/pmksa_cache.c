@@ -61,18 +61,19 @@ static void pmksa_cache_free_entry(struct rsn_pmksa_cache *pmksa,
 void pmksa_cache_remove(struct rsn_pmksa_cache *pmksa,
 			struct rsn_pmksa_cache_entry *entry)
 {
-	struct rsn_pmksa_cache_entry *e;
+	struct rsn_pmksa_cache_entry *e, *prev = NULL;
 
 	e = pmksa->pmksa;
 	while (e) {
 		if (e == entry) {
-			pmksa->pmksa = entry->next;
+			if (!prev)
+				pmksa->pmksa = entry->next;
+			else
+				prev->next = entry->next;
 			break;
 		}
-		if (e->next == entry) {
-			e->next = entry->next;
-			break;
-		}
+		prev = e;
+		e = e->next;
 	}
 
 	if (!e) {

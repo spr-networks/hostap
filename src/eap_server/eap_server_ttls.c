@@ -1229,7 +1229,7 @@ static void eap_ttls_process(struct eap_sm *sm, void *priv,
 		return;
 
 	buf = tls_connection_get_success_data(data->ssl.conn);
-	if (!buf || wpabuf_len(buf) < 1) {
+	if (!buf || wpabuf_len(buf) < 2) {
 		wpa_printf(MSG_DEBUG,
 			   "EAP-TTLS: No success data in resumed session - reject attempt");
 		eap_ttls_state(data, FAILURE);
@@ -1247,6 +1247,11 @@ static void eap_ttls_process(struct eap_sm *sm, void *priv,
 
 	pos++;
 	id_len = *pos++;
+	if (wpabuf_len(buf) < 2U + id_len) {
+		/* Invalid cached data */
+		eap_ttls_state(data, FAILURE);
+		return;
+	}
 	wpa_hexdump_ascii(MSG_DEBUG, "EAP-TTLS: Identity from cached session",
 			  pos, id_len);
 	os_free(sm->identity);

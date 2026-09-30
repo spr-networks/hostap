@@ -27,3 +27,6 @@ sae: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f sae *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: sae
+	./sae corpus/*

@@ -605,6 +605,7 @@ int wpa_write_rsnxe(struct wpa_auth_config *conf, u8 *buf, size_t len)
 	size_t flen;
 
 	capab = rsnxe_capab(conf, conf->wpa_key_mgmt);
+	capab &= conf->rsnxe_capab_mask;
 
 	if (!capab)
 		return 0; /* no supported extended RSN capabilities */
@@ -915,7 +916,8 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 		    const u8 *rsnxe, size_t rsnxe_len,
 		    const u8 *mdie, size_t mdie_len,
 		    const u8 *owe_dh, size_t owe_dh_len,
-		    struct wpa_state_machine *assoc_sm, bool is_ml)
+		    struct wpa_state_machine *assoc_sm, bool is_ml,
+		    const struct security_profile_entry *security_profile)
 {
 	struct wpa_auth_config *conf = &wpa_auth->conf;
 	struct wpa_ie_data data;
@@ -1078,6 +1080,8 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 			wpa_auth->conf.rsn_override_key_mgmt_2;
 	else if (sm->rsn_override)
 		key_mgmt = data.key_mgmt & wpa_auth->conf.rsn_override_key_mgmt;
+	else if (security_profile)
+		key_mgmt = data.key_mgmt & security_profile->key_mgmt;
 	else
 		key_mgmt = data.key_mgmt & wpa_auth->conf.wpa_key_mgmt;
 
@@ -1167,6 +1171,9 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 	else if (version == WPA_PROTO_RSN && sm->rsn_override)
 		ciphers = data.pairwise_cipher &
 			wpa_auth->conf.rsn_override_pairwise;
+	else if (version == WPA_PROTO_RSN && security_profile)
+		ciphers = data.pairwise_cipher &
+			security_profile->pairwise_cipher;
 	else if (version == WPA_PROTO_RSN)
 		ciphers = data.pairwise_cipher & wpa_auth->conf.rsn_pairwise;
 	else
@@ -1192,6 +1199,14 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 				   "cipher %d", data.mgmt_group_cipher);
 			return WPA_INVALID_MGMT_GROUP_CIPHER;
 		}
+	}
+
+	/* All security profiles require MFP to be negotiated. Enforce this
+	 * regardless of the ieee80211w configuration parameter. */
+	if (security_profile && !(data.capabilities & WPA_CAPABILITY_MFPC)) {
+		wpa_printf(MSG_DEBUG,
+			   "STA used a security profile but did not enable MFP in RSNE");
+		return WPA_MGMT_FRAME_PROTECTION_VIOLATION;
 	}
 
 #ifdef CONFIG_SAE

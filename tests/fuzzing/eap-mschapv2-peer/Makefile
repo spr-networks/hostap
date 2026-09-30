@@ -23,3 +23,6 @@ eap-mschapv2-peer: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f eap-mschapv2-peer *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: eap-mschapv2-peer
+	./eap-mschapv2-peer corpus/*

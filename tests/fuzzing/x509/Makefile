@@ -25,3 +25,6 @@ x509: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f x509 *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: x509
+	./x509 corpus/*

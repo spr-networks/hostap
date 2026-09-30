@@ -40,6 +40,9 @@ int wpa_config_write(const char *name, struct wpa_config *config)
 	struct wpa_ssid *ssid;
 	struct wpa_config_blob *blob;
 
+	if (!name)
+		return -1;
+
 	wpa_printf(MSG_DEBUG, "Writing configuration file '%s'", name);
 
 	/* TODO: write global config parameters */

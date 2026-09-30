@@ -64,3 +64,6 @@ scan-res: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f scan-res *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: scan-res
+	./scan-res corpus/*

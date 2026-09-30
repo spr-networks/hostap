@@ -34,6 +34,7 @@ int wpas_nan_sched_config_map(struct wpa_supplicant *wpa_s, const char *cmd);
 int wpas_nan_ndp_request(struct wpa_supplicant *wpa_s, char *cmd);
 void wpas_nan_rx_naf(struct wpa_supplicant *wpa_s,
 		     const struct ieee80211_mgmt *mgmt, size_t len);
+void wpas_nan_flush_niks(struct wpa_supplicant *wpa_s);
 int wpas_nan_ndp_response(struct wpa_supplicant *wpa_s, char *cmd);
 int wpas_nan_ndp_terminate(struct wpa_supplicant *wpa_s, char *cmd);
 int wpas_nan_peer_info(struct wpa_supplicant *wpa_s, const char *cmd,
@@ -47,13 +48,19 @@ void wpas_nan_data_interface_removed(struct wpa_supplicant *wpa_s);
 
 int wpas_nan_pair(struct wpa_supplicant *wpa_s, const u8 *peer_addr,
 		  u8 auth_mode, int cipher, int handle, u8 peer_instance_id,
-		  bool responder, const char *password);
+		  bool responder, const char *password, bool auto_nik_exchange);
 int wpas_nan_pairing_start(struct wpa_supplicant *wpa_s, char *cmd);
 int wpas_nan_pairing_abort(struct wpa_supplicant *wpa_s, const char *cmd);
+int wpas_nan_send_nik(struct wpa_supplicant *wpa_s, const char *cmd);
+int wpas_nan_get_sae_pairing_tk(struct wpa_supplicant *wpa_s, const char *cmd,
+				char *buf, size_t buflen);
+int wpas_nan_get_sae_pairing_pmkid(struct wpa_supplicant *wpa_s,
+				   const char *cmd, char *buf, size_t buflen);
 int wpas_nan_pasn_auth_tx_status(struct wpa_supplicant *wpa_s, const u8 *data,
 				 size_t data_len, bool acked);
 int wpas_nan_pasn_auth_rx(struct wpa_supplicant *wpa_s,
-			  const struct ieee80211_mgmt *mgmt, size_t len);
+			  const struct ieee80211_mgmt *mgmt, size_t len,
+			  int freq);
 
 #else /* CONFIG_NAN */
 

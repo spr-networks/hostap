@@ -24,3 +24,6 @@ eap-sim-peer: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f eap-sim-peer *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: eap-sim-peer
+	./eap-sim-peer corpus/*

@@ -4,6 +4,11 @@ include ../rules.include
 CFLAGS += -DCONFIG_IEEE80211R_AP
 CFLAGS += -DCONFIG_IEEE80211R
 CFLAGS += -DCONFIG_TDLS
+CFLAGS += -DCONFIG_IEEE80211BE
+CFLAGS += -DCONFIG_IEEE80211AC
+CFLAGS += -DCONFIG_IEEE80211AX
+CFLAGS += -DCONFIG_IEEE80211BE
+CFLAGS += -DCONFIG_IEEE80211BN
 
 LIBS += $(SRC)/common/libcommon.a
 LIBS += $(SRC)/crypto/libcrypto.a
@@ -32,3 +37,6 @@ eapol-key-auth: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f eapol-key-auth *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: eapol-key-auth
+	./eapol-key-auth corpus/*

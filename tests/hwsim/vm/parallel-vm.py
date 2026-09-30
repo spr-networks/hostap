@@ -627,7 +627,8 @@ def main():
         lst = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         for l in lst.stdout.readlines():
             name = l.decode().split(' ')[0]
-            tests.append(name)
+            if len(name) > 0:
+                tests.append(name)
     if len(tests) == 0:
         sys.exit("No test cases selected")
 

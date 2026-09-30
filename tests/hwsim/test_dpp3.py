@@ -6,6 +6,7 @@
 
 import binascii
 import os
+import re
 import time
 
 import hostapd
@@ -574,6 +575,73 @@ def test_dpp_push_button_wpas_conf(dev, apdev):
     ev = dev[1].wait_event(["DPP-PB-RESULT"], timeout=1)
     if ev is None or "success" not in ev:
         raise Exception("Push button bootstrapping did not succeed on Configurator")
+
+def test_dpp_push_button_tx_wait_cancel(dev, apdev):
+    """DPP push button - verify channel scan is not disrupted by TX wait cancel"""
+    # Regression test: verify that a late NL80211_CMD_FRAME_WAIT_CANCEL does
+    # not cause wpas_dpp_pb_next() to run twice per TX attempt, skipping
+    # channels in the pre-discovery scan.
+    check_dpp_capab(dev[0], min_ver=3)
+    check_sae_capab(dev[0])
+    dev[0].set("sae_groups", "")
+
+    hapd = dpp_pb_ap(apdev[0])
+    try:
+        dev[0].set("dpp_config_processing", "2")
+
+        if "OK" not in hapd.request("DPP_PUSH_BUTTON"):
+            raise Exception("Failed to press push button on the AP")
+        if "OK" not in dev[0].request("DPP_PUSH_BUTTON"):
+            raise Exception("Failed to press push button on the station")
+
+        # Collect DPP-TX type=19 (PB Presence Announcement) frequencies
+        # visited before the Configurator is discovered.
+        pre_discovery_freqs = []
+        discovery_done = False
+        pb_result = None
+        start = time.time()
+        deadline = 30
+        while time.time() - start < deadline:
+            ev = dev[0].wait_event(["DPP-TX", "DPP-PB-RESULT",
+                                    "DPP-PB-STATUS"], timeout=1)
+            if ev is None:
+                continue
+            if "DPP-PB-RESULT" in ev:
+                pb_result = ev
+                break
+            if "DPP-PB-STATUS" in ev and "discovered" in ev:
+                discovery_done = True
+            if not discovery_done and "DPP-TX" in ev and "type=19" in ev:
+                m = re.search(r'\bfreq=(\d+)\b', ev)
+                if m:
+                    pre_discovery_freqs.append(m.group(1))
+
+        if pb_result is None or "success" not in pb_result:
+            raise Exception("Push button bootstrapping did not succeed on STA: " +
+                            str(pb_result))
+
+        ev = hapd.wait_event(["DPP-PB-RESULT"], timeout=5)
+        if ev is None or "success" not in ev:
+            raise Exception("Push button bootstrapping did not succeed on AP")
+
+        dev[0].wait_connected()
+
+        # Verify the pre-discovery scan visited at least two distinct
+        # frequencies. The scan covers both 2.4 GHz and 5 GHz channels, so
+        # at least two unique frequencies are expected. With the bug, the
+        # double channel-index increment reduces the number of unique channels
+        # visited per round, which can cause the AP to be missed.
+        if pre_discovery_freqs:
+            unique_pre_discovery = set(pre_discovery_freqs)
+            if len(unique_pre_discovery) < 2:
+                logger.info("Pre-discovery scan visited too few unique channels: %s. Expected at least 2 distinct frequencies. This may indicate that the channel index was incremented twice per TX attempt due to a duplicate wpas_dpp_pb_next() call triggered by a late NL80211_CMD_FRAME_WAIT_CANCEL event." %
+                            str(unique_pre_discovery))
+                raise Exception("Pre-discovery scan visited too few unique channels: %s" %
+                    str(unique_pre_discovery))
+        else:
+            logger.info("No pre-discovery TX events captured before Configurator discovery; skipping frequency count check")
+    finally:
+        dev[0].set("dpp_config_processing", "0", allow_fail=True)
 
 def test_dpp_private_peer_introduction(dev, apdev):
     """DPP private peer introduction"""

@@ -453,7 +453,7 @@ static int issuer_match(X509 *cert, X509 *issuer, CertID *certid)
 
 static X509 * ocsp_find_signer(STACK_OF(X509) *certs, ResponderID *rid)
 {
-	unsigned int i;
+	int i;
 	unsigned char hash[SHA_DIGEST_LENGTH];
 
 	if (rid->type == 0) {

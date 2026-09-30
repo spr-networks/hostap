@@ -35,12 +35,13 @@ static void http_req(void *ctx, struct http_request *req)
 	int done = 0;
 
 	url = http_request_get_uri(req);
-	wpa_printf(MSG_INFO, "Browser response received: %s", url);
+	wpa_printf(MSG_INFO, "Browser response received: %s",
+		  url ? url : "(none)");
 
-	if (os_strcmp(url, "/") == 0) {
+	if (url && os_strcmp(url, "/") == 0) {
 		data->success = 1;
 		done = 1;
-	} else if (os_strncmp(url, "/osu/", 5) == 0) {
+	} else if (url && os_strncmp(url, "/osu/", 5) == 0) {
 		data->success = atoi(url + 5);
 		done = 1;
 	}

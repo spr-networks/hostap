@@ -252,7 +252,8 @@ static int ibss_rsn_supp_init(struct ibss_rsn_peer *peer, const u8 *own_addr,
 	wpa_sm_set_param(peer->supp, WPA_PARAM_PAIRWISE, WPA_CIPHER_CCMP);
 	wpa_sm_set_param(peer->supp, WPA_PARAM_GROUP, WPA_CIPHER_CCMP);
 	wpa_sm_set_param(peer->supp, WPA_PARAM_KEY_MGMT, WPA_KEY_MGMT_PSK);
-	wpa_sm_set_pmk(peer->supp, psk, PMK_LEN, NULL, NULL);
+	wpa_sm_set_pmk(peer->supp, psk, PMK_LEN, NULL, NULL,
+		       PASN_GROUP_NOT_SPECIFIED);
 
 	peer->supp_ie_len = sizeof(peer->supp_ie);
 	if (wpa_sm_set_assoc_wpa_ie_default(peer->supp, peer->supp_ie,
@@ -497,7 +498,7 @@ static int ibss_rsn_auth_init(struct ibss_rsn *ibss_rsn,
 				"\x01\x00\x00\x0f\xac\x04"
 				"\x01\x00\x00\x0f\xac\x02"
 				"\x00\x00", 22, NULL, 0, NULL, 0, NULL, 0,
-				NULL, false) != WPA_IE_OK) {
+				NULL, false, NULL) != WPA_IE_OK) {
 		wpa_printf(MSG_DEBUG, "AUTH: wpa_validate_wpa_ie() failed");
 		return -1;
 	}

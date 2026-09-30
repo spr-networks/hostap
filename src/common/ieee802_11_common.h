@@ -133,6 +133,7 @@ struct ieee802_11_elems {
 	const u8 *nan_ie;
 	const u8 *uhr_capabilities;
 	const u8 *uhr_operation;
+	const u8 *security_profile;
 
 	u8 ssid_len;
 	u8 supp_rates_len;
@@ -209,6 +210,7 @@ struct ieee802_11_elems {
 	size_t nan_len;
 	u8 uhr_capabilities_len;
 	u8 uhr_operation_len;
+	u8 security_profile_len;
 
 	struct mb_ies_info mb_ies;
 

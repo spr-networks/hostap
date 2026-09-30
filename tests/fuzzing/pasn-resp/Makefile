@@ -39,3 +39,6 @@ pasn-resp: $(OBJS)
 
 clean: common-clean
 	rm -f pasn-resp *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: pasn-resp
+	./pasn-resp corpus/*

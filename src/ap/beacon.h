@@ -32,6 +32,9 @@ void sta_track_claim_taxonomy_info(struct hostapd_iface *iface, const u8 *addr,
 				   struct wpabuf **probe_ie_taxonomy);
 
 const u8 * hostapd_wpa_ie(struct hostapd_data *hapd, u8 eid);
+u8 * hostapd_get_rsn_override_elems(struct hostapd_data *hapd, u8 *pos,
+				    size_t len);
+size_t hostapd_get_rsn_override_elems_len(struct hostapd_data *hapd);
 
 u8 * hostapd_unsol_bcast_probe_resp(struct hostapd_data *hapd,
 				    struct unsol_bcast_probe_resp *ubpr);

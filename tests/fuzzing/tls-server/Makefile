@@ -30,3 +30,6 @@ tls-server: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f tls-server *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: tls-server
+	./tls-server corpus/*

@@ -334,8 +334,13 @@ struct wpa_auth_config {
 
 	bool spp_amsdu;
 
+	u64 rsnxe_capab_mask;
+
 	unsigned int sae_pw_id_num;
 	u8 sae_pw_id_key[32];
+
+	u8 security_profile[257];
+	size_t security_profile_len;
 };
 
 typedef enum {
@@ -479,7 +484,8 @@ wpa_validate_wpa_ie(struct wpa_authenticator *wpa_auth,
 		    const u8 *mdie, size_t mdie_len,
 		    const u8 *owe_dh, size_t owe_dh_len,
 		    struct wpa_state_machine *assoc_sm,
-		    bool is_ml);
+		    bool is_ml,
+		    const struct security_profile_entry *security_profile);
 int wpa_validate_osen(struct wpa_authenticator *wpa_auth,
 		      struct wpa_state_machine *sm,
 		      const u8 *osen_ie, size_t osen_ie_len);
@@ -668,6 +674,8 @@ void wpa_auth_set_rsn_selection(struct wpa_state_machine *sm, const u8 *ie,
 				size_t len);
 void wpa_auth_set_dpp_z(struct wpa_state_machine *sm, const struct wpabuf *z);
 void wpa_auth_set_ssid_protection(struct wpa_state_machine *sm, bool val);
+void wpa_auth_set_security_profile(struct wpa_state_machine *sm,
+				   const struct security_profile_entry *val);
 void wpa_auth_set_transition_disable(struct wpa_authenticator *wpa_auth,
 				     u8 val);
 
@@ -678,7 +686,7 @@ u8 * wpa_auth_write_assoc_resp_eppke(struct wpa_state_machine *sm,
 				     u8 *pos, size_t max_len, bool is_ml);
 void wpa_store_eppke_pmk_ptk_sm(struct wpa_state_machine *sm,
 				const struct wpa_ptk *ptk, const u8 *pmk,
-				size_t pmk_len);
+				size_t pmk_len, u16 pasn_group);
 int wpa_auth_epp_derive_new_pmkid(const u8 *anonce, const u8 *snonce,
 				  int akmp, size_t pmk_len, u8 *pmkid);
 bool wpa_auth_ap_sta_support_assoc_enc(struct wpa_state_machine *sm);

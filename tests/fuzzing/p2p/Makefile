@@ -21,3 +21,6 @@ p2p: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f p2p *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: p2p
+	./p2p corpus/*

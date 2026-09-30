@@ -2401,8 +2401,12 @@ int sae_write_confirm(struct sae_data *sae, struct wpabuf *buf)
 	size_t hash_len;
 	int res;
 
-	if (sae->tmp == NULL)
+	if (!sae->tmp || !sae->tmp->own_commit_scalar ||
+	    !sae->peer_commit_scalar) {
+		wpa_printf(MSG_INFO, "%s: No own/peer scalar available",
+			   __func__);
 		return -1;
+	}
 
 	hash_len = sae->tmp->kck_len;
 

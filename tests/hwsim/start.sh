@@ -130,6 +130,7 @@ for i in 0 1 2; do
          -ddKt$TRACE -f $LOGDIR/log$i $DBUSARG &
 done
 sudo $(printf -- "$VALGRIND_WPAS" 5) $WPAS -g /tmp/wpas-wlan5 -G$GROUP \
+    -x/tmp/logs/ \
     -ddKt$TRACE -f $LOGDIR/log5 &
 sudo $(printf -- "$VALGRIND_WPAS" 6) $WPAS -g /tmp/wpas-wlan6 -G$GROUP \
     -ddKt$TRACE -f $LOGDIR/log6 &

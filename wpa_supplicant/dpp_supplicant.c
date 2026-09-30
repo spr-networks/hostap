@@ -1336,7 +1336,13 @@ void wpas_dpp_tx_wait_expire(struct wpa_supplicant *wpa_s)
 	int freq;
 
 #ifdef CONFIG_DPP3
-	if (wpa_s->dpp_pb_announcement && wpa_s->dpp_pb_discovery_done) {
+	if (wpa_s->dpp_pb_announcement && !wpa_s->dpp_pb_discovery_done) {
+		/* The TX wait window expired before the TX status callback
+		 * fired, meaning the frame was not sent successfully. Once
+		 * the Configurator has been discovered (dpp_pb_discovery_done),
+		 * the TX status callback always handles the retry itself, so
+		 * do not schedule an additional wpas_dpp_pb_next() here to
+		 * avoid running it twice. */
 		wpa_printf(MSG_DEBUG,
 			   "DPP: Failed to send push button announcement");
 		if (eloop_register_timeout(0, 0, wpas_dpp_pb_next,
@@ -5552,6 +5558,7 @@ static void wpas_dpp_pb_tx_status(struct wpa_supplicant *wpa_s,
 		wpa_printf(MSG_DEBUG,
 			   "DPP: Failed to send push button announcement on %d MHz",
 			   freq);
+		offchannel_send_action_done(wpa_s);
 		if (eloop_register_timeout(0, 0, wpas_dpp_pb_next,
 					   wpa_s, NULL) < 0)
 			wpas_dpp_push_button_stop(wpa_s);

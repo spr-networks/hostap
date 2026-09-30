@@ -475,7 +475,7 @@ static void ieee802_11_rx_bss_trans_mgmt_query(struct hostapd_data *hapd,
 	}
 	wpa_msg(hapd->msg_ctx, MSG_INFO,
 		BSS_TM_QUERY MACSTR " reason=%u%s%s",
-		MAC2STR(addr), reason, hex ? " neighbor=" : "", hex);
+		MAC2STR(addr), reason, hex ? " neighbor=" : "", hex ? hex : "");
 	os_free(hex);
 
 	ieee802_11_send_bss_trans_mgmt_request(hapd, addr, dialog_token);

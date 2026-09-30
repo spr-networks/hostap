@@ -1150,6 +1150,7 @@ class WpaSupplicant:
                       "enable_4addr_mode",
                       "pmksa_privacy",
                       "eap_over_auth_frame",
+                      "security_profiles",
                       "disable_uhr"]
         for field in not_quoted:
             if field in kwargs and kwargs[field]:

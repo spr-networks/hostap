@@ -735,7 +735,7 @@ static int pasn_test_no_pasn_auth(void)
 			     "Pairwise key expansion",
 			     spa, aa, snonce, anonce,
 			     &ptk, WPA_KEY_MGMT_SAE, WPA_CIPHER_CCMP,
-			     NULL, 0, WPA_KDK_MAX_LEN);
+			     NULL, 0, WPA_KDK_MAX_LEN, 19);
 
 	if (ret)
 		return ret;

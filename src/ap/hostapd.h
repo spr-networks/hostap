@@ -17,6 +17,8 @@
 #include "common/dpp.h"
 #include "utils/list.h"
 #include "ap_config.h"
+#include "comeback_token.h"
+#include "mld.h"
 #include "drivers/driver.h"
 
 #define OCE_STA_CFON_ENABLED(hapd) \
@@ -174,21 +176,6 @@ struct hostapd_sae_commit_queue {
 	u8 msg[];
 };
 
-struct mld_link_info {
-	u8 valid:1;
-	u8 nstr_bitmap_len:2;
-	u8 local_addr[ETH_ALEN];
-	u8 peer_addr[ETH_ALEN];
-
-	u8 nstr_bitmap[2];
-
-	u16 capability;
-
-	u16 status;
-	u16 resp_sta_profile_len;
-	u8 *resp_sta_profile;
-};
-
 /**
  * struct hostapd_data - hostapd per-BSS data structure
  */
@@ -256,6 +243,9 @@ struct hostapd_data {
 	struct dl_list erp_keys; /* struct eap_server_erp_key */
 
 	int parameter_set_count;
+
+	/* Previous WMM element information */
+	struct hostapd_wmm_ac_params prev_wmm[WMM_AC_NUM];
 
 	/* Time Advertisement */
 	u8 time_update_counter;
@@ -394,7 +384,6 @@ struct hostapd_data {
 #ifdef CONFIG_SAE
 
 #define COMEBACK_KEY_SIZE 8
-#define COMEBACK_PENDING_IDX_SIZE 256
 
 	/** Key used for generating SAE anti-clogging tokens */
 	u8 comeback_key[COMEBACK_KEY_SIZE];
@@ -566,6 +555,11 @@ struct hostapd_mld {
 
 	struct hostapd_data *fbss;
 	struct dl_list links; /* List head of all affiliated links */
+
+	/* Bitmap for WDS interface name identifiers (1..2007) used to generate
+	 * unique interface names for WDS stations at the MLD level
+	 */
+	u32 wds_ifname_id[AID_WORDS];
 
 	int ctrl_sock;
 	struct dl_list ctrl_dst;
@@ -742,9 +736,6 @@ struct hostapd_iface {
 #ifdef CONFIG_AIRTIME_POLICY
 	unsigned int airtime_quantum;
 #endif /* CONFIG_AIRTIME_POLICY */
-
-	/* Previous WMM element information */
-	struct hostapd_wmm_ac_params prev_wmm[WMM_AC_NUM];
 
 	/* Maximum number of interfaces supported for MBSSID advertisement */
 	unsigned int mbssid_max_interfaces;

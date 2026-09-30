@@ -21,3 +21,6 @@ json: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f json *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: json
+	./json corpus/*

@@ -678,6 +678,8 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 	pr.pd_preamble_bitmap = capa->pd_preambles;
 	pr.max_rx_antenna = capa->max_rx_antenna;
 	pr.max_tx_antenna = capa->max_tx_antenna;
+	pr.support_6ghz = capa->support_6ghz &&
+		wpas_is_6ghz_supported(wpa_s, true);
 
 	wpas_pr_setup_edca_channels(wpa_s, &pr.edca_channels,
 				    capa->pd_bandwidths,
@@ -707,8 +709,6 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 	pr.pr_max_peer_rsta_role = capa->rsta.max_peers;
 	pr.max_ftms_per_burst = capa->max_ftms_per_burst;
 
-	pr.support_6ghz = capa->support_6ghz;
-
 	pr.pasn_send_mgmt = wpas_pr_pasn_send_mgmt;
 	pr.negotiation_started = wpas_pr_pasn_negotiation_started;
 	pr.pasn_result = wpas_pr_pasn_result;
@@ -723,7 +723,10 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 				   capa->pd_bandwidths, capa->pd_preambles,
 				   pr.support_6ghz);
 
-	if (wpa_s->conf->country[0] && wpa_s->conf->country[1]) {
+	if (wpa_s->device_country[0] && wpa_s->device_country[1]) {
+		os_memcpy(pr.country, wpa_s->device_country, 2);
+		pr.country[2] = 0x04;
+	} else if (wpa_s->conf->country[0] && wpa_s->conf->country[1]) {
 		os_memcpy(pr.country, wpa_s->conf->country, 2);
 		pr.country[2] = 0x04;
 	} else {
@@ -767,6 +770,46 @@ int wpas_pr_init(struct wpa_global *global, struct wpa_supplicant *wpa_s,
 	global->pr_init_wpa_s = wpa_s;
 
 	return 0;
+}
+
+
+void wpas_pr_update_channel_list(struct wpa_supplicant *wpa_s)
+{
+	struct pr_data *pr;
+
+	if (!wpa_s->global || !wpa_s->global->pr)
+		return;
+
+	pr = wpa_s->global->pr;
+	if (!pr->cfg)
+		return;
+
+	wpa_s->is_6ghz_enabled = wpas_is_6ghz_supported(wpa_s, true);
+	pr->cfg->support_6ghz = wpa_s->support_6ghz && wpa_s->is_6ghz_enabled;
+
+	if (wpa_s->device_country[0] && wpa_s->device_country[1]) {
+		os_memcpy(pr->cfg->country, wpa_s->device_country, 2);
+		pr->cfg->country[2] = 0x04;
+	} else if (wpa_s->conf->country[0] && wpa_s->conf->country[1]) {
+		os_memcpy(pr->cfg->country, wpa_s->conf->country, 2);
+		pr->cfg->country[2] = 0x04;
+	}
+
+	wpa_printf(MSG_DEBUG,
+		   "PR: Update channel list (support_6ghz=%d, country=%.2s)",
+		   pr->cfg->support_6ghz, pr->cfg->country);
+
+	os_memset(&pr->cfg->edca_channels, 0, sizeof(pr->cfg->edca_channels));
+	wpas_pr_setup_edca_channels(wpa_s, &pr->cfg->edca_channels,
+				    pr->cfg->pd_format_bw_bitmap,
+				    pr->cfg->pd_preamble_bitmap,
+				    pr->cfg->support_6ghz);
+
+	os_memset(&pr->cfg->ntb_channels, 0, sizeof(pr->cfg->ntb_channels));
+	wpas_pr_setup_ntb_channels(wpa_s, &pr->cfg->ntb_channels,
+				   pr->cfg->pd_format_bw_bitmap,
+				   pr->cfg->pd_preamble_bitmap,
+				   pr->cfg->support_6ghz);
 }
 
 

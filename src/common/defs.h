@@ -53,6 +53,8 @@
 #define WPA_KEY_MGMT_FT_SAE_EXT_KEY BIT(27)
 #define WPA_KEY_MGMT_IEEE8021X_SHA384 BIT(28)
 #define WPA_KEY_MGMT_EPPKE BIT(29)
+#define WPA_KEY_MGMT_PQC_8021X BIT(30)
+#define WPA_KEY_MGMT_FT_PQC_8021X BIT(31)
 
 
 #define WPA_KEY_MGMT_FT (WPA_KEY_MGMT_FT_PSK | \
@@ -179,15 +181,20 @@ static inline int wpa_key_mgmt_suite_b(int akm)
 			 WPA_KEY_MGMT_IEEE8021X_SUITE_B_192));
 }
 
+static inline int wpa_key_mgmt_enhanced_open(int akm)
+{
+	return !!(akm & (WPA_KEY_MGMT_OWE |
+			 WPA_KEY_MGMT_EPPKE));
+}
+
 static inline int wpa_key_mgmt_wpa(int akm)
 {
 	return wpa_key_mgmt_wpa_ieee8021x(akm) ||
 		wpa_key_mgmt_wpa_psk(akm) ||
 		wpa_key_mgmt_fils(akm) ||
 		wpa_key_mgmt_sae(akm) ||
-		akm == WPA_KEY_MGMT_OWE ||
-		akm == WPA_KEY_MGMT_DPP ||
-		akm == WPA_KEY_MGMT_EPPKE;
+		wpa_key_mgmt_enhanced_open(akm) ||
+		akm == WPA_KEY_MGMT_DPP;
 }
 
 static inline int wpa_key_mgmt_wpa_any(int akm)
@@ -211,12 +218,6 @@ static inline int wpa_key_mgmt_cross_akm(int akm)
 static inline bool wpa_key_mgmt_eppke(int akm)
 {
 	return !!(akm & WPA_KEY_MGMT_EPPKE);
-}
-
-static inline int wpa_key_mgmt_enhanced_open(int akm)
-{
-	return !!(akm & (WPA_KEY_MGMT_OWE |
-			 WPA_KEY_MGMT_EPPKE));
 }
 
 static inline int wpa_key_mgmt_only_enhanced_open(int akm)

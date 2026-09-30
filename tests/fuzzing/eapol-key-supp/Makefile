@@ -28,3 +28,6 @@ eapol-key-supp: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f eapol-key-supp *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: eapol-key-supp
+	./eapol-key-supp corpus/*

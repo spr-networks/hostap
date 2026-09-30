@@ -592,7 +592,14 @@ endif
 ifdef CONFIG_NAN_USD
 OBJS += src/common/nan_de.c
 OBJS += src/ap/nan_usd_ap.c
+OBJS += src/nan/nan_crypto.c
 L_CFLAGS += -DCONFIG_NAN_USD
+endif
+
+ifdef CONFIG_PQC
+CONFIG_IEEE8021X_AUTH=y
+CONFIG_PMKSA_PRIVACY=y
+L_CFLAGS += -DCONFIG_PQC
 endif
 
 ifdef CONFIG_PMKSA_PRIVACY

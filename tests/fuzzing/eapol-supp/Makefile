@@ -26,3 +26,6 @@ eapol-supp: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f eapol-supp *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: eapol-supp
+	./eapol-supp corpus/*

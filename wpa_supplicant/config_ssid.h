@@ -1406,6 +1406,13 @@ struct wpa_ssid {
 	 */
 	int *pasn_groups;
 #endif /* CONFIG_PASN */
+
+	/**
+	 * security_profiles - Array of enabled security profiles
+	 *
+	 * This is a -1 terminated int_array of enabled security profiles.
+	 */
+	int *security_profiles;
 };
 
 #endif /* CONFIG_SSID_H */

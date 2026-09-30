@@ -3498,6 +3498,13 @@ static int wpa_cli_cmd_nan_pair_abort(struct wpa_ctrl *ctrl, int argc,
 	return wpa_cli_cmd(ctrl, "NAN_PAIR_ABORT", 1, argc, argv);
 }
 
+
+static int wpa_cli_cmd_nan_send_nik(struct wpa_ctrl *ctrl, int argc,
+				    char *argv[])
+{
+	return wpa_cli_cmd(ctrl, "NAN_SEND_NIK", 1, argc, argv);
+}
+
 #endif /* CONFIG_PASN */
 
 #endif /* CONFIG_NAN */
@@ -4323,6 +4330,9 @@ static const struct wpa_cli_cmd wpa_cli_commands[] = {
 	{ "nan_pair_abort", wpa_cli_cmd_nan_pair_abort, NULL,
 	  cli_cmd_flag_none,
 	  " = <peer_mac> = Abort NAN pairing with peer" },
+	{ "nan_send_nik", wpa_cli_cmd_nan_send_nik, NULL,
+	  cli_cmd_flag_none,
+	  " = <peer_mac> = Send deferred NAN NIK follow-up to peer" },
 #endif /* CONFIG_PASN */
 #endif /* CONFIG_NAN */
 	{ "new_random_mac_address", wpa_cli_cmd_generate_new_mac, NULL,

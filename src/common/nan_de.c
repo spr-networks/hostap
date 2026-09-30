@@ -119,6 +119,10 @@ enum nan_de_flush_tracked_tx_reason {
 	NAN_DE_FLUSH_TRACKED_TX_WAIT_EXPIRED,
 };
 
+/* Maximum number of associated self NIKs to store for a peer/group NIK entry */
+#define NAN_DE_MAX_ASSOC_NIKS 16
+#define NAN_RSID_MAX_RETRIES 3
+
 struct nan_de {
 	u8 nmi[ETH_ALEN];
 	u8 cluster_id[ETH_ALEN];
@@ -142,6 +146,17 @@ struct nan_de {
 	struct os_reltime suspend_cycle_start;
 
 	int dw_freq;
+
+	/* State for immediate response optimization */
+	u8 matched_nik[NAN_NIK_LEN];
+	bool matched_nik_set;
+	u8 matched_nik_type;
+	/*
+	 * Associated NIKs copied from the matched NIK entry (for PEER/GROUP
+	 * types). Used to build SN tags in the outgoing IRSA.
+	 */
+	u8 matched_assoc_niks[NAN_DE_MAX_ASSOC_NIKS][NAN_NIK_LEN];
+	size_t matched_assoc_nik_count;
 
 	/* RSSI threshold for close proximity, or zero if not limited */
 	int rssi_threshold;
@@ -173,6 +188,15 @@ bool nan_de_is_nan_network_id(const u8 *addr)
 bool nan_de_is_p2p_network_id(const u8 *addr)
 {
 	return ether_addr_equal(addr, p2p_network_id);
+}
+
+
+static struct nan_de_service * nan_de_get_service(const struct nan_de *de,
+						  int id)
+{
+	if (id < 1 || id > NAN_DE_MAX_SERVICE)
+		return NULL;
+	return de->service[id - 1];
 }
 
 
@@ -212,6 +236,8 @@ static void nan_de_service_free(struct nan_de_service *srv)
 	wpabuf_free(srv->srf);
 	os_free(srv->freq_list);
 	os_free(srv->cipher_suites_list);
+	os_free(srv->publish.pairing_setup_info);
+	os_free(srv->subscribe.pairing_setup_info);
 #ifdef CONFIG_NAN
 	nan_crypto_clear_pmkid_list(&srv->pmkid_list);
 #endif /* CONFIG_NAN */
@@ -438,7 +464,7 @@ static struct wpabuf * nan_de_alloc_sdf(struct nan_de *de, const u8 *dst,
 static int nan_de_tx(struct nan_de *de, unsigned int freq,
 		     unsigned int wait_time,
 		     const u8 *dst, const u8 *src, const u8 *bssid,
-		     const struct wpabuf *buf,  u32 *cookie)
+		     const struct wpabuf *buf,  u32 *cookie, int handle)
 {
 	struct nan_de_tracked_tx *tracked_tx = NULL;
 	int res;
@@ -453,7 +479,8 @@ static int nan_de_tx(struct nan_de *de, unsigned int freq,
 			return -1;
 	}
 
-	res = de->cb.tx(de->cb.ctx, freq, wait_time, dst, src, bssid, buf);
+	res = de->cb.tx(de->cb.ctx, freq, wait_time, dst, src, bssid, buf,
+			handle);
 	if (res < 0) {
 		if (tracked_tx) {
 			dl_list_del(&tracked_tx->list);
@@ -489,19 +516,126 @@ static void nan_buf_add_npba(const struct nan_de *de,
 }
 
 
-static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
-			  unsigned int wait_time,
-			  enum nan_service_control_type type,
-			  const u8 *dst, const u8 *a3, u8 req_instance_id,
-			  const struct wpabuf *ssi,
-			  const struct wpabuf *attrs,  u32 *cookie)
+struct wpabuf * nan_build_pbea(u16 extended_pbm,
+			       const u8 *pairing_setup_info,
+			       u16 pairing_setup_info_len)
 {
 	struct wpabuf *buf;
-	size_t len = 0, sda_len, sdea_len;
+	u8 control = 0;
+	size_t attr_len = 1; /* Control field */
+
+	if (!extended_pbm && !pairing_setup_info_len)
+		return NULL;
+
+	if (extended_pbm) {
+		control |= BIT(0);
+		attr_len += 2;
+	}
+	if (pairing_setup_info_len) {
+		control |= BIT(1);
+		attr_len += 2 + pairing_setup_info_len;
+	}
+
+	buf = wpabuf_alloc(NAN_ATTR_HDR_LEN + attr_len);
+	if (!buf)
+		return NULL;
+
+	wpabuf_put_u8(buf, NAN_ATTR_PBEA);
+	wpabuf_put_le16(buf, attr_len);
+	wpabuf_put_u8(buf, control);
+
+	if (extended_pbm)
+		wpabuf_put_le16(buf, extended_pbm);
+
+	if (pairing_setup_info_len) {
+		wpabuf_put_le16(buf, pairing_setup_info_len);
+		wpabuf_put_data(buf, pairing_setup_info,
+				pairing_setup_info_len);
+	}
+
+	return buf;
+}
+
+
+static size_t nan_pbea_len(const struct nan_de_service *srv)
+{
+	u16 extended_pbm;
+	u16 pairing_setup_info_len;
+	size_t len;
+
+	if (srv->type == NAN_DE_PUBLISH) {
+		extended_pbm = srv->publish.extended_pbm;
+		pairing_setup_info_len = srv->publish.pairing_setup_info_len;
+	} else {
+		extended_pbm = srv->subscribe.extended_pbm;
+		pairing_setup_info_len = srv->subscribe.pairing_setup_info_len;
+	}
+
+	if (!extended_pbm && !pairing_setup_info_len)
+		return 0;
+
+	len = NAN_ATTR_HDR_LEN + 1; /* attr header + Control field */
+	if (extended_pbm)
+		len += 2;
+	if (pairing_setup_info_len)
+		len += 2 + pairing_setup_info_len;
+
+	return len;
+}
+
+
+static void nan_buf_add_pbea(struct nan_de *de, struct nan_de_service *srv,
+			     struct wpabuf *buf)
+{
+	struct wpabuf *pbea;
+	const u8 *pairing_setup_info;
+	u16 extended_pbm;
+	u16 pairing_setup_info_len;
+
+	wpa_printf(MSG_DEBUG, "NAN: Add PBEA");
+
+	if (srv->type == NAN_DE_PUBLISH) {
+		extended_pbm = srv->publish.extended_pbm;
+		pairing_setup_info = srv->publish.pairing_setup_info;
+		pairing_setup_info_len = srv->publish.pairing_setup_info_len;
+	} else {
+		extended_pbm = srv->subscribe.extended_pbm;
+		pairing_setup_info = srv->subscribe.pairing_setup_info;
+		pairing_setup_info_len = srv->subscribe.pairing_setup_info_len;
+	}
+
+	pbea = nan_build_pbea(extended_pbm, pairing_setup_info,
+			      pairing_setup_info_len);
+	if (pbea) {
+		wpabuf_put_buf(buf, pbea);
+		wpabuf_free(pbea);
+	}
+}
+
+
+static size_t nan_de_sdf_attrs_put(struct wpabuf *buf, struct nan_de *de,
+				   struct nan_de_service *srv,
+				   enum nan_service_control_type type,
+				   u8 req_instance_id,
+				   const struct wpabuf *ssi,
+				   const struct wpabuf *attrs,
+				   const u8 *irsa_tag_tlv,
+				   u16 irsa_tag_tlv_len,
+				   bool is_unicast,
+				   bool *has_zero_rsid)
+{
+	size_t len = 0, sda_len, sdea_len, rsia_len = 0;
 	u8 ctrl = type;
 	u16 sdea_ctrl = 0;
-	const u8 *forced_addr;
 	size_t cs_num = int_array_len(srv->cipher_suites_list);
+	u8 *rsid_list = NULL;
+	u8 rsid_ctrl = 0; /* b0-b1: 00 = 48 bit RSID by SipHash-2-4 method */
+	u8 rsid_num = 0, rsid_list_len = 0;
+	bool zero_rsid = false;
+
+	/* Proxy attribute, proxy attribute length, and NMI address */
+	if (srv->publish.orig_id)
+		len += NAN_ATTR_HDR_LEN + ETH_ALEN;
 
 	/* Service Descriptor attribute */
 	sda_len = NAN_SERVICE_ID_LEN + 1 + 1 + 1;
@@ -520,30 +654,76 @@ static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
 	    srv->close_proximity)
 		ctrl |= NAN_SRV_CTRL_DISCOVERY_RANGE_LIMITED;
 
+	if ((srv->type == NAN_DE_PUBLISH &&
+	     srv->publish.randomize_service_id) ||
+	    (srv->type == NAN_DE_SUBSCRIBE &&
+	     srv->subscribe.randomize_service_id)) {
+		ctrl |= NAN_SRV_CTRL_SERVICE_ID_RANDOMIZATION;
+		if (buf || has_zero_rsid) {
+			rsia_len = 1 + 1 + 1;
+			de->cb.rsia_get_rsids(de->cb.ctx, srv->service_id,
+					      irsa_tag_tlv, irsa_tag_tlv_len,
+					      &rsid_num, &rsid_list,
+					      &rsid_list_len, is_unicast,
+					      &zero_rsid);
+			if (has_zero_rsid && zero_rsid)
+				*has_zero_rsid = true;
+			rsia_len += rsid_list_len;
+			if (!buf) {
+				os_free(rsid_list);
+				rsid_list = NULL;
+			}
+		} else {
+			rsia_len = 1 + 1 + 1 + 6; /* Estimated RSID size */
+		}
+	}
+
 	len += NAN_ATTR_HDR_LEN + sda_len;
 
 	/* Service Descriptor Extension attribute */
 	sdea_len = 1 + 2;
 	if (ssi)
 		sdea_len += 2 + 4 + wpabuf_len(ssi);
-	len += NAN_ATTR_HDR_LEN + sdea_len;
+	if (srv->type == NAN_DE_PUBLISH) {
+		if (srv->publish.fsd)
+			sdea_ctrl |= NAN_SDEA_CTRL_FSD_REQ;
+		if (srv->publish.fsd_gas)
+			sdea_ctrl |= NAN_SDEA_CTRL_FSD_GAS;
+		if (srv->publish.dp_type)
+			sdea_ctrl |= NAN_SDEA_CTRL_DATA_PATH_TYPE;
+		if (srv->publish.security_required)
+			sdea_ctrl |= NAN_SDEA_CTRL_SECURITY_REQ;
+	}
+
+	if (srv->type == NAN_DE_SUBSCRIBE) {
+		if (srv->subscribe.dp_required)
+			sdea_ctrl |= NAN_SDEA_CTRL_DATA_PATH_REQ;
+		if (srv->subscribe.dp_type)
+			sdea_ctrl |= NAN_SDEA_CTRL_DATA_PATH_TYPE;
+		if (srv->subscribe.security_required)
+			sdea_ctrl |= NAN_SDEA_CTRL_SECURITY_REQ;
+	}
+	if (ssi || sdea_ctrl)
+		len += NAN_ATTR_HDR_LEN + sdea_len;
 
 	/* Element Container attribute */
 	if (srv->elems)
 		len += NAN_ATTR_HDR_LEN + 1 + wpabuf_len(srv->elems);
 
 	/* NPBA (dialog token, type and status, reason, pbm) */
-	if (srv->pbm && type != NAN_SRV_CTRL_FOLLOW_UP)
+	if (srv->pbm && type != NAN_SRV_CTRL_FOLLOW_UP) {
 		len += NAN_ATTR_HDR_LEN + 1 + 1 + 1 + 2;
+		len += nan_pbea_len(srv);
+	}
 
 	/* Reserve some additional space for extra attributes */
-	if (de->cb.add_extra_attrs)
+	if (de->cb.add_extra_attrs && !srv->publish.orig_id)
 		len += 256;
 
 	len += attrs ? wpabuf_len(attrs) : 0;
 
 	/* Cipher Suite Information Attribute */
-	if (srv->type == NAN_DE_PUBLISH && srv->cipher_suites_list) {
+	if (srv->cipher_suites_list) {
 		len += NAN_ATTR_HDR_LEN + sizeof(struct nan_cipher_suite_info) +
 			cs_num * sizeof(struct nan_cipher_suite);
 	}
@@ -557,15 +737,29 @@ static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
 			list_len * (sizeof(struct nan_sec_ctxt) + PMKID_LEN);
 	}
 
-	buf = nan_de_alloc_sdf(de, dst, len, type);
+	/* Nothing to put it into, just return the expected length */
 	if (!buf)
-		return;
+		return len;
+
+	/* NAN Proxy Meta attribute */
+	if (srv->publish.orig_id) {
+		wpabuf_put_u8(buf, NAN_ATTR_PROXY_META);
+		wpabuf_put_le16(buf, len - NAN_ATTR_HDR_LEN);
+		wpabuf_put_data(buf, srv->publish.orig_nmi, ETH_ALEN);
+	}
 
 	/* Service Descriptor attribute */
 	wpabuf_put_u8(buf, NAN_ATTR_SDA);
 	wpabuf_put_le16(buf, sda_len);
-	wpabuf_put_data(buf, srv->service_id, NAN_SERVICE_ID_LEN);
-	wpabuf_put_u8(buf, srv->id); /* Instance ID */
+	if (ctrl & NAN_SRV_CTRL_SERVICE_ID_RANDOMIZATION) {
+		os_memset(wpabuf_put(buf, NAN_SERVICE_ID_LEN), 0,
+			  NAN_SERVICE_ID_LEN);
+	} else {
+		wpabuf_put_data(buf, srv->service_id, NAN_SERVICE_ID_LEN);
+	}
+	/* Instance ID */
+	wpabuf_put_u8(buf,
+		      srv->publish.orig_id ? srv->publish.orig_id : srv->id);
 	wpabuf_put_u8(buf, req_instance_id); /* Requestor Instance ID */
 	wpabuf_put_u8(buf, ctrl);
 
@@ -591,34 +785,42 @@ static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
 	}
 
 	/* Service Descriptor Extension attribute */
-	if (srv->type == NAN_DE_PUBLISH || ssi) {
-		if (srv->type == NAN_DE_PUBLISH) {
-			if (srv->publish.fsd)
-				sdea_ctrl |= NAN_SDEA_CTRL_FSD_REQ;
-			if (srv->publish.fsd_gas)
-				sdea_ctrl |= NAN_SDEA_CTRL_FSD_GAS;
-			if (srv->gtk_required)
-				sdea_ctrl |= NAN_SDEA_CTRL_GTK_REQ;
-			if (srv->data_path) {
-				sdea_ctrl |= NAN_SDEA_CTRL_DATA_PATH_REQ;
-				if (srv->cipher_suites_list &&
-				    srv->security_required)
-					sdea_ctrl |= NAN_SDEA_CTRL_SECURITY_REQ;
-			}
+	if (srv->type == NAN_DE_PUBLISH) {
+		if (srv->gtk_required)
+			sdea_ctrl |= NAN_SDEA_CTRL_GTK_REQ;
+		if (srv->data_path) {
+			sdea_ctrl |= NAN_SDEA_CTRL_DATA_PATH_REQ;
+			if (srv->cipher_suites_list &&
+			    srv->security_required)
+				sdea_ctrl |= NAN_SDEA_CTRL_SECURITY_REQ;
 		}
+	}
 
-		if (sdea_ctrl || ssi) {
-			wpabuf_put_u8(buf, NAN_ATTR_SDEA);
-			wpabuf_put_le16(buf, sdea_len);
-			wpabuf_put_u8(buf, srv->id); /* Instance ID */
-			wpabuf_put_le16(buf, sdea_ctrl);
-			if (ssi) {
-				wpabuf_put_le16(buf, 4 + wpabuf_len(ssi));
-				wpabuf_put_be24(buf, OUI_WFA);
-				wpabuf_put_u8(buf, srv->srv_proto_type);
-				wpabuf_put_buf(buf, ssi);
-			}
+	if (sdea_ctrl || ssi) {
+		wpabuf_put_u8(buf, NAN_ATTR_SDEA);
+		wpabuf_put_le16(buf, sdea_len);
+		/* Instance ID */
+		wpabuf_put_u8(buf, srv->publish.orig_id ?
+			      srv->publish.orig_id : srv->id);
+		wpabuf_put_le16(buf, sdea_ctrl);
+		if (ssi) {
+			wpabuf_put_le16(buf, 4 + wpabuf_len(ssi));
+			wpabuf_put_be24(buf, OUI_WFA);
+			wpabuf_put_u8(buf, srv->srv_proto_type);
+			wpabuf_put_buf(buf, ssi);
 		}
+	}
+
+	if (ctrl & NAN_SRV_CTRL_SERVICE_ID_RANDOMIZATION) {
+		/* Randomized Service ID attribute */
+		wpabuf_put_u8(buf, NAN_ATTR_RSIA);
+		wpabuf_put_le16(buf, rsia_len);
+		wpabuf_put_u8(buf, srv->publish.orig_id ? srv->publish.orig_id :
+			      srv->id);
+		wpabuf_put_u8(buf, rsid_ctrl);
+		wpabuf_put_u8(buf, rsid_num);
+		wpabuf_put_data(buf, rsid_list, rsid_list_len);
+		os_free(rsid_list);
 	}
 
 	/* Element Container attribute */
@@ -629,13 +831,13 @@ static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
 		wpabuf_put_buf(buf, srv->elems);
 	}
 
-	/* Use per-service source address if configured, otherwise use NMI */
-	forced_addr = srv->forced_addr_set ? srv->forced_addr : de->nmi;
-
-	if (srv->pbm && type != NAN_SRV_CTRL_FOLLOW_UP)
+	if (srv->pbm && type != NAN_SRV_CTRL_FOLLOW_UP) {
 		nan_buf_add_npba(de, srv, buf);
+		if (nan_pbea_len(srv))
+			nan_buf_add_pbea(de, srv, buf);
+	}
 
-	if (de->cb.add_extra_attrs)
+	if (de->cb.add_extra_attrs && !srv->publish.orig_id)
 		de->cb.add_extra_attrs(de->cb.ctx, buf);
 
 	if (attrs) {
@@ -643,7 +845,7 @@ static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
 		wpabuf_put_buf(buf, attrs);
 	}
 
-	if (srv->type == NAN_DE_PUBLISH && srv->cipher_suites_list) {
+	if (srv->cipher_suites_list) {
 		size_t i;
 
 		wpabuf_put_u8(buf, NAN_ATTR_CSIA);
@@ -674,8 +876,223 @@ static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
 		WPA_PUT_LE16(len_ptr, (u8 *) wpabuf_put(buf, 0) - len_ptr - 2);
 	}
 
-	nan_de_tx(de, srv->sync ? 0 : srv->freq, srv->sync ? 0 : wait_time,
-		  dst, forced_addr, a3, buf, cookie);
+	return len;
+}
+
+
+/**
+ * nan_de_generate_irsa_and_calc_len - Generate IRSA data and calculate length
+ * @de: NAN discovery engine context
+ * @irsa_nonce: Output buffer for generated nonce (NAN_NIRA_NONCE_LEN bytes)
+ * @irsa_tag_tlv: Output pointer to allocated tag TLV buffer
+ * @irsa_tag_tlv_len: Output length of tag TLV buffer
+ * Returns: Total IRSA length including header, or 0 if callback not set
+ *
+ * This function generates Identity Resolution Set data including:
+ * - Random nonce (8 bytes)
+ * - Tag TLVs for all possessed NIKs from all 3 lists (self, peer, group)
+ *   Each tag TLV entry contains: type(1) + count(1) + tags(8 bytes each)
+ */
+static size_t nan_de_generate_irsa_and_calc_len(struct nan_de *de,
+						u8 *irsa_nonce,
+						u8 **irsa_tag_tlv,
+						u16 *irsa_tag_tlv_len)
+{
+	if (!de->cb.irsa_get_nonce_tag_tlv)
+		return 0;
+
+	*irsa_tag_tlv = NULL;
+	*irsa_tag_tlv_len = 0;
+	if (de->cb.irsa_get_nonce_tag_tlv(de->cb.ctx, irsa_nonce,
+					  irsa_tag_tlv, irsa_tag_tlv_len) < 0)
+		return 0;
+
+	return NAN_ATTR_HDR_LEN + 1 + NAN_NIRA_NONCE_LEN + *irsa_tag_tlv_len;
+}
+
+
+static void nan_de_irsa_attr_add(struct wpabuf *buf, const u8 *irsa_nonce,
+				 const u8 *irsa_tag_tlv, u16 irsa_tag_tlv_len)
+{
+	if (!irsa_tag_tlv_len)
+		return;
+
+	wpabuf_put_u8(buf, NAN_ATTR_IRSA);
+	wpabuf_put_le16(buf, 1 + NAN_NIRA_NONCE_LEN + irsa_tag_tlv_len);
+	wpabuf_put_u8(buf, NAN_IRSA_CIPHER_VER_SIPHASH_2_4);
+	wpabuf_put_data(buf, irsa_nonce, NAN_NIRA_NONCE_LEN);
+	wpabuf_put_data(buf, irsa_tag_tlv, irsa_tag_tlv_len);
+}
+
+
+static u8 * nan_de_build_unicast_irsa_tlv(struct nan_de *de,
+					 const u8 *irsa_nonce,
+					 u16 *irsa_tag_tlv_len)
+{
+	u8 *tlv, *pos;
+	size_t tlv_len;
+	u8 i, nik_count;
+	const u8 *niks[NAN_DE_MAX_ASSOC_NIKS + 1];
+
+	if (de->matched_nik_type == NAN_NIK_TYPE_SELF) {
+		/* DN-tag matched: respond with the matched self NIK */
+		niks[0] = de->matched_nik;
+		nik_count = 1;
+	} else if (de->matched_nik_type == NAN_NIK_TYPE_PEER &&
+		   de->matched_assoc_nik_count > 0) {
+		/* SN-tag matched: respond with first associated self NIK. */
+		niks[0] = de->matched_assoc_niks[0];
+		nik_count = 1;
+	} else if (de->matched_nik_type == NAN_NIK_TYPE_GROUP &&
+		   de->matched_assoc_nik_count > 0) {
+		/* GN-tag matched: respond with all associated self NIKs */
+		unsigned int n = de->matched_assoc_nik_count;
+
+		if (n > NAN_DE_MAX_ASSOC_NIKS)
+			n = NAN_DE_MAX_ASSOC_NIKS;
+		for (i = 0; i < n; i++)
+			niks[i] = de->matched_assoc_niks[i];
+		nik_count = (u8) n;
+	} else {
+		*irsa_tag_tlv_len = 0;
+		return NULL;
+	}
+
+	/* TLV: type(1) + count(1) + nik_count * tag_len */
+	tlv_len = 2 + nik_count * NAN_NIRA_TAG_LEN;
+	tlv = os_malloc(tlv_len);
+	if (!tlv) {
+		*irsa_tag_tlv_len = 0;
+		return NULL;
+	}
+
+	pos = tlv;
+	*pos++ = NAN_TAG_TYPE_SN;
+	*pos++ = nik_count;
+
+	for (i = 0; i < nik_count; i++) {
+		struct wpabuf *tag_buf;
+
+		tag_buf = nan_crypto_derive_irsa_tag(niks[i], NAN_NIK_LEN,
+						     de->nmi, irsa_nonce);
+		if (!tag_buf) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Failed to derive SN tag for NIK %u",
+				   i);
+			os_free(tlv);
+			*irsa_tag_tlv_len = 0;
+			return NULL;
+		}
+		os_memcpy(pos, wpabuf_head(tag_buf), NAN_NIRA_TAG_LEN);
+		wpabuf_free(tag_buf);
+		pos += NAN_NIRA_TAG_LEN;
+	}
+
+	*irsa_tag_tlv_len = (u16) tlv_len;
+	return tlv;
+}
+
+
+static void nan_de_tx_sdf(struct nan_de *de, struct nan_de_service *srv,
+			  unsigned int wait_time,
+			  enum nan_service_control_type type,
+			  const u8 *dst, const u8 *a3, u8 req_instance_id,
+			  const struct wpabuf *ssi,
+			  const struct wpabuf *attrs, u32 *cookie,
+			  unsigned int peer_freq)
+{
+	struct wpabuf *buf;
+	const u8 *forced_addr;
+	size_t len = 0;
+	u8 irsa_nonce[NAN_NIRA_NONCE_LEN];
+	u8 *irsa_tag_tlv = NULL;
+	u16 irsa_tag_tlv_len = 0;
+	bool has_randomization = false;
+	bool unicast_frame = false;
+	bool has_zero_rsid = false;
+	int retry;
+
+	if ((srv->type == NAN_DE_PUBLISH &&
+	     srv->publish.randomize_service_id) ||
+	    (srv->type == NAN_DE_SUBSCRIBE &&
+	     srv->subscribe.randomize_service_id))
+		has_randomization = true;
+
+	if (!ether_addr_equal(dst, nan_network_id) &&
+	    !ether_addr_equal(dst, p2p_network_id))
+		unicast_frame = true;
+
+	if (has_randomization) {
+		for (retry = 0; retry < NAN_RSID_MAX_RETRIES; retry++) {
+			os_free(irsa_tag_tlv);
+			irsa_tag_tlv = NULL;
+			irsa_tag_tlv_len = 0;
+			has_zero_rsid = false;
+
+			if (unicast_frame && de->matched_nik_set) {
+				if (os_get_random(irsa_nonce,
+						  NAN_NIRA_NONCE_LEN) < 0) {
+					wpa_printf(MSG_DEBUG,
+						   "NAN: Failed to generate IRSA nonce");
+					os_memset(irsa_nonce, 0,
+						  NAN_NIRA_NONCE_LEN);
+				}
+				irsa_tag_tlv = nan_de_build_unicast_irsa_tlv(
+					de, irsa_nonce, &irsa_tag_tlv_len);
+			} else {
+				nan_de_generate_irsa_and_calc_len(
+					de, irsa_nonce,
+					&irsa_tag_tlv, &irsa_tag_tlv_len);
+			}
+
+			/* Probe RSIDs before constructing the frame. */
+			nan_de_sdf_attrs_put(NULL, de, srv, type,
+					     req_instance_id, ssi, attrs,
+					     irsa_tag_tlv, irsa_tag_tlv_len,
+					     unicast_frame, &has_zero_rsid);
+			if (!has_zero_rsid)
+				break;
+
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Retrying IRSA nonce generation (attempt %d) due to all-zero RSID",
+				   retry + 1);
+		}
+		if (has_zero_rsid)
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Could not avoid all-zero RSID after %d attempts",
+				   NAN_RSID_MAX_RETRIES);
+
+		if (irsa_tag_tlv_len)
+			len += NAN_ATTR_HDR_LEN + 1 +
+				NAN_NIRA_NONCE_LEN + irsa_tag_tlv_len;
+	}
+
+	len += nan_de_sdf_attrs_put(NULL, de, srv, type, req_instance_id,
+				    ssi, attrs, irsa_tag_tlv,
+				    irsa_tag_tlv_len, unicast_frame, NULL);
+
+	buf = nan_de_alloc_sdf(de, dst, len, type);
+	if (!buf) {
+		os_free(irsa_tag_tlv);
+		return;
+	}
+
+	/* Build service attributes (SDA + SDEA + RSIA) */
+	nan_de_sdf_attrs_put(buf, de, srv, type, req_instance_id, ssi, attrs,
+			     irsa_tag_tlv, irsa_tag_tlv_len, unicast_frame,
+			     NULL);
+
+	if (has_randomization)
+		nan_de_irsa_attr_add(buf, irsa_nonce, irsa_tag_tlv,
+				     irsa_tag_tlv_len);
+	os_free(irsa_tag_tlv);
+
+	/* Use per-service source address if configured, otherwise use NMI */
+	forced_addr = srv->forced_addr_set ? srv->forced_addr : de->nmi;
+	nan_de_tx(de,
+		  peer_freq ? peer_freq : (srv->sync ? 0 : srv->freq),
+		  peer_freq ? wait_time : (srv->sync ? 0 : wait_time),
+		  dst, forced_addr, a3, buf, cookie, srv->id);
 	wpabuf_free(buf);
 }
 
@@ -780,7 +1197,7 @@ static void nan_de_tx_multicast(struct nan_de *de, struct nan_de_service *srv,
 	}
 
 	nan_de_tx_sdf(de, srv, wait_time, type, network_id, bssid,
-		      req_instance_id, srv->ssi, NULL, NULL);
+		      req_instance_id, srv->ssi, NULL, NULL, 0);
 	os_get_reltime(&srv->last_multicast);
 }
 
@@ -958,7 +1375,11 @@ static void nan_de_start_new_publish_state(struct nan_de *de,
 		srv->in_multi_chan = !srv->in_multi_chan;
 
 	/* Use same values for N and M. */
-	n = de->cfg.n_min + os_random() % (de->cfg.n_max - de->cfg.n_min);
+	if (de->cfg.n_max > de->cfg.n_min)
+		n = de->cfg.n_min +
+			os_random() % (de->cfg.n_max - de->cfg.n_min);
+	else
+		n = de->cfg.n_min;
 	srv->next_publish_duration = n * 100;
 
 	nan_de_set_publish_times(srv);
@@ -1241,7 +1662,7 @@ void nan_de_tx_wait_ended(struct nan_de *de)
 }
 
 
-static const u8 *
+const u8 *
 nan_de_get_attr(const u8 *buf, size_t len, enum nan_attr_id id,
 		unsigned int skip)
 {
@@ -1459,6 +1880,184 @@ static unsigned int nan_de_parse_scia(const u8 *buf, size_t len, u8 instance_id,
 }
 
 
+void nan_pairing_parse_setup_info(const u8 *info, size_t info_len,
+				  char **locale, char **vendor_name,
+				  char **model_name, char **pairing_name)
+{
+	const u8 *pos, *end;
+
+	*locale = NULL;
+	*vendor_name = NULL;
+	*model_name = NULL;
+	*pairing_name = NULL;
+
+	if (!info || info_len == 0)
+		return;
+
+	wpa_printf(MSG_DEBUG, "NAN: Parsing Pairing Setup Info len=%zu",
+		   info_len);
+
+	pos = info;
+	end = info + info_len;
+
+	while (pos < end) {
+		u8 item_len;
+		const u8 *item_data, *eq;
+		size_t key_len, val_len, i;
+
+		item_len = *pos++;
+		if (item_len == 0 || item_len > end - pos) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Invalid TXT record item length %u",
+				   item_len);
+			break;
+		}
+
+		item_data = pos;
+		pos += item_len;
+
+		eq = NULL;
+		for (i = 0; i < item_len; i++) {
+			if (item_data[i] == '=') {
+				eq = &item_data[i];
+				break;
+			}
+		}
+
+		if (!eq)
+			continue;
+
+		key_len = eq - item_data;
+		val_len = item_len - key_len - 1;
+
+		if (key_len == 6 &&
+		    os_memcmp(item_data, "locale", 6) == 0) {
+			if (*locale) {
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Duplicated locale key");
+				break;
+			}
+			*locale = os_malloc(val_len + 1);
+			if (*locale) {
+				os_memcpy(*locale, eq + 1, val_len);
+				(*locale)[val_len] = '\0';
+				wpa_printf(MSG_DEBUG, "NAN: Parsed locale=%s",
+					   *locale);
+			}
+		} else if (key_len == 10 &&
+			   os_memcmp(item_data, "vendorName", 10) == 0) {
+			if (*vendor_name) {
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Duplicated vendorName key");
+				break;
+			}
+			*vendor_name = os_malloc(val_len + 1);
+			if (*vendor_name) {
+				os_memcpy(*vendor_name, eq + 1, val_len);
+				(*vendor_name)[val_len] = '\0';
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Parsed vendorName=%s",
+					   *vendor_name);
+			}
+		} else if (key_len == 9 &&
+			   os_memcmp(item_data, "modelName", 9) == 0) {
+			if (*model_name) {
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Duplicated modelName key");
+				break;
+			}
+			*model_name = os_malloc(val_len + 1);
+			if (*model_name) {
+				os_memcpy(*model_name, eq + 1, val_len);
+				(*model_name)[val_len] = '\0';
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Parsed modelName=%s",
+					   *model_name);
+			}
+		} else if (key_len == 11 &&
+			   os_memcmp(item_data, "pairingName", 11) == 0) {
+			if (*pairing_name) {
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Duplicated pairingName key");
+				break;
+			}
+			*pairing_name = os_malloc(val_len + 1);
+			if (*pairing_name) {
+				os_memcpy(*pairing_name, eq + 1, val_len);
+				(*pairing_name)[val_len] = '\0';
+				wpa_printf(MSG_DEBUG,
+					   "NAN: Parsed pairingName=%s",
+					   *pairing_name);
+			}
+		} else {
+			wpa_hexdump_ascii(MSG_DEBUG,
+					  "NAN: Ignore unknown TXT record",
+					  item_data, key_len);
+		}
+	}
+}
+
+
+static void nan_de_parse_pbea(const u8 *buf, size_t len,
+			      char **locale, char **vendor_name,
+			      char **model_name, char **pairing_name)
+{
+	const u8 *pbea, *end;
+	u16 pbea_len, pairing_setup_info_len;
+	u8 control;
+
+	*locale = NULL;
+	*vendor_name = NULL;
+	*model_name = NULL;
+	*pairing_name = NULL;
+
+	pbea = nan_de_get_attr(buf, len, NAN_ATTR_PBEA, 0);
+	if (!pbea)
+		return;
+
+	pbea++;
+	pbea_len = WPA_GET_LE16(pbea);
+	pbea += 2;
+	if (pbea_len < 1)
+		return;
+
+	end = pbea + pbea_len;
+	control = *pbea++;
+
+	wpa_printf(MSG_DEBUG, "NAN: Parsing PBEA (control=0x%02x, len=%u)",
+		   control, pbea_len);
+
+	if (control & BIT(0)) {
+		if (end - pbea < 2) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Truncated PBEA ext PBM field");
+			return;
+		}
+		pbea += 2;
+	}
+
+	if (control & BIT(1)) {
+		if (end - pbea < 2) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Truncated Length of Pairing Setup Info field");
+			return;
+		}
+
+		pairing_setup_info_len = WPA_GET_LE16(pbea);
+		pbea += 2;
+		if (pairing_setup_info_len > end - pbea) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Truncated Pairing Setup Info field");
+			return;
+		}
+
+		nan_pairing_parse_setup_info(pbea, pairing_setup_info_len,
+					     locale, vendor_name, model_name,
+					     pairing_name);
+	}
+}
+
+
 static void nan_de_process_elem_container(struct nan_de *de, const u8 *buf,
 					  size_t len, const u8 *peer_addr,
 					  unsigned int freq, bool p2p, bool pr)
@@ -1648,7 +2247,8 @@ static bool nan_de_rx_publish(struct nan_de *de, struct nan_de_service *srv,
 			      enum nan_service_protocol_type srv_proto_type,
 			      const u8 *ssi, size_t ssi_len,
 			      bool range_limit, int rssi,
-			      const u8 *buf, size_t buf_len)
+			      const u8 *buf, size_t buf_len,
+			      const u8 *orig_addr)
 {
 	struct nan_discovery_result res;
 
@@ -1694,7 +2294,7 @@ static bool nan_de_rx_publish(struct nan_de *de, struct nan_de_service *srv,
 		 * Service Specific Info field if it received a matching
 		 * unsolicited Publish message. */
 		nan_de_transmit(de, srv->id, NULL, NULL, peer_addr,
-				instance_id, NULL, NULL);
+				instance_id, NULL, NULL, 0);
 	}
 
 send_event:
@@ -1736,9 +2336,29 @@ send_event:
 	res.n_cipher_suites = cipher_suite_count;
 	res.pmkid_list = pmkid_count > 0 ? pmkid_list : NULL;
 	res.pmkid_count = pmkid_count;
+	res.orig_addr = orig_addr;
 
-	if (de->cb.discovery_result)
+	if (de->cb.discovery_result) {
+		char *locale = NULL, *vendor_name = NULL;
+		char *model_name = NULL, *pairing_name = NULL;
+
+		if (buf && buf_len > 0)
+			nan_de_parse_pbea(buf, buf_len, &locale,
+					  &vendor_name, &model_name,
+					  &pairing_name);
+
+		res.psi_locale = locale;
+		res.psi_vendor_name = vendor_name;
+		res.psi_model_name = model_name;
+		res.psi_pairing_name = pairing_name;
+
 		de->cb.discovery_result(de->cb.ctx, &res);
+
+		os_free(locale);
+		os_free(vendor_name);
+		os_free(model_name);
+		os_free(pairing_name);
+	}
 
 	return true;
 }
@@ -1801,7 +2421,7 @@ static bool nan_de_rx_subscribe(struct nan_de *de, struct nan_de_service *srv,
 	nan_de_tx_sdf(de, srv, 100, NAN_SRV_CTRL_PUBLISH,
 		      srv->publish.solicited_multicast ?
 		      network_id : peer_addr, a3, instance_id, srv->ssi, NULL,
-		      NULL);
+		      NULL, 0);
 
 	if (!srv->is_p2p && !srv->sync)
 		nan_de_pause_state(srv, peer_addr, instance_id);
@@ -1823,14 +2443,26 @@ static bool nan_de_rx_follow_up(struct nan_de *de, struct nan_de_service *srv,
 	/* Follow-up function processing of a receive Follow-up message for a
 	 * Subscribe or Publish instance */
 
+	/* No processing for when it is a proxied publish for another NMI */
+	if (srv->type == NAN_DE_PUBLISH && srv->publish.orig_id)
+		return false;
+
 	if (srv->type == NAN_DE_PUBLISH &&
 	    os_reltime_initialized(&srv->pause_state_end) &&
 	    (!ether_addr_equal(peer_addr, srv->sel_peer_addr) ||
 	     instance_id != srv->sel_peer_id ||
 	     !ssi)) {
+		/* Bootstrap comeback responses carry NPBA but no SSI;
+		 * allow them through so the comeback can be processed,
+		 * and drop everything else.
+		 */
+		if (!nan_de_get_attr(buf, len, NAN_ATTR_NPBA, 0)) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: In pauseState - ignore Follow-up message from another peer or without ssi");
+			return false;
+		}
 		wpa_printf(MSG_DEBUG,
-			   "NAN: In pauseState - ignore Follow-up message from another subscriber or without ssi");
-		return false;
+			   "NAN: In pauseState - allow bootstrap Follow-up (NPBA present)");
 	}
 
 	if (srv->type == NAN_DE_PUBLISH && !ssi && !srv->sync)
@@ -1905,9 +2537,304 @@ static bool nan_srf_match(struct nan_de *de, const u8 *srf, size_t srf_len)
 }
 
 
+static bool nan_compute_tag_from_nik(struct nan_de *de, const u8 *peer_addr,
+				     const u8 *nonce,
+				     const u8 *nik, u8 *out_tag)
+{
+	struct wpabuf *buf;
+
+	/* Compute 64-bit tag: SipHash-2-4(NIK, peer_addr || nonce) */
+	if (!nonce || !nik || !out_tag)
+		return false;
+
+	buf = nan_crypto_derive_irsa_tag(nik, NAN_NIK_LEN, peer_addr, nonce);
+	if (!buf)
+		return false;
+	if (wpabuf_len(buf) != NAN_NIRA_TAG_LEN) {
+		wpabuf_free(buf);
+		return false;
+	}
+
+	os_memcpy(out_tag, wpabuf_head(buf), NAN_NIRA_TAG_LEN);
+	wpabuf_free(buf);
+	return true;
+}
+
+
+static bool nan_compute_rsid_from_nik_service(const u8 *nik,
+					      const u8 *service_id,
+					      const u8 *tag,
+					      u8 out_rsid[NAN_RSID_LEN])
+{
+	u8 data[NAN_SERVICE_ID_LEN + NAN_NIRA_TAG_LEN];
+	u8 hash[8]; /* SipHash returns 64 bits */
+
+	/* Compute 48-bit RSID using SipHash-2-4 combining NIK and service_id */
+	if (!nik || !service_id || !out_rsid)
+		return false;
+
+	os_memcpy(data, service_id, NAN_SERVICE_ID_LEN);
+	os_memcpy(data + NAN_SERVICE_ID_LEN, tag, NAN_NIRA_TAG_LEN);
+	if (siphash_2_4(nik, data, sizeof(data), hash) == 0) {
+		os_memcpy(out_rsid, hash, NAN_RSID_LEN);
+		return true;
+	}
+	return false;
+}
+
+
+static u8 nan_nik_type_for_tag(u8 tag_type)
+{
+	if (tag_type == NAN_TAG_TYPE_SN)
+		return NAN_NIK_TYPE_PEER;
+	if (tag_type == NAN_TAG_TYPE_DN)
+		return NAN_NIK_TYPE_SELF;
+	if (tag_type == NAN_TAG_TYPE_PN)
+		return NAN_NIK_TYPE_PEER;
+	return NAN_NIK_TYPE_GROUP;
+}
+
+
+static bool nan_iterate_nik_list_and_match(struct nan_de *de,
+					   struct dl_list *list,
+					   const u8 *peer_addr,
+					   const u8 *nonce,
+					   const u8 *recv_tag,
+					   const u8 *target_rsid,
+					   const u8 **matched_service_id)
+{
+	struct nan_nik_entry *entry;
+
+	dl_list_for_each(entry, list, struct nan_nik_entry, list) {
+		u8 comp_tag[NAN_NIRA_TAG_LEN] = { 0 };
+		u8 comp_rsid[NAN_RSID_LEN] = { 0 };
+		unsigned int i;
+
+		if (!nan_compute_tag_from_nik(de, peer_addr, nonce, entry->nik,
+					      comp_tag))
+			continue;
+
+		if (os_memcmp(comp_tag, recv_tag, NAN_NIRA_TAG_LEN) != 0)
+			continue;
+
+		for (i = 0; i < NAN_DE_MAX_SERVICE; i++) {
+			struct nan_de_service *srv = de->service[i];
+			struct nan_assoc_nik_entry *assoc;
+
+			if (!srv)
+				continue;
+
+			if (!nan_compute_rsid_from_nik_service(entry->nik,
+							       srv->service_id,
+							       recv_tag,
+							       comp_rsid))
+				continue;
+
+			if (os_memcmp(comp_rsid, target_rsid,
+				      NAN_RSID_LEN) != 0)
+				continue;
+
+			*matched_service_id = srv->service_id;
+			os_memcpy(de->matched_nik, entry->nik, NAN_NIK_LEN);
+			de->matched_nik_set = true;
+
+			/*
+			 * Copy associated NIKs from the matched entry. These
+			 * are used on TX to build SN tags for PEER (SN tag
+			 * received) and GROUP (GN tag received) cases.
+			 */
+			de->matched_assoc_nik_count = 0;
+			dl_list_for_each(assoc, &entry->associated_nik,
+					 struct nan_assoc_nik_entry, list) {
+				size_t idx;
+				u8 (*niks)[NAN_NIK_LEN] =
+					de->matched_assoc_niks;
+
+				if (de->matched_assoc_nik_count >=
+				    NAN_DE_MAX_ASSOC_NIKS)
+					break;
+
+				idx = de->matched_assoc_nik_count;
+
+				os_memcpy(niks[idx], assoc->nik, NAN_NIK_LEN);
+				de->matched_assoc_nik_count++;
+			}
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+
+static bool nan_resolve_tag_and_match_service(struct nan_de *de,
+					      const u8 *peer_addr,
+					      u8 tag_type,
+					      const u8 *nonce,
+					      const u8 *recv_tag,
+					      const u8 *target_rsid,
+					      const u8 **matched_service_id)
+{
+	struct dl_list *list;
+
+	if (!de->cb.get_nik_list)
+		return false;
+
+	list = de->cb.get_nik_list(de->cb.ctx,
+				   nan_nik_type_for_tag(tag_type));
+	if (!list)
+		return false;
+
+	return nan_iterate_nik_list_and_match(de, list, peer_addr,
+					      nonce, recv_tag,
+					      target_rsid,
+					      matched_service_id);
+}
+
+
+static const u8 * nan_de_find_matching_rsia(const u8 *buf, size_t len,
+					   u8 instance_id)
+{
+	unsigned int skip;
+
+	for (skip = 0; ; skip++) {
+		const u8 *rsia;
+		u16 rsia_attr_len;
+		u8 rsia_req_inst_id;
+
+		rsia = nan_de_get_attr(buf, len, NAN_ATTR_RSIA, skip);
+		if (!rsia)
+			break;
+
+		rsia_attr_len = WPA_GET_LE16(rsia + 1);
+		if (rsia_attr_len < 1) {
+			wpa_printf(MSG_DEBUG, "NAN: RSIA too short (len=%u)",
+				   rsia_attr_len);
+			continue;
+		}
+
+		rsia_req_inst_id = rsia[NAN_ATTR_HDR_LEN];
+		if (rsia_req_inst_id == instance_id) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Found matching RSIA for instance_id=%u",
+				   instance_id);
+			return rsia;
+		}
+	}
+
+	return NULL;
+}
+
+
+static bool nan_de_parse_irsa_rsia(const u8 *irsa, const u8 *rsia,
+				   const u8 **irsa_nonce,
+				   const u8 **irsa_tags, u16 *irsa_len,
+				   u8 *rsid_num, const u8 **rsid_list,
+				   u16 *rsia_len)
+{
+	const u8 *pos;
+	u16 attr_len;
+
+	/* Parse IRSA: [id][len][ver][nonce(8)][tag TLVs...] */
+	pos = irsa + 1;
+	attr_len = WPA_GET_LE16(pos);
+	pos += 2;
+	if (attr_len < 1 + NAN_NIRA_NONCE_LEN) {
+		wpa_printf(MSG_DEBUG, "NAN: IRSA too short (len=%u)", attr_len);
+		return false;
+	}
+	*irsa_len = attr_len;
+	*irsa_nonce = pos + 1; /* skip cipher version byte */
+	*irsa_tags = pos + 1 + NAN_NIRA_NONCE_LEN;
+
+	/* Parse RSIA: [id][len][req_inst_id][rsid_ctrl][rsid_num][rsid_list] */
+	pos = rsia + 1;
+	attr_len = WPA_GET_LE16(pos);
+	pos += 2;
+	if (attr_len < 3) {
+		wpa_printf(MSG_DEBUG, "NAN: RSIA body too short (len=%u)",
+			   attr_len);
+		return false;
+	}
+	*rsia_len = attr_len;
+	/* skip req_instance_id and rsid_ctrl */
+	pos += 2;
+	*rsid_num = *pos++;
+	if (*rsid_num && attr_len - 3 >= (*rsid_num) * NAN_RSID_LEN)
+		*rsid_list = pos;
+	else
+		*rsid_list = NULL;
+
+	return *irsa_len && *rsia_len && *rsid_list && *irsa_tags;
+}
+
+
+static bool nan_de_resolve_irsa_tags(struct nan_de *de,
+				     const u8 *peer_addr,
+				     const u8 *irsa_tags, u16 irsa_len,
+				     const u8 *irsa_nonce,
+				     const u8 *rsid_list, u8 rsid_num,
+				     const u8 **resolved_service_id)
+{
+	size_t tags_len;
+	const u8 *tag_pos = irsa_tags;
+	const u8 *tag_end;
+	size_t rsid_idx = 0;
+
+	if (irsa_len < 1 + NAN_NIRA_NONCE_LEN)
+		return false;
+	tags_len = irsa_len - (1 + NAN_NIRA_NONCE_LEN);
+	tag_end = irsa_tags + tags_len;
+
+	while (tag_end - tag_pos >= 2 && rsid_idx < rsid_num) {
+		u8 tag_type = tag_pos[0];
+		u8 tag_count = tag_pos[1];
+		size_t tlv_data_len = (size_t) tag_count * NAN_NIRA_TAG_LEN;
+		size_t i;
+
+		tag_pos += 2;
+
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Processing tag TLV: type=%u, count=%u",
+			   tag_type, tag_count);
+
+		if ((size_t) (tag_end - tag_pos) < tlv_data_len) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Tag TLV exceeds buffer (count=%u, remaining=%zu)",
+				   tag_count,
+				   (size_t) (tag_end - tag_pos));
+			break;
+		}
+
+		for (i = 0; i < tag_count && rsid_idx < rsid_num;
+		     i++, rsid_idx++) {
+			const u8 *tag_val = tag_pos + i * NAN_NIRA_TAG_LEN;
+			const u8 *rsid_val =
+				rsid_list + rsid_idx * NAN_RSID_LEN;
+			bool matched;
+
+			matched = nan_resolve_tag_and_match_service(
+				de, peer_addr, tag_type, irsa_nonce, tag_val,
+				rsid_val, resolved_service_id);
+			if (matched) {
+				de->matched_nik_type =
+					nan_nik_type_for_tag(tag_type);
+				return true;
+			}
+		}
+
+		tag_pos += tlv_data_len;
+	}
+
+	return false;
+}
+
+
 static bool nan_de_rx_sda(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 			  unsigned int freq, const u8 *buf, size_t len,
-			  const u8 *sda, size_t sda_len, int rssi)
+			  const u8 *sda, size_t sda_len, int rssi,
+			  const u8 *orig_addr)
 {
 	const u8 *service_id;
 	u8 instance_id, req_instance_id, ctrl;
@@ -1922,6 +2849,13 @@ static bool nan_de_rx_sda(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 	const u8 *matching_filter = NULL;
 	size_t matching_filter_len = 0;
 	bool ret = false;
+	bool rsid_resolved = false;
+	const u8 *resolved_service_id = NULL;
+
+	/* Reset matched context for new SDA processing */
+	de->matched_nik_set = false;
+	de->matched_nik_type = 0;
+	de->matched_assoc_nik_count = 0;
 
 	if (sda_len < NAN_SERVICE_ID_LEN + 1 + 1 + 1)
 		return false;
@@ -1944,6 +2878,31 @@ static bool nan_de_rx_sda(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 			   "NAN: Discard SDF with unknown Service Control Type %u",
 			   type);
 		return false;
+	}
+
+	/*
+	 * If Service ID randomization is enabled, attempt to resolve service
+	 * using IRSA/RSIA before performing service_id comparison.
+	 */
+	if (ctrl & NAN_SRV_CTRL_SERVICE_ID_RANDOMIZATION) {
+		const u8 *irsa = NULL, *rsia = NULL;
+		const u8 *irsa_nonce = NULL, *irsa_tags = NULL;
+		u16 irsa_len = 0, rsia_len = 0;
+		u8 rsid_num = 0;
+		const u8 *rsid_list = NULL;
+
+		rsia = nan_de_find_matching_rsia(buf, len, instance_id);
+		if (rsia)
+			irsa = nan_de_get_attr(buf, len, NAN_ATTR_IRSA, 0);
+
+		if (irsa && rsia &&
+		    nan_de_parse_irsa_rsia(irsa, rsia, &irsa_nonce,
+					   &irsa_tags, &irsa_len,
+					   &rsid_num, &rsid_list,
+					   &rsia_len))
+			rsid_resolved = nan_de_resolve_irsa_tags(
+				de, peer_addr, irsa_tags, irsa_len, irsa_nonce,
+				rsid_list, rsid_num, &resolved_service_id);
 	}
 
 	if (ctrl & NAN_SRV_CTRL_BINDING_BITMAP) {
@@ -2010,9 +2969,16 @@ static bool nan_de_rx_sda(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 
 		if (!srv)
 			continue;
-		if (os_memcmp(srv->service_id, service_id,
-			      NAN_SERVICE_ID_LEN) != 0)
-			continue;
+
+		if (rsid_resolved) {
+			if (os_memcmp(srv->service_id, resolved_service_id,
+				      NAN_SERVICE_ID_LEN) != 0)
+				continue;
+		} else {
+			if (os_memcmp(srv->service_id, service_id,
+				      NAN_SERVICE_ID_LEN) != 0)
+				continue;
+		}
 		if (type == NAN_SRV_CTRL_PUBLISH) {
 			if (srv->type == NAN_DE_PUBLISH)
 				continue;
@@ -2042,6 +3008,10 @@ static bool nan_de_rx_sda(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 						      srv->is_pr);
 		}
 
+		/* Ignore everything other than publish for proxied SDAs */
+		if (orig_addr && type != NAN_SRV_CTRL_PUBLISH)
+			break;
+
 		switch (type) {
 		case NAN_SRV_CTRL_PUBLISH:
 			ret |= nan_de_rx_publish(
@@ -2050,7 +3020,7 @@ static bool nan_de_rx_sda(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 				req_instance_id, sdea_control, srv_proto_type,
 				ssi, ssi_len,
 				ctrl & NAN_SRV_CTRL_DISCOVERY_RANGE_LIMITED,
-				rssi, buf, len);
+				rssi, buf, len, orig_addr);
 			break;
 		case NAN_SRV_CTRL_SUBSCRIBE:
 			ret |= nan_de_rx_subscribe(
@@ -2073,7 +3043,8 @@ static bool nan_de_rx_sda(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 
 
 bool nan_de_rx_sdf(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
-		   unsigned int freq, const u8 *buf, size_t len, int rssi)
+		   unsigned int freq, const u8 *buf, size_t len, int rssi,
+		   const u8 *orig_addr)
 {
 	const u8 *sda;
 	u16 sda_len;
@@ -2098,7 +3069,11 @@ bool nan_de_rx_sdf(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
 		sda_len = WPA_GET_LE16(sda);
 		sda += 2;
 		ret |= nan_de_rx_sda(de, peer_addr, a3, freq, buf, len,
-				     sda, sda_len, rssi);
+				     sda, sda_len, rssi, orig_addr);
+
+		/* Only one SDA inside each Proxy Meta attribute */
+		if (orig_addr)
+			break;
 	}
 
 	return ret;
@@ -2158,12 +3133,35 @@ const u8 * nan_de_get_service_id(struct nan_de *de, int id)
 {
 	struct nan_de_service *srv;
 
-	if (id < 1 || id > NAN_DE_MAX_SERVICE)
-		return NULL;
-	srv = de->service[id - 1];
+	srv = nan_de_get_service(de, id);
 	if (!srv)
 		return NULL;
 	return srv->service_id;
+}
+
+
+static int nan_de_set_cs_list(struct nan_de_service *srv,
+			      const int *cs_list)
+{
+	int i;
+
+	if (!cs_list)
+		return 0;
+
+	for (i = 0; cs_list[i] && i < NAN_CS_MAX; i++) {
+		if (cs_list[i] >= NAN_CS_MAX) {
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Invalid cipher suite %d for service",
+				   cs_list[i]);
+			return -1;
+		}
+	}
+
+	srv->cipher_suites_list = int_array_dup(cs_list);
+	if (!srv->cipher_suites_list)
+		return -1;
+
+	return 0;
 }
 
 
@@ -2187,7 +3185,8 @@ int nan_de_publish(struct nan_de *de, const char *service_name,
 		return -1;
 	}
 
-	if (params->proximity_ranging && params->solicited && !elems) {
+	if (params->proximity_ranging && params->solicited && !elems &&
+	    !params->orig_id) {
 		wpa_printf(MSG_INFO,
 			   "NAN: Unable to fetch proximity ranging params");
 		return -1;
@@ -2212,6 +3211,7 @@ int nan_de_publish(struct nan_de *de, const char *service_name,
 	srv = os_zalloc(sizeof(*srv));
 	if (!srv)
 		return -1;
+	dl_list_init(&srv->pmkid_list);
 	srv->type = NAN_DE_PUBLISH;
 	srv->freq = srv->default_freq = params->freq;
 
@@ -2237,6 +3237,16 @@ int nan_de_publish(struct nan_de *de, const char *service_name,
 			goto fail;
 	}
 	srv->publish.freq_list = NULL;
+
+	if (params->pairing_setup_info && params->pairing_setup_info_len > 0) {
+		srv->publish.pairing_setup_info =
+			os_memdup(params->pairing_setup_info,
+				  params->pairing_setup_info_len);
+		if (!srv->publish.pairing_setup_info)
+			goto fail;
+		srv->publish.pairing_setup_info_len =
+			params->pairing_setup_info_len;
+	}
 
 	srv->srv_proto_type = srv_proto_type;
 	if (ssi) {
@@ -2283,27 +3293,9 @@ int nan_de_publish(struct nan_de *de, const char *service_name,
 
 	srv->security_capab = params->security_capab;
 
-	if (params->cipher_suites_list) {
-		int i = 0;
+	if (nan_de_set_cs_list(srv, params->cipher_suites_list) < 0)
+		goto fail;
 
-		while (params->cipher_suites_list[i] && i < NAN_CS_MAX) {
-			if (params->cipher_suites_list[i] >= NAN_CS_MAX) {
-				wpa_printf(MSG_DEBUG,
-					   "NAN: Invalid cipher suite %d in publish",
-					   params->cipher_suites_list[i]);
-				goto fail;
-			}
-
-			i++;
-		}
-
-		srv->cipher_suites_list =
-			int_array_dup(params->cipher_suites_list);
-		if (!srv->cipher_suites_list)
-			goto fail;
-	}
-
-	dl_list_init(&srv->pmkid_list);
 #ifdef CONFIG_NAN
 	if (nan_crypto_pmkid_list(&srv->pmkid_list, de->nmi, srv->service_id,
 				  srv->cipher_suites_list, params->nd_pmk) < 0)
@@ -2341,9 +3333,7 @@ void nan_de_cancel_publish(struct nan_de *de, int publish_id)
 
 	wpa_printf(MSG_DEBUG, "NAN: CancelPublish(publish_id=%d)", publish_id);
 
-	if (publish_id < 1 || publish_id > NAN_DE_MAX_SERVICE)
-		return;
-	srv = de->service[publish_id - 1];
+	srv = nan_de_get_service(de, publish_id);
 	if (!srv || srv->type != NAN_DE_PUBLISH)
 		return;
 	nan_de_del_srv(de, srv, NAN_DE_REASON_USER_REQUEST);
@@ -2357,9 +3347,7 @@ int nan_de_update_publish(struct nan_de *de, int publish_id,
 
 	wpa_printf(MSG_DEBUG, "NAN: UpdatePublish(publish_id=%d)", publish_id);
 
-	if (publish_id < 1 || publish_id > NAN_DE_MAX_SERVICE)
-		return -1;
-	srv = de->service[publish_id - 1];
+	srv = nan_de_get_service(de, publish_id);
 	if (!srv || srv->type != NAN_DE_PUBLISH)
 		return -1;
 
@@ -2384,9 +3372,7 @@ int nan_de_unpause_publish(struct nan_de *de, int publish_id,
 		   MACSTR ")",
 		   publish_id, peer_instance_id, MAC2STR(peer_addr));
 
-	if (publish_id < 1 || publish_id > NAN_DE_MAX_SERVICE)
-		return -1;
-	srv = de->service[publish_id - 1];
+	srv = nan_de_get_service(de, publish_id);
 	if (!srv || srv->type != NAN_DE_PUBLISH)
 		return -1;
 
@@ -2500,6 +3486,7 @@ int nan_de_subscribe(struct nan_de *de, const char *service_name,
 	srv = os_zalloc(sizeof(*srv));
 	if (!srv)
 		return -1;
+	dl_list_init(&srv->pmkid_list);
 	srv->type = NAN_DE_SUBSCRIBE;
 	srv->freq = params->freq;
 
@@ -2525,6 +3512,16 @@ int nan_de_subscribe(struct nan_de *de, const char *service_name,
 			goto fail;
 	}
 	srv->subscribe.freq_list = NULL;
+
+	if (params->pairing_setup_info && params->pairing_setup_info_len > 0) {
+		srv->subscribe.pairing_setup_info =
+			os_memdup(params->pairing_setup_info,
+				  params->pairing_setup_info_len);
+		if (!srv->subscribe.pairing_setup_info)
+			goto fail;
+		srv->subscribe.pairing_setup_info_len =
+			params->pairing_setup_info_len;
+	}
 
 	srv->srv_proto_type = srv_proto_type;
 	if (ssi) {
@@ -2592,6 +3589,9 @@ int nan_de_subscribe(struct nan_de *de, const char *service_name,
 			   " for subscribe service", MAC2STR(srv->forced_addr));
 	}
 
+	if (nan_de_set_cs_list(srv, params->cipher_suites_list) < 0)
+		goto fail;
+
 	dl_list_init(&srv->pmkid_list);
 
 	wpa_printf(MSG_DEBUG, "NAN: Assigned new subscribe handle %d for %s",
@@ -2613,13 +3613,37 @@ fail:
 }
 
 
+int nan_de_get_pbea_info(struct nan_de *de, int handle, u16 *extended_pbm,
+			 const u8 **pairing_setup_info,
+			 u16 *pairing_setup_info_len)
+{
+	struct nan_de_service *srv;
+
+	srv = nan_de_get_service(de, handle);
+	if (!srv)
+		return -1;
+
+	if (srv->type == NAN_DE_PUBLISH) {
+		*extended_pbm = srv->publish.extended_pbm;
+		*pairing_setup_info = srv->publish.pairing_setup_info;
+		*pairing_setup_info_len = srv->publish.pairing_setup_info_len;
+	} else if (srv->type == NAN_DE_SUBSCRIBE) {
+		*extended_pbm = srv->subscribe.extended_pbm;
+		*pairing_setup_info = srv->subscribe.pairing_setup_info;
+		*pairing_setup_info_len = srv->subscribe.pairing_setup_info_len;
+	} else {
+		return -1;
+	}
+
+	return 0;
+}
+
+
 void nan_de_cancel_subscribe(struct nan_de *de, int subscribe_id)
 {
 	struct nan_de_service *srv;
 
-	if (subscribe_id < 1 || subscribe_id > NAN_DE_MAX_SERVICE)
-		return;
-	srv = de->service[subscribe_id - 1];
+	srv = nan_de_get_service(de, subscribe_id);
 	if (!srv || srv->type != NAN_DE_SUBSCRIBE)
 		return;
 	nan_de_del_srv(de, srv, NAN_DE_REASON_USER_REQUEST);
@@ -2629,22 +3653,27 @@ void nan_de_cancel_subscribe(struct nan_de *de, int subscribe_id)
 int nan_de_transmit(struct nan_de *de, int handle,
 		    const struct wpabuf *ssi, const struct wpabuf *elems,
 		    const u8 *peer_addr, u8 req_instance_id,
-		    const struct wpabuf *nan_attrs, u32 *cookie)
+		    const struct wpabuf *nan_attrs, u32 *cookie,
+		    unsigned int peer_freq)
 {
 	struct nan_de_service *srv;
 	const u8 *a3;
 	const u8 *network_id;
+	unsigned int tx_wait;
 
-	if (handle < 1 || handle > NAN_DE_MAX_SERVICE)
-		return -1;
-
-	srv = de->service[handle - 1];
+	srv = nan_de_get_service(de, handle);
 	if (!srv)
 		return -1;
 
 	if (srv->sync && !de->cluster_id_set) {
 		wpa_printf(MSG_DEBUG,
 			   "NAN: Cannot transmit Follow-up, cluster ID not set");
+		return -1;
+	}
+
+	if (srv->type == NAN_DE_PUBLISH && srv->publish.orig_id) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Cannot transmit Follow-up for proxied services");
 		return -1;
 	}
 
@@ -2659,9 +3688,18 @@ int nan_de_transmit(struct nan_de *de, int handle,
 		a3 = srv->a3;
 	else
 		a3 = network_id;
-	nan_de_tx_sdf(de, srv, 100, NAN_SRV_CTRL_FOLLOW_UP,
+
+	/* When peer_freq is set, send the follow-up off-channel on the
+	 * peer's discovery frequency instead of the sync/DW path.
+	 */
+	if (peer_freq)
+		tx_wait = 100;
+	else
+		tx_wait = srv->sync ? 0 : 100;
+
+	nan_de_tx_sdf(de, srv, tx_wait, NAN_SRV_CTRL_FOLLOW_UP,
 		      peer_addr, a3, req_instance_id, ssi, nan_attrs,
-		      cookie);
+		      cookie, peer_freq);
 
 	srv->listen_stopped = false;
 	return 0;
@@ -2672,10 +3710,7 @@ int nan_de_stop_listen(struct nan_de *de, int handle)
 {
 	struct nan_de_service *srv;
 
-	if (handle < 1 || handle > NAN_DE_MAX_SERVICE)
-		return -1;
-
-	srv = de->service[handle - 1];
+	srv = nan_de_get_service(de, handle);
 	if (!srv)
 		return -1;
 	srv->listen_stopped = true;
@@ -2724,10 +3759,152 @@ int nan_de_config(struct nan_de *de, struct nan_de_cfg *cfg)
 }
 
 
+static void nan_de_tx_merged_sdf(struct nan_de *de, unsigned int freq,
+				 const u8 *dst, const u8 *bssid)
+{
+	struct wpabuf *buf;
+	size_t total_len = 0;
+	unsigned int i;
+	struct nan_de_service *services[NAN_DE_MAX_SERVICE];
+	unsigned int service_count = 0;
+	u8 irsa_nonce[NAN_NIRA_NONCE_LEN];
+	u8 *irsa_tag_tlv = NULL;
+	u16 irsa_tag_tlv_len = 0;
+	bool has_randomization = false;
+	bool has_zero_rsid = false;
+	int handle = -1;
+	int retry;
+
+	/* Collect all services that need to be transmitted */
+	for (i = 0; i < NAN_DE_MAX_SERVICE; i++) {
+		struct nan_de_service *srv = de->service[i];
+
+		if (!srv)
+			continue;
+
+		if ((srv->type == NAN_DE_PUBLISH && srv->publish.unsolicited) ||
+		    (srv->type == NAN_DE_SUBSCRIBE && srv->subscribe.active)) {
+			services[service_count++] = srv;
+
+			if ((srv->type == NAN_DE_PUBLISH &&
+			     srv->publish.randomize_service_id) ||
+			    (srv->type == NAN_DE_SUBSCRIBE &&
+			     srv->subscribe.randomize_service_id)) {
+				has_randomization = true;
+			}
+		}
+	}
+
+	if (service_count == 0)
+		return;
+
+	wpa_printf(MSG_DEBUG, "NAN: Merging %u services into a single SDF",
+		   service_count);
+
+	/* Generate IRSA nonce and tag TLV, retrying if any RSID is all-zero */
+	if (has_randomization || de->cb.irsa_get_nonce_tag_tlv) {
+		for (retry = 0; retry < NAN_RSID_MAX_RETRIES; retry++) {
+			os_free(irsa_tag_tlv);
+			irsa_tag_tlv = NULL;
+			irsa_tag_tlv_len = 0;
+			has_zero_rsid = false;
+
+			nan_de_generate_irsa_and_calc_len(de, irsa_nonce,
+							  &irsa_tag_tlv,
+							  &irsa_tag_tlv_len);
+
+			/* Probe all services for all-zero RSIDs */
+			for (i = 0; i < service_count; i++) {
+				struct nan_de_service *srv = services[i];
+				enum nan_service_control_type type;
+
+				type = (srv->type == NAN_DE_PUBLISH) ?
+					NAN_SRV_CTRL_PUBLISH :
+					NAN_SRV_CTRL_SUBSCRIBE;
+
+				nan_de_sdf_attrs_put(NULL, de, srv, type, 0,
+						     srv->ssi, NULL,
+						     irsa_tag_tlv,
+						     irsa_tag_tlv_len,
+						     false, &has_zero_rsid);
+				if (has_zero_rsid)
+					break;
+			}
+
+			if (!has_zero_rsid)
+				break;
+
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Retrying IRSA nonce generation (attempt %d) due to all-zero RSID",
+				   retry + 1);
+		}
+		if (has_zero_rsid)
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Could not avoid all-zero RSID after %d attempts",
+				   NAN_RSID_MAX_RETRIES);
+
+		total_len += NAN_ATTR_HDR_LEN + 1 +
+			NAN_NIRA_NONCE_LEN + irsa_tag_tlv_len;
+	}
+
+	/* Calculate total length for all service attributes */
+	for (i = 0; i < service_count; i++) {
+		struct nan_de_service *srv = services[i];
+		enum nan_service_control_type type;
+
+		type = (srv->type == NAN_DE_PUBLISH) ? NAN_SRV_CTRL_PUBLISH :
+			NAN_SRV_CTRL_SUBSCRIBE;
+
+		total_len += nan_de_sdf_attrs_put(NULL, de, srv, type, 0,
+						  srv->ssi, NULL,
+						  irsa_tag_tlv,
+						  irsa_tag_tlv_len,
+						  false, NULL);
+	}
+
+	buf = nan_de_alloc_sdf(de, dst, total_len, NAN_SRV_CTRL_PUBLISH);
+	if (!buf) {
+		os_free(irsa_tag_tlv);
+		return;
+	}
+
+	/* Build all service attributes */
+	for (i = 0; i < service_count; i++) {
+		struct nan_de_service *srv = services[i];
+		enum nan_service_control_type type;
+
+		if (handle == -1)
+			handle = srv->id;
+
+		type = (srv->type == NAN_DE_PUBLISH) ? NAN_SRV_CTRL_PUBLISH :
+			NAN_SRV_CTRL_SUBSCRIBE;
+
+		nan_de_sdf_attrs_put(buf, de, srv, type, 0, srv->ssi, NULL,
+				     irsa_tag_tlv, irsa_tag_tlv_len, false,
+				     NULL);
+	}
+
+	/* Add IRSA if randomization is used or PKBST generated tags */
+	if (has_randomization || irsa_tag_tlv_len > 0) {
+		nan_de_irsa_attr_add(buf, irsa_nonce, irsa_tag_tlv,
+				     irsa_tag_tlv_len);
+		os_free(irsa_tag_tlv);
+	}
+
+	nan_de_tx(de, freq, 0, dst, de->nmi, bssid, buf, NULL, handle);
+	wpabuf_free(buf);
+
+	/* Update last_multicast time for all services */
+	for (i = 0; i < service_count; i++)
+		os_get_reltime(&services[i]->last_multicast);
+}
+
+
 void nan_de_dw_trigger(struct nan_de *de, int freq)
 {
 	int i;
 	struct os_reltime now;
+	bool has_services = false;
 
 	de->dw_freq = freq;
 
@@ -2751,9 +3928,12 @@ void nan_de_dw_trigger(struct nan_de *de, int freq)
 		if ((srv->type == NAN_DE_PUBLISH &&
 		     srv->publish.unsolicited) ||
 		    (srv->type == NAN_DE_SUBSCRIBE && srv->subscribe.active)) {
-			nan_de_tx_multicast(de, srv, 0);
+			has_services = true;
 		}
 	}
+
+	if (has_services)
+		nan_de_tx_merged_sdf(de, freq, nan_network_id, de->cluster_id);
 }
 
 
@@ -2773,10 +3953,7 @@ bool nan_de_is_valid_instance_id(struct nan_de *de, int handle,
 {
 	struct nan_de_service *srv;
 
-	if (handle < 1 || handle > NAN_DE_MAX_SERVICE)
-		return false;
-
-	srv = de->service[handle - 1];
+	srv = nan_de_get_service(de, handle);
 	if (!srv)
 		return false;
 
@@ -2794,10 +3971,7 @@ u16 nan_de_get_service_bootstrap_methods(struct nan_de *de, int handle)
 {
 	struct nan_de_service *srv;
 
-	if (handle < 1 || handle > NAN_DE_MAX_SERVICE)
-		return 0;
-
-	srv = de->service[handle - 1];
+	srv = nan_de_get_service(de, handle);
 	if (!srv)
 		return 0;
 
@@ -2805,14 +3979,23 @@ u16 nan_de_get_service_bootstrap_methods(struct nan_de *de, int handle)
 }
 
 
+const int * nan_de_get_cipher_suites_list(struct nan_de *de, int handle)
+{
+	struct nan_de_service *srv;
+
+	srv = nan_de_get_service(de, handle);
+	if (!srv)
+		return NULL;
+
+	return srv->cipher_suites_list;
+}
+
+
 bool nan_de_service_supports_csid(struct nan_de *de, int handle, int csid)
 {
 	struct nan_de_service *srv;
 
-	if (handle < 1 || handle > NAN_DE_MAX_SERVICE)
-		return false;
-
-	srv = de->service[handle - 1];
+	srv = nan_de_get_service(de, handle);
 	if (!srv)
 		return false;
 

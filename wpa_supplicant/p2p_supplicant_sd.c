@@ -596,12 +596,15 @@ static void wpas_sd_req_asp(struct wpa_supplicant *wpa_s,
 
 	for (adv_data = p2p_get_p2ps_adv_list(wpa_s->global->p2p);
 	     adv_data; adv_data = adv_data->next) {
+		size_t adv_len = os_strlen(adv_data->svc_name);
+
 		/* If not a prefix match, reject length mismatches */
-		if (!prefix && svc_len != os_strlen(adv_data->svc_name))
+		if (!prefix && svc_len != adv_len)
 			continue;
 
 		/* Search each service for request */
-		if (os_memcmp(adv_data->svc_name, svc, svc_len) == 0 &&
+		if (adv_len >= svc_len &&
+		    os_memcmp(adv_data->svc_name, svc, svc_len) == 0 &&
 		    find_p2ps_substr(adv_data, info, info_len)) {
 			size_t len = os_strlen(adv_data->svc_name);
 			size_t svc_info_len = 0;

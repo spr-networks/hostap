@@ -181,6 +181,26 @@ def test_wpas_config_file(dev, apdev, params):
         raise Exception("Missing config file did not result in an error")
 
     try:
+        wpas.interface_add("wlan5", config="/tmp/logs/../logs/wpas_config_file.conf")
+        initialized = True
+    except:
+        initialized = False
+    if initialized:
+        raise Exception(".. in config file path did not result in an error")
+
+    conf2 = "/tmp/wpas_config_file.conf"
+    with open(conf2, "w") as f:
+        f.write("update_config=1")
+    try:
+        wpas.interface_add("wlan5", config=conf2)
+        initialized = True
+    except:
+        initialized = False
+    if initialized:
+        raise Exception("Config file path with mismatching prefix did not result in an error")
+    os.remove(conf2)
+
+    try:
         with open(config, "w") as f:
             os.fchmod(f.fileno(), 0o600)
             f.write("update_config=1 \t\r\n")
@@ -319,9 +339,9 @@ def test_wpas_config_file(dev, apdev, params):
         if country and "type=WORLD" in ev:
             break
 
-def test_wpas_config_file_wps(dev, apdev):
+def test_wpas_config_file_wps(dev, apdev, params):
     """wpa_supplicant config file parsing/writing with WPS"""
-    config = "/tmp/test_wpas_config_file.conf"
+    config = os.path.join(params['logdir'], 'wpas_config_file_wps.conf')
     if os.path.exists(config):
         os.remove(config)
 
@@ -356,17 +376,13 @@ def test_wpas_config_file_wps(dev, apdev):
         except:
             pass
         try:
-            os.remove(config + ".tmp")
-        except:
-            pass
-        try:
             os.rmdir(config)
         except:
             pass
 
-def test_wpas_config_file_wps2(dev, apdev):
+def test_wpas_config_file_wps2(dev, apdev, params):
     """wpa_supplicant config file parsing/writing with WPS (2)"""
-    config = "/tmp/test_wpas_config_file.conf"
+    config = os.path.join(params['logdir'], 'wpas_config_file_wps2.conf')
     if os.path.exists(config):
         os.remove(config)
 
@@ -406,17 +422,13 @@ def test_wpas_config_file_wps2(dev, apdev):
         except:
             pass
         try:
-            os.remove(config + ".tmp")
-        except:
-            pass
-        try:
             os.rmdir(config)
         except:
             pass
 
-def test_wpas_config_file_set_psk(dev):
+def test_wpas_config_file_set_psk(dev, apdev, params):
     """wpa_supplicant config file parsing/writing with arbitrary PSK value"""
-    config = "/tmp/test_wpas_config_file.conf"
+    config = os.path.join(params['logdir'], 'wpas_config_file_set_psk.conf')
     if os.path.exists(config):
         os.remove(config)
 
@@ -451,17 +463,13 @@ def test_wpas_config_file_set_psk(dev):
         except:
             pass
         try:
-            os.remove(config + ".tmp")
-        except:
-            pass
-        try:
             os.rmdir(config)
         except:
             pass
 
-def test_wpas_config_file_set_cred(dev):
+def test_wpas_config_file_set_cred(dev, apdev, params):
     """wpa_supplicant config file parsing/writing with arbitrary cred values"""
-    config = "/tmp/test_wpas_config_file.conf"
+    config = os.path.join(params['logdir'], 'wpas_config_file_set_cred.conf')
     if os.path.exists(config):
         os.remove(config)
 
@@ -499,17 +507,13 @@ def test_wpas_config_file_set_cred(dev):
         except:
             pass
         try:
-            os.remove(config + ".tmp")
-        except:
-            pass
-        try:
             os.rmdir(config)
         except:
             pass
 
-def test_wpas_config_file_set_global(dev):
+def test_wpas_config_file_set_global(dev, apdev, params):
     """wpa_supplicant config file parsing/writing with arbitrary global values"""
-    config = "/tmp/test_wpas_config_file.conf"
+    config = os.path.join(params['logdir'], 'wpas_config_file_set_global.conf')
     if os.path.exists(config):
         os.remove(config)
 
@@ -548,10 +552,6 @@ def test_wpas_config_file_set_global(dev):
     finally:
         try:
             os.remove(config)
-        except:
-            pass
-        try:
-            os.remove(config + ".tmp")
         except:
             pass
         try:

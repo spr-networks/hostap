@@ -249,6 +249,10 @@ struct radius_client_data {
 	void *tls_ctx;
 	struct tls_connection *auth_tls_conn;
 	struct tls_connection *acct_tls_conn;
+	unsigned int tls_reconnect_attempts;
+	unsigned int tls_reconnect_max_attempts;
+	unsigned int tls_reconnect_max_delay;
+	bool tls_reconnect_pending;
 #endif /* CONFIG_RADIUS_TLS */
 };
 
@@ -635,6 +639,65 @@ static void radius_client_timer(void *eloop_ctx, void *timeout_ctx)
 }
 
 
+#ifdef CONFIG_RADIUS_TLS
+
+static void radius_tls_schedule_reconnect(struct radius_client_data *radius);
+
+static void radius_tls_reconnect(void *eloop_ctx, void *timeout_ctx)
+{
+	struct radius_client_data *radius = eloop_ctx;
+	struct hostapd_radius_servers *conf = radius->conf;
+	struct hostapd_radius_server *next, *old;
+
+	wpa_printf(MSG_DEBUG, "RADIUS: TLS reconnect attempt %u",
+		   radius->tls_reconnect_attempts);
+
+	radius->tls_reconnect_pending = false;
+	/* Until maximum reconnect attempts are reached, retry connection to
+	 * the same server. */
+	if (radius->tls_reconnect_attempts >=
+	    radius->tls_reconnect_max_attempts &&
+	    conf->num_auth_servers > 1) {
+		wpa_printf(MSG_DEBUG, "RADIUS: Switching to next server");
+
+		old = conf->auth_server;
+		next = old + 1;
+		if (next > &(conf->auth_servers[conf->num_auth_servers - 1]))
+			next = conf->auth_servers;
+		conf->auth_server = next;
+		/* Reset attempts if trying a different server */
+		radius->tls_reconnect_attempts = 0;
+		radius_change_server(radius, next, old, 1);
+	} else {
+		radius_change_server(radius, conf->auth_server, NULL, 1);
+		radius->tls_reconnect_attempts++;
+	}
+
+	radius_tls_schedule_reconnect(radius);
+}
+
+
+static void radius_tls_schedule_reconnect(struct radius_client_data *radius)
+{
+	unsigned int delay_sec, jitter;
+
+	delay_sec = 1 << radius->tls_reconnect_attempts;
+	jitter = os_random() % 100000;
+
+	if (delay_sec > radius->tls_reconnect_max_delay)
+		delay_sec = radius->tls_reconnect_max_delay;
+
+	wpa_printf(MSG_DEBUG, "RADIUS: Next TLS reconnect attempt in %u sec",
+		  delay_sec);
+
+	eloop_cancel_timeout(radius_tls_reconnect, radius, NULL);
+	eloop_register_timeout(delay_sec, jitter, radius_tls_reconnect,
+			       radius, NULL);
+}
+
+#endif /* CONFIG_RADIUS_TLS */
+
+
 static void radius_client_auth_failover(struct radius_client_data *radius)
 {
 	struct hostapd_radius_servers *conf = radius->conf;
@@ -658,6 +721,15 @@ static void radius_client_auth_failover(struct radius_client_data *radius)
 	if (next > &(conf->auth_servers[conf->num_auth_servers - 1]))
 		next = conf->auth_servers;
 	conf->auth_server = next;
+
+#ifdef CONFIG_RADIUS_TLS
+	if (radius->tls_reconnect_pending) {
+		/* TLS reconnection attempt is already scheduled, avoid
+		 * triggering immediate fail over to next server. */
+		return;
+	}
+#endif /* CONFIG_RADIUS_TLS */
+
 	radius_change_server(radius, next, old, 1);
 }
 
@@ -1030,6 +1102,10 @@ radius_client_process_tls_handshake(struct radius_client_data *radius,
 		wpa_printf(MSG_DEBUG,
 			   "RADIUS: TLS connection established (sock=%d)",
 			   sock);
+		radius->tls_reconnect_attempts = 0;
+		radius->tls_reconnect_pending = false;
+		eloop_cancel_timeout(radius_tls_reconnect, radius, NULL);
+
 		if (msg_type == RADIUS_ACCT)
 			radius->acct_tls_ready = true;
 		else
@@ -1097,7 +1173,11 @@ fail:
 		radius->acct_tls_conn = NULL;
 	else
 		radius->auth_tls_conn = NULL;
+
+	radius->tls_reconnect_pending = true;
 	radius_client_close_tcp(radius, sock, msg_type);
+
+	radius_tls_schedule_reconnect(radius);
 }
 
 #endif /* CONFIG_RADIUS_TLS */
@@ -1790,6 +1870,14 @@ static void radius_retry_primary_timer(void *eloop_ctx, void *timeout_ctx)
 	struct hostapd_radius_servers *conf = radius->conf;
 	struct hostapd_radius_server *oserv;
 
+#ifdef CONFIG_RADIUS_TLS
+	if (radius->tls_reconnect_pending) {
+		/* TLS reconnection attempt is already scheduled, avoid
+		 * triggering immediate reconnect from retry path. */
+		return;
+	}
+#endif /* CONFIG_RADIUS_TLS */
+
 	if (radius->auth_sock >= 0 && conf->auth_servers &&
 	    conf->auth_server != conf->auth_servers) {
 		oserv = conf->auth_server;
@@ -1823,6 +1911,14 @@ static void radius_retry_primary_timer(void *eloop_ctx, void *timeout_ctx)
 
 static int radius_client_init_auth(struct radius_client_data *radius)
 {
+#ifdef CONFIG_RADIUS_TLS
+	if (radius->tls_reconnect_pending) {
+		wpa_printf(MSG_DEBUG,
+			   "RADIUS: TLS reconnect pending, skip packet-triggered reconnect");
+		return 0;
+	}
+#endif /* CONFIG_RADIUS_TLS */
+
 	radius_close_auth_socket(radius);
 	return radius_change_server(radius, radius->conf->auth_server, NULL, 1);
 }
@@ -1866,6 +1962,12 @@ radius_client_init(void *ctx, struct hostapd_radius_servers *conf)
 	radius->ctx = ctx;
 	radius->conf = conf;
 	radius->auth_sock = radius->acct_sock = -1;
+#ifdef CONFIG_RADIUS_TLS
+	radius->tls_reconnect_attempts = 0;
+	radius->tls_reconnect_max_attempts = 7;
+	radius->tls_reconnect_max_delay = 16;
+	radius->tls_reconnect_pending = false;
+#endif /* CONFIG_RADIUS_TLS */
 
 	if (conf->auth_server && radius_client_init_auth(radius) == -1) {
 		radius_client_deinit(radius);
@@ -1915,6 +2017,9 @@ void radius_client_deinit(struct radius_client_data *radius)
 	radius_close_acct_socket(radius);
 
 	eloop_cancel_timeout(radius_retry_primary_timer, radius, NULL);
+#ifdef CONFIG_RADIUS_TLS
+	eloop_cancel_timeout(radius_tls_reconnect, radius, NULL);
+#endif /* CONFIG_RADIUS_TLS */
 
 	radius_client_flush(radius, 0);
 	os_free(radius->auth_handlers);

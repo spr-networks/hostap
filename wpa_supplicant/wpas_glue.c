@@ -292,6 +292,7 @@ static void wpa_supplicant_eapol_cb(struct eapol_sm *eapol,
 				    void *ctx)
 {
 	struct wpa_supplicant *wpa_s = ctx;
+	const u8 *auth_addr;
 	int res, pmk_len;
 	u8 pmk[PMK_LEN_MAX];
 
@@ -380,6 +381,15 @@ static void wpa_supplicant_eapol_cb(struct eapol_sm *eapol,
 		wpa_printf(MSG_DEBUG, "Failed to set PMK to the driver");
 	}
 
+	if (wpa_s->wpa_proto == WPA_PROTO_RSN &&
+	    !wpa_key_mgmt_suite_b(wpa_s->key_mgmt) &&
+	    !wpa_key_mgmt_ft(wpa_s->key_mgmt)) {
+		auth_addr = wpa_sm_get_auth_addr(wpa_s->wpa);
+		if (!is_zero_ether_addr(auth_addr))
+			wpa_sm_set_pmk(wpa_s->wpa, pmk, pmk_len, NULL,
+				       auth_addr, PASN_GROUP_NOT_SPECIFIED);
+	}
+
 	wpa_supplicant_cancel_scan(wpa_s);
 	wpa_supplicant_cancel_auth_timeout(wpa_s);
 	wpa_supplicant_set_state(wpa_s, WPA_COMPLETED);
@@ -457,6 +467,11 @@ static int wpa_get_beacon_ie(struct wpa_supplicant *wpa_s)
 		ie = wpa_bss_get_vendor_ie(curr, RSNXE_OVERRIDE_IE_VENDOR_TYPE);
 		if (wpa_sm_set_ap_rsnxe_override(wpa_s->wpa, ie,
 						 ie ? 2 + ie[1] : 0))
+			ret = -1;
+
+		ie = wpa_bss_get_ie_ext(curr, WLAN_EID_EXT_SECURITY_PROFILE);
+		if (wpa_sm_set_ap_security_profile(wpa_s->wpa, ie,
+						   ie ? 2 + ie[1] : 0))
 			ret = -1;
 	} else {
 		ret = -1;

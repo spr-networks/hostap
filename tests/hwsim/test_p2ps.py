@@ -96,7 +96,8 @@ def p2ps_exact_seek(i_dev, r_dev, svc_name, srv_info=None,
     i_dev.p2p_stop_find()
     return [adv_id, rcvd_svc_name]
 
-def p2ps_nonexact_seek(i_dev, r_dev, svc_name, srv_info=None, adv_num=None):
+def p2ps_nonexact_seek(i_dev, r_dev, svc_name, srv_info=None, adv_num=None,
+                       no_response=False):
     """P2PS nonexact service seek request"""
     if adv_num is None:
        adv_num = 1
@@ -116,6 +117,10 @@ def p2ps_nonexact_seek(i_dev, r_dev, svc_name, srv_info=None, adv_num=None):
     ev_list = []
     for i in range(0, adv_num):
         ev1 = i_dev.wait_global_event(["P2P-SERV-ASP-RESP"], timeout=10)
+        if no_response:
+            if ev1:
+                raise Exception("Unexpected Service Discovery Response")
+            break
         if ev1 is None:
             raise Exception("Failed to receive Service Discovery Response")
         if r_dev.p2p_dev_addr() not in ev1:
@@ -437,6 +442,16 @@ def test_p2ps_nonexact_search(dev):
     ev0 = dev[0].global_request("P2P_SERVICE_DEL asp " + str(adv_id))
     if ev0 is None:
         raise Exception("Unable to remove the advertisement instance")
+
+@remote_compatible
+def test_p2ps_nonexact_search_long_prefix(dev):
+    """P2PS nonexact seek request with longer prefix than svc_name"""
+    p2ps_advertise(r_dev=dev[0], r_role='0', svc_name='org.wi-fi.wfds.play.rx',
+                   srv_info='I support Miracast Mode ')
+    p2ps_nonexact_seek(i_dev=dev[1], r_dev=dev[0],
+                       svc_name='org.wi-fi.wfds.play.rx' + 100*'A' + '*',
+                       no_response=True)
+    dev[0].global_request("P2P_SERVICE_DEL asp all")
 
 @remote_compatible
 def test_p2ps_nonexact_search_srvinfo(dev):

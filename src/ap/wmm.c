@@ -67,8 +67,8 @@ static void wmm_calc_regulatory_limit(struct hostapd_data *hapd,
 	struct hostapd_hw_modes *mode = hapd->iface->current_mode;
 	int c;
 
-	os_memcpy(acp, hapd->iconf->wmm_ac_params,
-		  sizeof(hapd->iconf->wmm_ac_params));
+	os_memcpy(acp, hapd->conf->wmm_ac_params,
+		  sizeof(hapd->conf->wmm_ac_params));
 
 	for (c = 0; mode && c < mode->num_channels; c++) {
 		struct hostapd_channel_data *chan = &mode->channels[c];
@@ -77,7 +77,7 @@ static void wmm_calc_regulatory_limit(struct hostapd_data *hapd,
 			continue;
 
 		if (chan->wmm_rules_valid)
-			wmm_set_regulatory_limit(hapd->iconf->wmm_ac_params,
+			wmm_set_regulatory_limit(hapd->conf->wmm_ac_params,
 						 acp, chan->wmm_rules);
 		break;
 	}
@@ -86,10 +86,10 @@ static void wmm_calc_regulatory_limit(struct hostapd_data *hapd,
 	 * Check if we need to update set count. Since both were initialized to
 	 * zero we can compare the whole array in one shot.
 	 */
-	if (os_memcmp(acp, hapd->iface->prev_wmm,
-		      sizeof(hapd->iconf->wmm_ac_params)) != 0) {
-		os_memcpy(hapd->iface->prev_wmm, acp,
-			  sizeof(hapd->iconf->wmm_ac_params));
+	if (os_memcmp(acp, hapd->prev_wmm,
+		      sizeof(hapd->conf->wmm_ac_params)) != 0) {
+		os_memcpy(hapd->prev_wmm, acp,
+			  sizeof(hapd->conf->wmm_ac_params));
 		hapd->parameter_set_count++;
 	}
 }

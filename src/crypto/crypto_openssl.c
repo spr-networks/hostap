@@ -4581,8 +4581,12 @@ static EVP_PKEY * crypto_rsa_key_read_public(FILE *f)
 {
 	EVP_PKEY *pkey;
 	X509 *x509;
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+	int err;
+#else /* OpenSSL < 4.0 */
 	const ASN1_TIME *not_before, *not_after;
 	int res_before, res_after;
+#endif /* OpenSSL < 4.0 */
 
 	pkey = PEM_read_PUBKEY(f, NULL, NULL, NULL);
 	if (pkey)
@@ -4593,6 +4597,14 @@ static EVP_PKEY * crypto_rsa_key_read_public(FILE *f)
 	if (!x509)
 		return NULL;
 
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+	if (!X509_check_certificate_times(NULL, x509, &err)) {
+		wpa_printf(MSG_INFO,
+			   "OpenSSL: Certificate for RSA public key is not valid at this time (%d)",
+			   err);
+		goto fail;
+	}
+#else /* OpenSSL < 4.0 */
 	not_before = X509_get0_notBefore(x509);
 	not_after = X509_get0_notAfter(x509);
 	if (!not_before || !not_after)
@@ -4607,6 +4619,7 @@ static EVP_PKEY * crypto_rsa_key_read_public(FILE *f)
 			   res_before, res_after);
 		goto fail;
 	}
+#endif /* OpenSSL < 4.0 */
 
 	pkey = X509_get_pubkey(x509);
 	X509_free(x509);

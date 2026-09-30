@@ -1469,6 +1469,17 @@ struct wpa_driver_associate_params {
 	 * Request frame.
 	 */
 	bool okc_pmkid_in_assoc;
+
+	/**
+	 * security_profile_active - Whether Security Profile element is active
+	 *
+	 * This indicates when the Security Profile element (defined in IEEE
+	 * 802.11bn) functionality is enabled locally. Drivers that handle the
+	 * Security Profile element themselves (e.g., for driver-SME) can use
+	 * this flag to know whether to parse, validate, and apply the element
+	 * in case the target AP supports security profiles.
+	 */
+	bool security_profile_active;
 };
 
 enum hide_ssid {
@@ -2351,6 +2362,7 @@ struct wpa_driver_capa {
 #define WPA_DRIVER_CAPA_KEY_MGMT_CCKM		0x00400000
 #define WPA_DRIVER_CAPA_KEY_MGMT_SAE_EXT_KEY	0x01000000
 #define WPA_DRIVER_CAPA_KEY_MGMT_FT_SAE_EXT_KEY	0x02000000
+#define WPA_DRIVER_CAPA_KEY_MGMT_802_1X_SHA384	0x04000000
 	/** Bitfield of supported key management suites */
 	unsigned int key_mgmt;
 	unsigned int key_mgmt_iftype[WPA_IF_MAX];
@@ -2610,6 +2622,9 @@ struct wpa_driver_capa {
 /** Driver supports adding OKC derived PMKID in (Re)Association Request frame */
 #define WPA_DRIVER_FLAGS2_OKC_PMKID_IN_ASSOC	0x0000004000000000ULL
 	u64 flags2;
+/** Driver supports Security Profile element (IEEE P802.11bn/D2.0, 9.4.2.369
+ * and 37.33) handling */
+#define WPA_DRIVER_FLAGS2_SECURITY_PROFILE      0x0000008000000000ULL
 
 #define FULL_AP_CLIENT_STATE_SUPP(drv_flags) \
 	(drv_flags & WPA_DRIVER_FLAGS_FULL_AP_CLIENT_STATE)
@@ -2850,6 +2865,8 @@ struct hostap_sta_driver_data {
 	s8 avg_ack_signal; /* dBm */
 	enum guard_interval rx_guard_interval, tx_guard_interval;
 	u8 rx_dcm, tx_dcm;
+	u16 valid_links;
+	unsigned long link_inactive_msec[MAX_NUM_MLD_LINKS];
 };
 
 struct hostapd_sta_add_params {
@@ -4549,15 +4566,23 @@ struct wpa_driver_ops {
 	 * set_wds_sta - Bind a station into a 4-address WDS (AP only)
 	 * @priv: Private driver interface data
 	 * @addr: MAC address of the associated station
-	 * @aid: Association ID
+	 * @ifname_id: Interface name identifier - Association ID for non-MLO,
+	 *	or MLD-wide unique identifier for MLO WDS stations.
+	 *	Used to generate unique WDS interface names (e.g., wlan0.sta%d).
 	 * @val: 1 = bind to 4-address WDS; 0 = unbind
 	 * @bridge_ifname: Bridge interface to use for the WDS station or %NULL
 	 *	to indicate that bridge is not to be used
 	 * @ifname_wds: Buffer to return the interface name for the new WDS
 	 *	station or %NULL to indicate name is not returned.
 	 * Returns: 0 on success, -1 on failure
+	 *
+	 * Note: The ifname_id parameter is used for generating unique interface
+	 * names and is not directly related to the 802.11 protocol Association
+	 * ID in the MLO WDS case. For MLO WDS stations, a separate MLD-wide
+	 * identifier is allocated to ensure unique interface names across all
+	 * affiliated APs.
 	 */
-	int (*set_wds_sta)(void *priv, const u8 *addr, int aid, int val,
+	int (*set_wds_sta)(void *priv, const u8 *addr, int ifname_id, int val,
 			   const char *bridge_ifname, char *ifname_wds);
 
 	/**

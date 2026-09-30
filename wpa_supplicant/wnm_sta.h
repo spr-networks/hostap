@@ -83,6 +83,8 @@ bool wnm_is_bss_excluded(struct wpa_supplicant *wpa_s, struct wpa_bss *bss);
 
 void wnm_btm_reset(struct wpa_supplicant *wpa_s);
 
+void wnm_sleep_mode_clear(struct wpa_supplicant *wpa_s);
+
 static inline bool wnm_active_bss_trans_mgmt(struct wpa_supplicant *wpa_s)
 {
 	return !!wpa_s->wnm_dialog_token;
@@ -113,6 +115,10 @@ static inline void wnm_btm_reset(struct wpa_supplicant *wpa_s)
 static inline bool wnm_active_bss_trans_mgmt(struct wpa_supplicant *wpa_s)
 {
 	return false;
+}
+
+static inline void wnm_sleep_mode_clear(struct wpa_supplicant *wpa_s)
+{
 }
 
 #endif /* CONFIG_WNM */

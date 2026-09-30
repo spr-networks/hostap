@@ -1045,8 +1045,8 @@ nan_test_setup_devices(struct nan_test_global *global,
 	if (!sub)
 		goto fail;
 
-	nan_add_peer(pub->nan, g_sub_nmi, attrs, sizeof(attrs));
-	nan_add_peer(sub->nan, g_pub_nmi, attrs, sizeof(attrs));
+	nan_add_peer(pub->nan, g_sub_nmi, NULL, 0, attrs, sizeof(attrs));
+	nan_add_peer(sub->nan, g_pub_nmi, NULL, 0, attrs, sizeof(attrs));
 
 	wpa_printf(MSG_INFO, "\n%s: Done\n", __func__);
 	return sub;

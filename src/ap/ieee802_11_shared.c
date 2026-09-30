@@ -1112,7 +1112,8 @@ int get_tx_parameters(struct sta_info *sta, int ap_max_chanwidth,
 #endif /* CONFIG_OCV */
 
 
-u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
+u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len,
+		       u64 capab_mask)
 {
 	u8 *pos = eid;
 	bool sae_pk = false;
@@ -1165,7 +1166,8 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 	    (hapd->conf->assoc_frame_encryption ||
 	    hapd->conf->pmksa_caching_privacy))
 		capab |= BIT(WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION);
-	if (hapd->conf->wpa_key_mgmt & WPA_KEY_MGMT_EPPKE)
+	if ((hapd->conf->wpa_key_mgmt |
+	     hostapd_config_sp_key_mgmt(hapd->conf)) & WPA_KEY_MGMT_EPPKE)
 		capab |= BIT(WLAN_RSNX_CAPAB_KEK_IN_PASN);
 	if (hapd->conf->pmksa_caching_privacy)
 		capab |= BIT(WLAN_RSNX_CAPAB_PMKSA_CACHING_PRIVACY);
@@ -1174,6 +1176,8 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 	if (hapd->conf->eppke_unauth)
 		capab |= BIT_ULL(WLAN_RSNX_CAPAB_UNAUTH_EPPKE);
 #endif /* CONFIG_ENC_ASSOC */
+
+	capab &= capab_mask;
 
 	if (!capab)
 		return eid; /* no supported extended RSN capabilities */
@@ -1195,6 +1199,186 @@ u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len)
 		capab >>= 8;
 	}
 
+	return pos;
+}
+
+
+static int get_max_security_profile(const int *profiles)
+{
+	int i, max_profile = -1;
+
+	for (i = 0; profiles && profiles[i] >= 0; i++) {
+		if (profiles[i] > max_profile)
+			max_profile = profiles[i];
+	}
+
+	return max_profile;
+}
+
+
+/*
+ * hostapd_security_profile_len - Calculate length of Security Profile element
+ *
+ * Returns the total length of the element (including EID and Length fields),
+ * or 0 if no profiles are configured.
+ */
+size_t hostapd_security_profile_len(struct hostapd_data *hapd)
+{
+	int max_profile;
+	size_t bitmap_len, ext_rsn_capab_len = 0;
+	u8 rsnxe_buf[2 + sizeof(u64)];
+	u8 *rsnxe_end;
+
+#ifdef CONFIG_TESTING_OPTIONS
+	if (hapd->conf->security_profile_override)
+		return wpabuf_len(hapd->conf->security_profile_override);
+#endif /* CONFIG_TESTING_OPTIONS */
+
+	max_profile = get_max_security_profile(hapd->conf->security_profiles);
+	if (max_profile < 0)
+		return 0;
+
+	/* Bitmap size: ceil((max_profile + 1) / 8) */
+	bitmap_len = max_profile / 8 + 1;
+
+	rsnxe_end = hostapd_eid_rsnxe(hapd, rsnxe_buf, sizeof(rsnxe_buf),
+				      ~0ULL);
+	if (rsnxe_end > rsnxe_buf + 2)
+		ext_rsn_capab_len = rsnxe_end - rsnxe_buf - 2;
+
+	/* At least one octet of the Extended RSN Capabilities field needs to
+	 * be included to allow the receiver to determine the end of this
+	 * variable length field. */
+	if (ext_rsn_capab_len == 0)
+		ext_rsn_capab_len = 1;
+
+	/*
+	 * IEEE P802.11bn/D2.0 format:
+	 * EID (1) + Length (1) + EID_Ext (1) + Reduced_RSN_Capab (1) +
+	 * Security_Profile_Indication (1) +
+	 * Security_Profile_Bitmap (bitmap_len) +
+	 * Ext_RSN_Capab (ext_rsn_capab_len)
+	 */
+	return 2 + 1 + 1 + 1 + bitmap_len + ext_rsn_capab_len;
+}
+
+
+/*
+ * hostapd_eid_security_profile - Build Security Profile element
+ *
+ * Writes the Security Profile element into @eid and returns a pointer past the
+ * last written byte.
+ */
+u8 * hostapd_eid_security_profile(struct hostapd_data *hapd, u8 *eid)
+{
+	u8 *pos = eid;
+	u8 *len_pos;
+	u8 reduced_rsn_capab = 0;
+	u8 ext_rsn_capab[16];
+	size_t ext_rsn_capab_len = 0;
+	u8 bitmap[16]; /* max 128 profiles */
+	size_t bitmap_len = 0;
+	int i, max_profile;
+	u8 rsnxe_buf[2 + sizeof(u64)];
+	u8 *rsnxe_end;
+
+#ifdef CONFIG_TESTING_OPTIONS
+	if (hapd->conf->security_profile_override) {
+		os_memcpy(eid,
+			  wpabuf_head(hapd->conf->security_profile_override),
+			  wpabuf_len(hapd->conf->security_profile_override));
+		eid += wpabuf_len(hapd->conf->security_profile_override);
+		return eid;
+	}
+#endif /* CONFIG_TESTING_OPTIONS */
+
+	max_profile = get_max_security_profile(hapd->conf->security_profiles);
+	if (max_profile < 0)
+		return eid;
+
+	/* Build bitmap */
+	bitmap_len = max_profile / 8 + 1;
+	if (bitmap_len > sizeof(bitmap)) {
+		wpa_printf(MSG_ERROR,
+			   "No room for Security Profile element bitmap");
+		return NULL;
+	}
+	os_memset(bitmap, 0, bitmap_len);
+	for (i = 0; hapd->conf->security_profiles[i] >= 0; i++) {
+		int p = hapd->conf->security_profiles[i];
+
+		if (p / 8 < (int) bitmap_len)
+			bitmap[p / 8] |= BIT(p % 8);
+	}
+
+	rsnxe_end = hostapd_eid_rsnxe(hapd, rsnxe_buf, sizeof(rsnxe_buf),
+				      ~0ULL);
+	if (rsnxe_end > rsnxe_buf + 2) {
+		ext_rsn_capab_len = rsnxe_end - rsnxe_buf - 2;
+		if (ext_rsn_capab_len > sizeof(ext_rsn_capab)) {
+			wpa_printf(MSG_ERROR,
+				   "No room for Security Profile element RSNX");
+			return NULL;
+		}
+		os_memcpy(ext_rsn_capab, rsnxe_buf + 2, ext_rsn_capab_len);
+	}
+
+	/* At least one octet of the Extended RSN Capabilities field needs to
+	 * be included to allow the receiver to determine the end of this
+	 * variable length field. */
+	if (ext_rsn_capab_len < 1) {
+		ext_rsn_capab_len = 1;
+		ext_rsn_capab[0] = 0;
+	}
+
+	/* If any configured profile mandates SAE-H2E, force the H2E bit */
+	for (i = 0; hapd->conf->security_profiles[i] >= 0; i++) {
+		int p = hapd->conf->security_profiles[i];
+
+		if (sec_prof_is_sae(p)) {
+			ext_rsn_capab[0] |= BIT(WLAN_RSNX_CAPAB_SAE_H2E);
+			break;
+		}
+	}
+
+	/* Build Reduced RSN Capabilities */
+	if (hapd->conf->extended_key_id &&
+	    (hapd->iface->drv_flags & WPA_DRIVER_FLAGS_EXTENDED_KEY_ID))
+		reduced_rsn_capab |=
+			SEC_PROF_REDUCED_RSN_CAPA_EXT_KEY_ID;
+#ifdef CONFIG_OCV
+	if (hapd->conf->ocv &&
+	    (hapd->iface->drv_flags2 &
+	     (WPA_DRIVER_FLAGS2_AP_SME | WPA_DRIVER_FLAGS2_OCV)))
+		reduced_rsn_capab |= SEC_PROF_REDUCED_RSN_CAPA_OCVC;
+#endif /* CONFIG_OCV */
+
+	/* Write the element */
+	*pos++ = WLAN_EID_EXTENSION;
+	len_pos = pos++; /* Length field, filled later */
+	*pos++ = WLAN_EID_EXT_SECURITY_PROFILE;
+
+	/* Reduced RSN Capabilities */
+	*pos++ = reduced_rsn_capab;
+
+	/* Security Profile Indication:
+	 * B0-B3: Number of octets in Security Profile Bitmap
+	 * B4-B7: Number of Vendor Specific Security Profiles (0)
+	 */
+	*pos++ = (u8) bitmap_len & 0x0F;
+
+	/* Security Profile Bitmap */
+	os_memcpy(pos, bitmap, bitmap_len);
+	pos += bitmap_len;
+
+	/* Extended RSN Capabilities */
+	if (ext_rsn_capab_len > 0) {
+		os_memcpy(pos, ext_rsn_capab, ext_rsn_capab_len);
+		pos += ext_rsn_capab_len;
+	}
+
+	/* Fill length */
+	*len_pos = (u8) (pos - len_pos - 1);
 	return pos;
 }
 

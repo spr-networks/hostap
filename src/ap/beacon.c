@@ -482,6 +482,25 @@ static size_t hostapd_get_rsnxe_override_len(struct hostapd_data *hapd)
 }
 
 
+u8 * hostapd_get_rsn_override_elems(struct hostapd_data *hapd, u8 *pos,
+				    size_t len)
+{
+	u8 *end = pos + len;
+
+	pos = hostapd_get_rsne_override(hapd, pos, end - pos);
+	pos = hostapd_get_rsne_override_2(hapd, pos, end - pos);
+	return hostapd_get_rsnxe_override(hapd, pos, end - pos);
+}
+
+
+size_t hostapd_get_rsn_override_elems_len(struct hostapd_data *hapd)
+{
+	return hostapd_get_rsne_override_len(hapd) +
+		hostapd_get_rsne_override_2_len(hapd) +
+		hostapd_get_rsnxe_override_len(hapd);
+}
+
+
 static u8 * hostapd_eid_csa(struct hostapd_data *hapd, u8 *eid)
 {
 #ifdef CONFIG_TESTING_OPTIONS
@@ -1005,6 +1024,7 @@ static u8 * hostapd_probe_resp_fill_elems(struct hostapd_data *hapd,
 		pos = hostapd_eid_uhr_operation(hapd, pos, false);
 	}
 #endif /* CONFIG_IEEE80211BN */
+	pos = hostapd_eid_security_profile(hapd, pos);
 
 #ifdef CONFIG_IEEE80211AC
 	if (hapd->conf->vendor_vht)
@@ -2338,6 +2358,7 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 	if (hostapd_is_uhr_enabled(hapd))
 		tail_len += 3 + sizeof(struct ieee80211_uhr_operation);
 #endif /* CONFIG_IEEE80211BN */
+	tail_len += hostapd_security_profile_len(hapd);
 
 	tail_len += hostapd_mbo_ie_len(hapd);
 	tail_len += hostapd_eid_owe_trans_len(hapd);
@@ -2540,6 +2561,7 @@ int ieee802_11_build_ap_params(struct hostapd_data *hapd,
 		}
 	}
 #endif /* CONFIG_IEEE80211BN */
+	tailpos = hostapd_eid_security_profile(hapd, tailpos);
 
 #ifdef CONFIG_IEEE80211AC
 	if (hapd->conf->vendor_vht)

@@ -42,6 +42,11 @@ struct nan_discovery_result {
 	bool pairing_setup_supp;
 	bool npk_nik_caching_supp;
 	u16 pbm;
+	const u8 *orig_addr;
+	const char *psi_locale;
+	const char *psi_vendor_name;
+	const char *psi_model_name;
+	const char *psi_pairing_name;
 };
 
 struct nan_callbacks {
@@ -49,7 +54,7 @@ struct nan_callbacks {
 
 	int (*tx)(void *ctx, unsigned int freq, unsigned int wait_time,
 		  const u8 *dst, const u8 *src, const u8 *bssid,
-		  const struct wpabuf *buf);
+		  const struct wpabuf *buf, int handle);
 	int (*listen)(void *ctx, unsigned int freq, unsigned int duration,
 		      const u8 *forced_addr);
 
@@ -74,6 +79,15 @@ struct nan_callbacks {
 			const u8 *ssi, size_t ssi_len,
 			const u8 *peer_addr,
 			const u8 *buf, size_t len);
+	void (*rsia_get_rsids)(void *ctx, const u8 *service_id,
+			       const u8 *irsa_tag_tlv,
+			       u16 irsa_tag_tlv_len, u8 *rsid_num,
+			       u8 **rsid_list, u8 *rsid_list_len,
+			       bool is_unicast, bool *has_zero_rsid);
+	struct dl_list * (*get_nik_list)(void *ctx, u8 tag_type);
+
+	int (*irsa_get_nonce_tag_tlv)(void *ctx, u8 *irsa_nonce,
+				      u8 **irsa_tag_tlv, u16 *irsa_tag_tlv_len);
 
 	void (*process_p2p_usd_elems)(void *ctx, const u8 *buf,
 				      u16 buf_len, const u8 *peer_addr,
@@ -92,6 +106,8 @@ extern const u8 p2p_network_id[ETH_ALEN];
 
 bool nan_de_is_nan_network_id(const u8 *addr);
 bool nan_de_is_p2p_network_id(const u8 *addr);
+const u8 * nan_de_get_attr(const u8 *buf, size_t len, enum nan_attr_id id,
+			   unsigned int skip);
 struct nan_de * nan_de_init(const u8 *nmi, bool offload, bool ap,
 			    unsigned int max_listen,
 			    const struct nan_callbacks *cb);
@@ -107,7 +123,8 @@ void nan_de_tx_status(struct nan_de *de, unsigned int freq, const u8 *dst,
 void nan_de_tx_wait_ended(struct nan_de *de);
 
 bool nan_de_rx_sdf(struct nan_de *de, const u8 *peer_addr, const u8 *a3,
-		   unsigned int freq, const u8 *buf, size_t len, int rssi);
+		   unsigned int freq, const u8 *buf, size_t len, int rssi,
+		   const u8 *orig_addr);
 const u8 * nan_de_get_service_id(struct nan_de *de, int id);
 
 struct nan_publish_params {
@@ -125,6 +142,10 @@ struct nan_publish_params {
 
 	/* Event conditions */
 	bool disable_events;
+
+	/* When acting as a proxy */
+	int orig_id;
+	u8 orig_nmi[ETH_ALEN];
 
 	/* Further Service Discovery flag */
 	bool fsd;
@@ -160,11 +181,30 @@ struct nan_publish_params {
 	/* Source MAC address for this service (optional) */
 	const u8 *forced_addr;
 
+	/* Randomize service ID for NAN services */
+	bool randomize_service_id;
+
+	/* Data Path Type flag (0=unicast, 1=multicast) */
+	bool dp_type;
+
 	/*
 	 * Pairing Bootstrapping Methods as defined in Wi-Fi Aware spec v4.0,
 	 * Table 128
 	 */
 	u16 pbm;
+
+	/*
+	 * Additional Pairing Bootstrapping Methods as defined for PBEA in
+	 * Wi-Fi Aware specification R5
+	 */
+	u16 extended_pbm;
+
+	/*
+	 * Optional Pairing Setup Info field for PBEA as defined in Wi-Fi Aware
+	 * specification R5
+	 */
+	u8 *pairing_setup_info;
+	u16 pairing_setup_info_len;
 
 	/* int_array of cipher suites */
 	const int *cipher_suites_list;
@@ -258,6 +298,34 @@ struct nan_subscribe_params {
 	u16 pbm;
 
 	/*
+	 * Additional Pairing Bootstrapping Methods as defined for PBEA in
+	 * Wi-Fi Aware specification R5
+	 */
+	u16 extended_pbm;
+
+	/*
+	 * Optional Pairing Setup Info field for PBEA as defined in Wi-Fi Aware
+	 * specification R5
+	 */
+	u8 *pairing_setup_info;
+	u16 pairing_setup_info_len;
+
+	/* int_array of cipher suites */
+	const int *cipher_suites_list;
+
+	/* Randomize service ID for NAN services */
+	bool randomize_service_id;
+
+	/* Data Path Required flag */
+	bool dp_required;
+
+	/* Data Path Type flag */
+	bool dp_type;
+
+	/* Security Required flag */
+	bool security_required;
+
+	/*
 	 * GTK protection required for group-addressed Data frames transmitted
 	 * and received for the service
 	 */
@@ -278,18 +346,26 @@ void nan_de_cancel_subscribe(struct nan_de *de, int subscribe_id);
 int nan_de_transmit(struct nan_de *de, int handle,
 		    const struct wpabuf *ssi, const struct wpabuf *elems,
 		    const u8 *peer_addr, u8 req_instance_id,
-		    const struct wpabuf *nan_attrs, u32 *cookie);
+		    const struct wpabuf *nan_attrs, u32 *cookie,
+		    unsigned int peer_freq);
 
 void nan_de_dw_trigger(struct nan_de *de, int freq);
 void nan_de_set_cluster_id(struct nan_de *de, const u8 *cluster_id);
 bool nan_de_is_valid_instance_id(struct nan_de *de, int handle,
 				 bool publish, u8 *service_id);
 u16 nan_de_get_service_bootstrap_methods(struct nan_de *de, int handle);
+const int * nan_de_get_cipher_suites_list(struct nan_de *de, int handle);
 bool nan_de_service_supports_csid(struct nan_de *de, int handle, int csid);
 void nan_de_set_tx_mcast_follow_up_prot(struct nan_de *de, bool prot);
 int nan_de_get_status(struct nan_de *de, char *buf, size_t buflen);
 
 int nan_de_stop_listen(struct nan_de *de, int handle);
+int nan_de_get_pbea_info(struct nan_de *de, int handle, u16 *extended_pbm,
+			 const u8 **pairing_setup_info,
+			 u16 *pairing_setup_info_len);
+struct wpabuf * nan_build_pbea(u16 extended_pbm,
+			       const u8 *pairing_setup_info,
+			       u16 pairing_setup_info_len);
 
 struct nan_de_cfg {
 	/* N and M minimal and maximal values */
@@ -302,5 +378,9 @@ struct nan_de_cfg {
 };
 
 int nan_de_config(struct nan_de *de, struct nan_de_cfg *cfg);
+
+void nan_pairing_parse_setup_info(const u8 *info, size_t info_len,
+				  char **locale, char **vendor_name,
+				  char **model_name, char **pairing_name);
 
 #endif /* NAN_DE_H */

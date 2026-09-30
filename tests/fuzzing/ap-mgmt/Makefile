@@ -42,3 +42,6 @@ ap-mgmt: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f ap-mgmt *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: ap-mgmt
+	./ap-mgmt corpus/*

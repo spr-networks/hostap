@@ -24,3 +24,6 @@ eap-aka-peer: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f eap-aka-peer *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: eap-aka-peer
+	./eap-aka-peer corpus/*

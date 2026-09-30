@@ -8729,6 +8729,46 @@ static void get_sta_tid_stats(struct hostap_sta_driver_data *data,
 }
 
 
+static int get_link_sta_stats(struct hostap_sta_driver_data *data,
+			      struct nlattr **tb,
+			      struct nla_policy *stats_policy)
+{
+	struct nlattr *link;
+	int rem;
+
+	nla_for_each_nested(link, tb[NL80211_ATTR_MLO_LINKS], rem) {
+		struct nlattr *stats[NL80211_STA_INFO_MAX + 1];
+		struct nlattr *link_attr[NL80211_ATTR_MAX + 1];
+		u8 link_id;
+
+		if (nla_parse_nested(link_attr, NL80211_ATTR_MAX, link,
+				     NULL) != 0)
+			continue;
+
+		if (!link_attr[NL80211_ATTR_MLO_LINK_ID] ||
+		    !link_attr[NL80211_ATTR_STA_INFO])
+			continue;
+
+		link_id = nla_get_u8(link_attr[NL80211_ATTR_MLO_LINK_ID]);
+		if (link_id >= MAX_NUM_MLD_LINKS)
+			continue;
+		if (nla_parse_nested(stats, NL80211_STA_INFO_MAX,
+				     link_attr[NL80211_ATTR_STA_INFO],
+				     stats_policy) != 0)
+			continue;
+
+		if (!stats[NL80211_STA_INFO_INACTIVE_TIME])
+			continue;
+
+		data->valid_links |= BIT(link_id);
+		data->link_inactive_msec[link_id] =
+			nla_get_u32(stats[NL80211_STA_INFO_INACTIVE_TIME]);
+	}
+
+	return 0;
+}
+
+
 static int get_sta_handler(struct nl_msg *msg, void *arg)
 {
 	struct nlattr *tb[NL80211_ATTR_MAX + 1];
@@ -8783,15 +8823,33 @@ static int get_sta_handler(struct nl_msg *msg, void *arg)
 	 * the kernel starts sending station notifications.
 	 */
 
-	if (!tb[NL80211_ATTR_STA_INFO]) {
+	if (!tb[NL80211_ATTR_STA_INFO] && !tb[NL80211_ATTR_MLO_LINKS]) {
 		wpa_printf(MSG_DEBUG, "sta stats missing!");
 		return NL_SKIP;
 	}
-	if (nla_parse_nested(stats, NL80211_STA_INFO_MAX,
-			     tb[NL80211_ATTR_STA_INFO],
-			     stats_policy)) {
-		wpa_printf(MSG_DEBUG, "failed to parse nested attributes!");
+
+	/*
+	 * Parse only NL80211_ATTR_MLO_LINKS if that is set to fetch link level
+	 * statistics separately. If not set, proceed further with parsing
+	 * NL80211_ATTR_STA_INFO attribute.
+	 */
+	if (tb[NL80211_ATTR_MLO_LINKS]) {
+		if (get_link_sta_stats(data, tb, stats_policy)) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Failed to get link stats");
+			return NL_SKIP;
+		}
 		return NL_SKIP;
+	}
+
+	if (tb[NL80211_ATTR_STA_INFO]) {
+		if (nla_parse_nested(stats, NL80211_STA_INFO_MAX,
+				     tb[NL80211_ATTR_STA_INFO],
+				     stats_policy)) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Failed to parse nested attributes!");
+			return NL_SKIP;
+		}
 	}
 
 	if (stats[NL80211_STA_INFO_INACTIVE_TIME])
@@ -9014,8 +9072,10 @@ int nl80211_get_link_signal(struct i802_bss *bss, const u8 *bssid,
 	data->signal = -WPA_INVALID_NOISE;
 	data->current_tx_rate = 0;
 
-	if (!(msg = nl80211_bss_msg(bss, 0, NL80211_CMD_GET_STATION)) ||
-	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, bssid)) {
+	if (!(msg = nl80211_bss_msg(bss, NLM_F_DUMP,
+				    NL80211_CMD_GET_STATION)) ||
+	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, bssid) ||
+	    nla_put_flag(msg, NL80211_ATTR_STA_DUMP_LINK_STATS)) {
 		nlmsg_free(msg);
 		return -ENOBUFS;
 	}
@@ -9030,8 +9090,10 @@ static int i802_read_sta_data(struct i802_bss *bss,
 {
 	struct nl_msg *msg;
 
-	if (!(msg = nl80211_bss_msg(bss, 0, NL80211_CMD_GET_STATION)) ||
-	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, addr)) {
+	if (!(msg = nl80211_bss_msg(bss, NLM_F_DUMP,
+				    NL80211_CMD_GET_STATION)) ||
+	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, addr) ||
+	    nla_put_flag(msg, NL80211_ATTR_STA_DUMP_LINK_STATS)) {
 		nlmsg_free(msg);
 		return -ENOBUFS;
 	}
@@ -9147,16 +9209,27 @@ static int i802_set_sta_vlan(struct i802_bss *bss, const u8 *addr,
 static int i802_get_inact_sec(void *priv, const u8 *addr)
 {
 	struct hostap_sta_driver_data data;
-	int ret;
+	int ret, i;
+	unsigned long inactive_time;
 
 	os_memset(&data, 0, sizeof(data));
 	data.inactive_msec = (unsigned long) -1;
 	ret = i802_read_sta_data(priv, &data, addr);
 	if (ret == -ENOENT)
 		return -ENOENT;
-	if (ret || data.inactive_msec == (unsigned long) -1)
+	if (ret)
 		return -1;
-	return data.inactive_msec / 1000;
+
+	inactive_time = data.inactive_msec;
+	for_each_link(data.valid_links, i) {
+		if (inactive_time > data.link_inactive_msec[i])
+			inactive_time = data.link_inactive_msec[i];
+	}
+
+	if (inactive_time == -1UL)
+		return -1;
+
+	return inactive_time / 1000;
 }
 
 
@@ -10430,10 +10503,17 @@ fail:
 }
 
 
-void nl80211_update_active_links(struct i802_bss *bss, int link_id)
+void nl80211_update_active_links(struct i802_bss *bss, int link_id,
+				 bool set_active_links)
 {
-	wpa_printf(MSG_DEBUG, "nl80211: Update link (ifindex=%d link_id=%u)",
-		   bss->ifindex, link_id);
+	wpa_printf(MSG_DEBUG, "nl80211: Update link (ifindex=%d link_id=%u %s)",
+		   bss->ifindex, link_id,
+		   set_active_links ? "START_AP" : "STOP_AP");
+
+	if (set_active_links) {
+		bss->active_links |= BIT(link_id);
+		return;
+	}
 
 	if (!(bss->active_links & BIT(link_id))) {
 		wpa_printf(MSG_DEBUG,
@@ -10474,7 +10554,7 @@ int nl80211_remove_link(struct i802_bss *bss, int link_id)
 
 	eloop_cancel_timeout(wpa_driver_nl80211_scan_timeout, drv, bss->ctx);
 	/* Clear the active links and set the flink */
-	nl80211_update_active_links(bss, link_id);
+	nl80211_update_active_links(bss, link_id, false);
 	bss->valid_links &= ~BIT(link_id);
 
 	if (bss->scan_link == link)

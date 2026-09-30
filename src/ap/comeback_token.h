@@ -9,6 +9,8 @@
 #ifndef COMEBACK_TOKEN_H
 #define COMEBACK_TOKEN_H
 
+#define COMEBACK_PENDING_IDX_SIZE 256
+
 int check_comeback_token(const u8 *comeback_key,
 			 u16 *comeback_pending_idx, const u8 *addr,
 			 const u8 *token, size_t token_len);

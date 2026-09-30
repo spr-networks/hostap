@@ -279,6 +279,11 @@ struct wpa_params {
 	 * proc_coord_dir - Process coordination directory
 	 */
 	const char *proc_coord_dir;
+
+	/**
+	 * conf_file_prefix - Required configuration file name prefix
+	 */
+	const char *conf_file_prefix;
 };
 
 struct p2p_srv_bonjour {
@@ -400,6 +405,8 @@ radio_add_work(struct wpa_supplicant *wpa_s, unsigned int freq,
 	       void (*cb)(struct wpa_radio_work *work, int deinit),
 	       void *ctx);
 void radio_work_done(struct wpa_radio_work *work);
+void radio_remove_work(struct wpa_supplicant *wpa_s,
+		       struct wpa_radio_work *work);
 void radio_remove_works(struct wpa_supplicant *wpa_s,
 			const char *type, int remove_all);
 void radio_work_check_next(struct wpa_supplicant *wpa_s);
@@ -907,6 +914,25 @@ struct wpa_supplicant {
 	u8 rsnxe[257];
 	size_t rsnxe_len;
 
+	/*
+	 * Security Profile element information
+	 *
+	 * sel_security_profile: Profile chosen from the
+	 *   intersection of the AP's Security Profile Bitmap and the STA's
+	 *   supported profiles. NULL means no profile selected (feature
+	 *   inactive).
+	 *
+	 * security_profile / security_profile_len: Pre-built Security
+	 *   Profile element for the selected profile, built once in
+	 *   wpa_supplicant_set_suites() after the RSNE and RSNXE are
+	 *   finalised. Appended to Authentication and (Re)Association Request
+	 *   frames by sme_send_authentication() and sme_associate(),
+	 *   respectively.
+	 */
+	const struct security_profile_entry *sel_security_profile;
+	u8 security_profile[32];
+	size_t security_profile_len;
+
 	struct scard_data *scard;
 	char imsi[20];
 	int mnc_len;
@@ -1047,7 +1073,6 @@ struct wpa_supplicant {
 	unsigned int reattach:1; /* reassociation to the same BSS requested */
 	unsigned int mac_addr_changed:1;
 	unsigned int added_vif:1;
-	unsigned int wnmsleep_used:1;
 	unsigned int owe_transition_select:1;
 	unsigned int owe_transition_search:1;
 	unsigned int connection_set:1;
@@ -1057,6 +1082,13 @@ struct wpa_supplicant {
 	unsigned int connection_eht:1;
 	unsigned int connection_uhr:1;
 	unsigned int disable_mbo_oce:1;
+
+	enum wnmsleep_state {
+		WNM_SLEEP_IDLE,
+		WNM_SLEEP_WAIT_RESP_ENTER,
+		WNM_SLEEP_WAIT_RESP_EXIT,
+	} wnmsleep_state;
+
 	u8 connection_max_nss_rx;
 	u8 connection_max_nss_tx;
 	enum chan_width connection_channel_bandwidth;
@@ -1450,6 +1482,8 @@ struct wpa_supplicant {
 	struct wpabuf *rsne_override_eapol;
 	struct wpabuf *rsnxe_override_assoc;
 	struct wpabuf *rsnxe_override_eapol;
+	struct wpabuf *sec_prof_override_auth;
+	struct wpabuf *sec_prof_override_assoc;
 	struct dl_list drv_signal_override;
 	unsigned int oci_freq_override_eapol;
 	unsigned int oci_freq_override_saquery_req;
@@ -1822,8 +1856,6 @@ int wpa_supplicant_update_mac_addr(struct wpa_supplicant *wpa_s);
 int wpa_supplicant_driver_init(struct wpa_supplicant *wpa_s);
 int wpa_supplicant_update_bridge_ifname(struct wpa_supplicant *wpa_s,
 					const char *bridge_ifname);
-void wpas_set_mgmt_group_cipher(struct wpa_supplicant *wpa_s,
-				struct wpa_ssid *ssid, struct wpa_ie_data *ie);
 int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 			      struct wpa_bss *bss, struct wpa_ssid *ssid,
 			      u8 *wpa_ie, size_t *wpa_ie_len,
@@ -2082,6 +2114,8 @@ static inline int wpas_mode_to_ieee80211_mode(enum wpas_mode mode)
 
 int wpas_network_disabled(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid);
 int wpas_get_ssid_pmf(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid);
+bool sec_prof_list_has_epp(const int *numbers);
+bool sec_prof_list_has_sae(const int *numbers);
 enum sae_pwe wpas_get_ssid_sae_pwe(struct wpa_supplicant *wpa_s,
 				   struct wpa_ssid *ssid);
 int pmf_in_use(struct wpa_supplicant *wpa_s, const u8 *addr);
@@ -2192,7 +2226,8 @@ int wpas_pasn_auth_start(struct wpa_supplicant *wpa_s, const u8 *own_addr,
 			 const u8 *comeback, size_t comeback_len,
 			 unsigned int auth_alg, int group_cipher,
 			 int group_mgmt_cipher, u16 rsn_capab,
-			 const u8 *rsnxe_data, bool is_ml_peer);
+			 const u8 *rsnxe_data, bool is_ml_peer,
+			 bool ltf_keyseed_required);
 void wpas_pasn_auth_stop(struct wpa_supplicant *wpa_s);
 void wpas_pasn_free_params(struct wpa_supplicant *wpa_s);
 int wpas_pasn_auth_tx_status(struct wpa_supplicant *wpa_s,
@@ -2235,5 +2270,21 @@ static inline bool wpas_is_nan_iface(struct wpa_supplicant *wpa_s)
 
 bool wpas_eppke_ap_capable(struct wpa_supplicant *wpa_s,
 			   struct wpa_bss *bss, bool unauth_eppke);
+bool wpas_eppke_ap_rsnx_capab(struct wpa_supplicant *wpa_s,
+			      struct wpa_bss *bss, unsigned int capab);
+
+bool wpas_security_profile_active(struct wpa_supplicant *wpa_s);
+
+/*
+ * Security Profile element helper functions (wpa_supplicant.c).
+ * Used by both wpa_supplicant_set_suites() and BSS selection
+ * (wpa_supplicant_ssid_bss_match() in events.c).
+ */
+const struct security_profile_entry *
+security_profile_select_best(const u8 *sp, const int *numbers);
+int security_profile_get_key_mgmt(const u8 *sp, int ssid_key_mgmt);
+const u8 * security_profile_get_rsnx(const u8 *sp, size_t *rsnx_len);
+int security_profile_get_rsn_caps(const u8 *sp);
+bool sec_prof_list_has_eap_over_auth(const int *numbers);
 
 #endif /* WPA_SUPPLICANT_I_H */

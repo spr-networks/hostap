@@ -9,6 +9,7 @@
 #include "includes.h"
 #include "common.h"
 #include "utils/eloop.h"
+#include "common/nan_de.h"
 #include "nan_i.h"
 
 #define NAN_BOOTSTRAP_RETRY_TIMEOUT_US (1 * 1000 * 1000) /* 1 second */
@@ -140,6 +141,59 @@ static struct wpabuf * nan_bootstrap_build_npba(struct nan_data *nan,
 }
 
 
+static struct wpabuf * nan_bootstrap_build_pbea(struct nan_data *nan,
+					       int handle)
+{
+	u16 extended_pbm = 0;
+	const u8 *pairing_setup_info = NULL;
+	u16 pairing_setup_info_len = 0;
+
+	if (nan->cfg->get_pbea_info && handle > 0)
+		nan->cfg->get_pbea_info(nan->cfg->cb_ctx, handle,
+					&extended_pbm,
+					&pairing_setup_info,
+					&pairing_setup_info_len);
+
+	return nan_build_pbea(extended_pbm, pairing_setup_info,
+			      pairing_setup_info_len);
+}
+
+
+/*
+ * nan_bootstrap_build_auth_npba - Build NPBA for PASN M2 auth frame
+ *
+ * Per Wi-Fi Aware spec v4.0, section 7.6.4.2, the NPBA in PASN M2 shall be the
+ * same as that included in the SDF transmitted by the pairing responder:
+ * Type=ADVERTISE(0) and Status=ACCEPTED(0).
+ *
+ * @pbm: Full service PBM to advertise (from get_supported_bootstrap_methods)
+ * Returns: Allocated wpabuf with NPBA or NULL on failure
+ */
+static struct wpabuf * nan_bootstrap_build_auth_npba(u16 pbm)
+{
+	u8 type_and_status = NAN_PBA_TYPE_ADVERTISE |
+		(NAN_PBA_STATUS_ACCEPTED << NAN_PBA_STATUS_POS);
+	struct wpabuf *buf;
+
+	buf = wpabuf_alloc(8);
+	if (!buf)
+		return NULL;
+
+	wpa_printf(MSG_DEBUG,
+		   "NAN: Bootstrap: Build auth NPBA type=Advertise status=Accepted pbm=0x%04x",
+		   pbm);
+
+	wpabuf_put_u8(buf, NAN_ATTR_NPBA);
+	wpabuf_put_le16(buf, 5);
+	wpabuf_put_u8(buf, 0);        /* dialog token = 0 for Advertise */
+	wpabuf_put_u8(buf, type_and_status);
+	wpabuf_put_u8(buf, NAN_REASON_RESERVED);
+	wpabuf_put_le16(buf, pbm);
+
+	return buf;
+}
+
+
 /**
  * nan_bootstrap_timeout - Bootstrap timeout handler
  * @eloop_data: NAN module context from nan_init()
@@ -150,6 +204,7 @@ static void nan_bootstrap_timeout(void *eloop_data, void *user_ctx)
 	struct nan_data *nan = eloop_data;
 	struct nan_peer *peer = user_ctx;
 	struct wpabuf *attr;
+	struct wpabuf *pbea;
 
 	wpa_printf(MSG_DEBUG, "NAN: Bootstrap: timeout. status=%u",
 		   peer->bootstrap.status);
@@ -168,9 +223,25 @@ static void nan_bootstrap_timeout(void *eloop_data, void *user_ctx)
 		return;
 	}
 
+	pbea = nan_bootstrap_build_pbea(nan, peer->bootstrap.handle);
+	attr = wpabuf_concat(attr, pbea);
+	if (!attr) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Bootstrap: Failed to allocate combined buffer");
+		nan_bootstrap_reset(nan, peer);
+
+		nan->cfg->bootstrap_completed(nan->cfg->cb_ctx, peer->nmi_addr,
+					      0, false,
+					      NAN_REASON_UNSPECIFIED_REASON,
+					      peer->bootstrap.handle,
+					      peer->bootstrap.req_instance_id);
+		return;
+	}
+
 	if (nan->cfg->transmit_followup(nan->cfg->cb_ctx, peer->nmi_addr, attr,
 					peer->bootstrap.handle,
-					peer->bootstrap.req_instance_id)) {
+					peer->bootstrap.req_instance_id,
+					peer->freq)) {
 		wpa_printf(MSG_DEBUG,
 			   "NAN: Bootstrap: Failed to transmit followup");
 
@@ -215,7 +286,9 @@ static void nan_bootstrap_handle_rx_request(struct nan_data *nan,
 					    const u8 *npba, u16 npba_len)
 {
 	struct wpabuf *attr = NULL;
-	u16 supported_methods;
+	struct wpabuf *pbea;
+	u16 supported_methods = 0;
+	u16 auth_npba_pbm = 0; /* full service PBM for PASN M2 NPBA */
 
 	wpa_printf(MSG_DEBUG, "NAN: Bootstrap: RX request");
 
@@ -260,6 +333,13 @@ static void nan_bootstrap_handle_rx_request(struct nan_data *nan,
 			peer->bootstrap.reason_code = 0;
 			peer->bootstrap.comeback_required = false;
 			peer->bootstrap.requested_pbm = nan_complement_pbm(pbm);
+			/*
+			 * Fetch the full service PBM for the PASN M2 NPBA. The
+			 * comeback path skips the first-request fetch below.
+			 */
+			auth_npba_pbm =
+				nan->cfg->get_supported_bootstrap_methods(
+					nan->cfg->cb_ctx, handle);
 		}
 
 		goto send_response;
@@ -279,6 +359,7 @@ static void nan_bootstrap_handle_rx_request(struct nan_data *nan,
 	supported_methods =
 		nan->cfg->get_supported_bootstrap_methods(nan->cfg->cb_ctx,
 							  handle);
+	auth_npba_pbm = supported_methods;
 
 	if (!(supported_methods & peer->bootstrap.requested_pbm)) {
 		wpa_printf(MSG_DEBUG,
@@ -314,10 +395,24 @@ static void nan_bootstrap_handle_rx_request(struct nan_data *nan,
 
 	peer->bootstrap.comeback_after = nan->cfg->bootstrap_comeback_timeout;
 
-	if (nan->cfg->bootstrap_request)
+	if (nan->cfg->bootstrap_request) {
+		char *locale = NULL, *vendor_name = NULL;
+		char *model_name = NULL, *pairing_name = NULL;
+
+		nan_pairing_parse_setup_info(
+			peer->bootstrap.pairing_setup_info,
+			peer->bootstrap.pairing_setup_info_len,
+			&locale, &vendor_name, &model_name, &pairing_name);
 		nan->cfg->bootstrap_request(nan->cfg->cb_ctx, peer->nmi_addr,
 					    peer->bootstrap.requested_pbm,
-					    handle, req_instance_id);
+					    handle, req_instance_id,
+					    locale, vendor_name,
+					    model_name, pairing_name);
+		os_free(locale);
+		os_free(vendor_name);
+		os_free(model_name);
+		os_free(pairing_name);
+	}
 
 send_response:
 	attr = nan_bootstrap_build_npba(nan, peer);
@@ -327,8 +422,22 @@ send_response:
 		goto done;
 	}
 
+	pbea = nan_bootstrap_build_pbea(nan, handle);
+	attr = wpabuf_concat(attr, pbea);
+	if (!attr) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Bootstrap: Failed to allocate combined buffer");
+
+		nan->cfg->bootstrap_completed(nan->cfg->cb_ctx,
+					      peer->nmi_addr,
+					      0, false,
+					      NAN_REASON_UNSPECIFIED_REASON,
+					      handle, req_instance_id);
+		goto done;
+	}
+
 	if (nan->cfg->transmit_followup(nan->cfg->cb_ctx, peer->nmi_addr, attr,
-					handle, req_instance_id)) {
+					handle, req_instance_id, peer->freq)) {
 		wpa_printf(MSG_DEBUG,
 			   "NAN: Bootstrap: Failed to transmit bootstrap followup");
 
@@ -349,15 +458,18 @@ send_response:
 
 	if (peer->bootstrap.status == NAN_PBA_STATUS_ACCEPTED) {
 		wpabuf_free(peer->bootstrap.npba);
-		peer->bootstrap.npba = wpabuf_alloc(3 + npba_len);
-		if (peer->bootstrap.npba) {
-			wpabuf_put_u8(peer->bootstrap.npba, NAN_ATTR_NPBA);
-			wpabuf_put_le16(peer->bootstrap.npba, npba_len);
-			wpabuf_put_data(peer->bootstrap.npba, npba, npba_len);
-		} else {
-			wpa_printf(MSG_INFO,
-				   "NAN: Bootstrap: Failed to store NPBA");
-		}
+		/*
+		 * Build the NPBA for PASN M2 per Wi-Fi Aware spec v4.0,
+		 * section 7.6.4.2.
+		 * The NPBA shall match the SDF: use the full service PBM
+		 * (auth_npba_pbm), not requested_pbm which is the single
+		 * method selected during bootstrapping.
+		 */
+		peer->bootstrap.npba =
+			nan_bootstrap_build_auth_npba(auth_npba_pbm);
+		if (!peer->bootstrap.npba)
+			wpa_printf(MSG_DEBUG,
+				   "NAN: Bootstrap: Failed to store auth NPBA");
 	}
 
 	nan->cfg->bootstrap_completed(nan->cfg->cb_ctx,
@@ -483,7 +595,7 @@ bool nan_bootstrap_handle_rx(struct nan_data *nan, const u8 *peer_nmi,
 	/* Handle NAN bootstrap request */
 	if (type == NAN_PBA_TYPE_REQUEST) {
 		if (!peer) {
-			nan_add_peer(nan, peer_nmi, buf, len);
+			nan_add_peer(nan, peer_nmi, NULL, 0, buf, len);
 			peer = nan_get_peer(nan, peer_nmi);
 			if (!peer) {
 				wpa_printf(MSG_DEBUG,
@@ -599,9 +711,18 @@ int nan_bootstrap_request(struct nan_data *nan, int handle,
 {
 	struct nan_peer *peer;
 	int ret;
+	struct wpabuf *attr;
+	struct wpabuf *pbea;
 
-	if (!nan || !nan->nan_started)
+	if (!nan)
 		return -1;
+
+	/* Bootstrap uses Follow-up frames; both peers need not be part of
+	 * the same NAN cluster.
+	 */
+	if (!nan->nan_started)
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Bootstrap: NAN not started, proceeding for non-cluster peer");
 
 	if (!nan_bootstrap_supported(nan)) {
 		wpa_printf(MSG_DEBUG,
@@ -617,9 +738,17 @@ int nan_bootstrap_request(struct nan_data *nan, int handle,
 	peer = nan_get_peer(nan, peer_nmi);
 	if (!peer) {
 		wpa_printf(MSG_DEBUG,
-			   "NAN: Bootstrap: Request for unknown peer");
+			   "NAN: Bootstrap: Request for unknown peer " MACSTR,
+			   MAC2STR(peer_nmi));
 		return -1;
 	}
+
+	wpa_printf(MSG_DEBUG,
+		   "NAN: Bootstrap: Peer " MACSTR
+		   " non_cluster=%d supported_methods=0x%x in_progress=%d",
+		   MAC2STR(peer_nmi), peer->non_cluster,
+		   peer->bootstrap.supported_methods,
+		   peer->bootstrap.in_progress);
 
 	if (!(pbm & nan->cfg->supported_bootstrap_methods)) {
 		wpa_printf(MSG_DEBUG,
@@ -671,9 +800,19 @@ int nan_bootstrap_request(struct nan_data *nan, int handle,
 		return -1;
 	}
 
+	pbea = nan_bootstrap_build_pbea(nan, handle);
+	attr = wpabuf_concat(wpabuf_dup(peer->bootstrap.npba), pbea);
+	if (!attr) {
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Bootstrap: Failed to allocate combined buffer");
+		nan_bootstrap_reset(nan, peer);
+		return -1;
+	}
+
 	ret = nan->cfg->transmit_followup(nan->cfg->cb_ctx, peer->nmi_addr,
-					  peer->bootstrap.npba, handle,
-					  req_instance_id);
+					  attr, handle, req_instance_id,
+					  peer->freq);
+	wpabuf_free(attr);
 	if (ret) {
 		wpa_printf(MSG_DEBUG,
 			   "NAN: Bootstrap: Failed to transmit follow-up");
@@ -698,8 +837,15 @@ int nan_bootstrap_peer_reset(struct nan_data *nan, const u8 *peer_nmi)
 {
 	struct nan_peer *peer;
 
-	if (!nan || !nan->nan_started)
+	if (!nan)
 		return -1;
+
+	/* Bootstrap reset uses Follow-up frames; both peers need not be
+	 * part of the same NAN cluster.
+	 */
+	if (!nan->nan_started)
+		wpa_printf(MSG_DEBUG,
+			   "NAN: Bootstrap: NAN not started, proceeding for non-cluster peer");
 
 	peer = nan_get_peer(nan, peer_nmi);
 	if (!peer) {

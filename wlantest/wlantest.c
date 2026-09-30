@@ -204,12 +204,71 @@ static int add_pmk_file(struct wlantest *wt, const char *pmk_file)
 }
 
 
+static void add_ptk_variants(struct wlantest *wt, const u8 *ptk,
+			     size_t ptk_len)
+{
+	/*
+	 * PTK layout: KCK(16/24/32) | KEK(0/16/32/64) | TK(16/32) [| KDK]
+	 * Since we do not know the cipher, KCK, KEK, or TK length, try all
+	 * valid combinations.
+	 * Note: The case of KCK length = 0 is not handled here, and should be
+	 * handled separately.
+	 */
+	static const size_t kck_sizes[] = { 16, 24, 32 };
+	static const size_t kek_sizes[] = { 0, 16, 32, 64 };
+	static const size_t tk_sizes[] = { 16, 32 };
+	unsigned int ci, ki, ti;
+	bool added = false;
+
+	for (ci = 0; ci < ARRAY_SIZE(kck_sizes); ci++) {
+		for (ki = 0; ki < ARRAY_SIZE(kek_sizes); ki++) {
+			for (ti = 0; ti < ARRAY_SIZE(tk_sizes); ti++) {
+				struct wlantest_ptk *p;
+				size_t kckl = kck_sizes[ci];
+				size_t kekl = kek_sizes[ki];
+				size_t tkl = tk_sizes[ti];
+				size_t tk_off = kckl + kekl;
+
+				if (tk_off + tkl > ptk_len)
+					continue;
+
+				p = os_zalloc(sizeof(*p));
+				if (!p)
+					return;
+
+				os_memcpy(p->ptk.kck, ptk, kckl);
+				p->ptk.kck_len = kckl;
+				if (kekl) {
+					os_memcpy(p->ptk.kek, ptk + kckl, kekl);
+					p->ptk.kek_len = kekl;
+				}
+
+				os_memcpy(p->ptk.tk, ptk + tk_off, tkl);
+				p->ptk.tk_len = tkl;
+				p->ptk_len = ptk_len;
+				dl_list_add(&wt->ptk, &p->list);
+				added = true;
+
+				wpa_printf(MSG_DEBUG,
+					   "Added PTK variant: KCK=%zu KEK=%zu TK=%zu",
+					   kckl, kekl, tkl);
+			}
+		}
+	}
+
+	if (added)
+		wpa_hexdump(MSG_DEBUG, "Added PTK from file",
+			    ptk, ptk_len);
+}
+
+
 static int add_ptk_file(struct wlantest *wt, const char *ptk_file)
 {
 	FILE *f;
-	u8 ptk[80];
+	u8 ptk[WPA_KCK_MAX_LEN + WPA_KEK_MAX_LEN + WPA_TK_MAX_LEN +
+	       WPA_KDK_MAX_LEN];
 	size_t ptk_len;
-	char buf[300], *pos;
+	char buf[2 * sizeof(ptk) + 10], *pos;
 	struct wlantest_ptk *p;
 
 	f = fopen(ptk_file, "r");
@@ -222,43 +281,35 @@ static int add_ptk_file(struct wlantest *wt, const char *ptk_file)
 		pos = buf;
 		while (*pos && *pos != '\r' && *pos != '\n')
 			pos++;
+
 		*pos = '\0';
 		ptk_len = pos - buf;
 		if (ptk_len & 1)
 			continue;
+
 		ptk_len /= 2;
-		if (ptk_len != 16 && ptk_len != 32 &&
-		    ptk_len != 48 && ptk_len != 64 &&
-		    ptk_len != 80)
+		if (ptk_len > sizeof(ptk))
 			continue;
+
 		if (hexstr2bin(buf, ptk, ptk_len) < 0)
 			continue;
-		p = os_zalloc(sizeof(*p));
-		if (p == NULL)
-			break;
-		if (ptk_len < 48) {
+
+		if (ptk_len == 16 || ptk_len == 32) {
+			/* Raw TK */
+			p = os_zalloc(sizeof(*p));
+			if (!p)
+				break;
+
 			os_memcpy(p->ptk.tk, ptk, ptk_len);
 			p->ptk.tk_len = ptk_len;
 			p->ptk_len = 32 + ptk_len;
-		} else if (ptk_len == 80) {
-			os_memcpy(p->ptk.kck, ptk, 32);
-			p->ptk.kck_len = 32;
-			os_memcpy(p->ptk.kek, ptk + 32, 16);
-			p->ptk.kek_len = 16;
-			os_memcpy(p->ptk.tk, ptk + 32 + 16, ptk_len - 32 - 16);
-			p->ptk.tk_len = ptk_len - 32 - 16;
-			p->ptk_len = ptk_len;
-		} else {
-			os_memcpy(p->ptk.kck, ptk, 16);
-			p->ptk.kck_len = 16;
-			os_memcpy(p->ptk.kek, ptk + 16, 16);
-			p->ptk.kek_len = 16;
-			os_memcpy(p->ptk.tk, ptk + 32, ptk_len - 32);
-			p->ptk.tk_len = ptk_len - 32;
-			p->ptk_len = ptk_len;
+			dl_list_add(&wt->ptk, &p->list);
+			wpa_hexdump(MSG_DEBUG, "Added PTK from file",
+				    ptk, ptk_len);
+			continue;
 		}
-		dl_list_add(&wt->ptk, &p->list);
-		wpa_hexdump(MSG_DEBUG, "Added PTK from file", ptk, ptk_len);
+
+		add_ptk_variants(wt, ptk, ptk_len);
 	}
 
 	fclose(f);

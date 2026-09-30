@@ -27,3 +27,6 @@ radius: $(OBJS) $(LIBS)
 
 clean: common-clean
 	rm -f radius *~ *.o *.d ../*~ ../*.o ../*.d
+
+test: radius
+	./radius corpus/*

@@ -267,7 +267,10 @@ int get_tx_parameters(struct sta_info *sta, int ap_max_chanwidth,
 		      int ap_seg1_idx, int *bandwidth, int *seg1_idx);
 
 void auth_sae_process_commit(void *eloop_ctx, void *user_ctx);
-u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len);
+u8 * hostapd_eid_rsnxe(struct hostapd_data *hapd, u8 *eid, size_t len,
+		       u64 capab_mask);
+size_t hostapd_security_profile_len(struct hostapd_data *hapd);
+u8 * hostapd_eid_security_profile(struct hostapd_data *hapd, u8 *eid);
 u16 check_ext_capab(struct hostapd_data *hapd, struct sta_info *sta,
 		    const u8 *ext_capab_ie, size_t ext_capab_ie_len);
 size_t hostapd_eid_rnr_len(struct hostapd_data *hapd, u32 type,

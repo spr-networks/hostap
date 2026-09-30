@@ -10,6 +10,8 @@
 #ifndef NAN_DEFS_H
 #define NAN_DEFS_H
 
+#include "utils/list.h"
+
 /* Wi-Fi Aware spec v4.0, Table 35 (NAI Action frame subtypes) */
 enum nan_subtype {
 	NAN_SUBTYPE_INVALID			= 0,
@@ -70,8 +72,22 @@ enum nan_attr_id {
 	NAN_ATTR_NPBA = 0x2C, /* NAN Pairing Bootstrapping attribute */
 	NAN_ATTR_S3 = 0x2D,
 	NAN_ATTR_TPEA = 0x2E, /* Transmit Power Envelope attribute */
+	NAN_ATTR_PBEA = 0x2F, /* Pairing Bootstrapping Extension attribute */
+	NAN_ATTR_IRSA = 0x30, /* Identity Resolution Set attribute */
+	NAN_ATTR_RSIA = 0x31, /* Randomize Service ID attribute */
+	NAN_ATTR_PROXY_META = 0x33,
+	NAN_ATTR_NIKA = 0x3A, /* NAN Identity Key attribute */
 	NAN_ATTR_VENDOR_SPECIFIC = 0xDD,
 };
+
+/* Wi-Fi Aware R5 spec, Table 79 (NAN Connection Capability Bitmap format) */
+#define NAN_CONN_CAPA_WIFI_DIRECT  BIT(0)
+#define NAN_CONN_CAPA_P2PS         BIT(1)
+#define NAN_CONN_CAPA_TDLS         BIT(2)
+#define NAN_CONN_CAPA_WLAN_INFRA   BIT(3)
+#define NAN_CONN_CAPA_IBSS         BIT(4)
+#define NAN_CONN_CAPA_MESH         BIT(5)
+#define NAN_CONN_CAPA_IDP          BIT(6)
 
 /* Wi-Fi Aware spec v4.0, Table 43 (Reason Code field) */
 enum nan_reason {
@@ -100,6 +116,7 @@ enum nan_reason {
 #define NAN_SRV_CTRL_SRV_INFO                 BIT(4)
 #define NAN_SRV_CTRL_DISCOVERY_RANGE_LIMITED  BIT(5)
 #define NAN_SRV_CTRL_BINDING_BITMAP           BIT(6)
+#define NAN_SRV_CTRL_SERVICE_ID_RANDOMIZATION BIT(7)
 
 enum nan_service_control_type {
 	NAN_SRV_CTRL_PUBLISH = 0,
@@ -170,6 +187,7 @@ enum nan_pairing_bootstrapping_method {
 
 #define NAN_ATTR_HDR_LEN 3
 #define NAN_SERVICE_ID_LEN 6
+#define NAN_RSID_LEN 6 /* Randomized Service ID length (truncated SipHash) */
 
 #define NAN_USD_DEFAULT_FREQ 2437
 
@@ -628,6 +646,7 @@ struct nan_shared_key {
 #define NAN_NIRA_STR		"NIR"
 #define NAN_NIRA_STR_LEN	3
 #define NAN_NIRA_CIPHER_VER_128	0
+#define NAN_IRSA_CIPHER_VER_SIPHASH_2_4	1
 #define NAN_NIK_LEN		16
 
 #define NAN_PASN_SSID "516F9A010000"
@@ -659,5 +678,19 @@ struct nan_key_lifetime_kde {
 	le16 key_bitmap;
 	be32 lifetime_sec;
 } STRUCT_PACKED;
+
+/* NAN Identity Key (NIK) entry */
+struct nan_nik_entry {
+	struct dl_list list;
+	u8 nik[NAN_NIK_LEN];
+	bool possessed_nik;
+	struct dl_list associated_nik;
+};
+
+/* Associated self NIK entry for nan_nik_entry.associated_nik list */
+struct nan_assoc_nik_entry {
+	struct dl_list list;
+	u8 nik[NAN_NIK_LEN];
+};
 
 #endif /* NAN_DEFS_H */

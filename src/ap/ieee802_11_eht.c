@@ -573,6 +573,14 @@ u8 * hostapd_eid_eht_basic_ml_common(struct hostapd_data *hapd,
 
 		total_len = sta_info_len + link->resp_sta_profile_len;
 
+		if (wpabuf_tailroom(buf) < 100 + total_len &&
+		    wpabuf_resize(&buf, 100 + total_len) < 0) {
+			wpa_printf(MSG_ERROR,
+				   "MLD: Could not allocate buffer for constructing MLE");
+			wpabuf_free(buf);
+			return eid;
+		}
+
 		/* Per-STA Profile subelement */
 		wpabuf_put_u8(buf, MULTI_LINK_SUB_ELEM_ID_PER_STA_PROFILE);
 
@@ -2300,7 +2308,7 @@ hostapd_parse_link_reconf_req_sta_profile(struct hostapd_data *hapd,
 	sta_info_len += nstr_bitmap_size;
 
 	sta_info = per_sta_prof->variable;
-	if (*sta_info > end - sta_info) {
+	if (sta_info >= end || *sta_info > end - sta_info) {
 		wpa_printf(MSG_DEBUG, "MLD: Not enough room for STA Info");
 		goto out;
 	}

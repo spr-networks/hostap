@@ -228,7 +228,11 @@ void wpas_notify_pr_device_found(struct wpa_supplicant *wpa_s,
 				 const struct pr_device *dev);
 void wpas_notify_nan_bootstrap_request(struct wpa_supplicant *wpa_s,
 				       const u8 *peer_addr, u16 pbm,
-				       int handle, u8 requestor_instance_id);
+				       int handle, u8 requestor_instance_id,
+				       const char *locale,
+				       const char *vendor_name,
+				       const char *model_name,
+				       const char *pairing_name);
 void wpas_notify_nan_bootstrap_success(struct wpa_supplicant *wpa_s,
 				       const u8 *peer_addr, u16 pbm,
 				       int handle, u8 requestor_instance_id);
@@ -267,7 +271,11 @@ void wpas_notify_nan_sched_update_done(struct wpa_supplicant *wpa_s,
 				       bool success);
 void wpas_notify_nan_pairing_status(struct wpa_supplicant *wpa_s,
 				    const u8 *peer_addr, int akmp, int cipher,
-				    u16 status, const u8 *nd_pmk);
+				    u16 status, const u8 *nd_pmk,
+				    const char *psi_locale,
+				    const char *psi_vendor_name,
+				    const char *psi_model_name,
+				    const char *psi_pairing_name);
 void wpas_notify_nan_chan_evacuation(struct wpa_supplicant *wpa_s,
 				     u8 map_id, int freq);
 void wpas_notify_nan_stopped(struct wpa_supplicant *wpa_s);

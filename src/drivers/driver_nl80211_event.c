@@ -199,6 +199,7 @@ static const char * nl80211_command_to_string(enum nl80211_commands cmd)
 	C2S(NL80211_CMD_NAN_CHANNEL_EVAC)
 	C2S(NL80211_CMD_START_PD)
 	C2S(NL80211_CMD_STOP_PD)
+	C2S(NL80211_CMD_NAN_SET_NON_EVAC_CHANNELS)
 	C2S(__NL80211_CMD_AFTER_LAST)
 	}
 #undef C2S
@@ -2668,7 +2669,7 @@ static void nl80211_stop_ap(struct i802_bss *bss, struct nlattr **tb)
 		ctx = mld_link->ctx;
 
 		/* Bring down the active link */
-		nl80211_update_active_links(bss, link_id);
+		nl80211_update_active_links(bss, link_id, false);
 	}
 
 	wpa_supplicant_event(ctx, EVENT_INTERFACE_UNAVAILABLE, NULL);
@@ -2862,6 +2863,9 @@ static void nl80211_spurious_frame(struct i802_bss *bss, struct nlattr **tb,
 				   int wds)
 {
 	union wpa_event_data event;
+	struct i802_link *mld_link;
+	void *ctx = bss->ctx;
+	int link_id;
 
 	if (!tb[NL80211_ATTR_MAC])
 		return;
@@ -2872,8 +2876,28 @@ static void nl80211_spurious_frame(struct i802_bss *bss, struct nlattr **tb,
 	event.rx_from_unknown.wds = wds;
 	event.rx_from_unknown.link_id = tb[NL80211_ATTR_MLO_LINK_ID] ?
 		nla_get_u8(tb[NL80211_ATTR_MLO_LINK_ID]) : -1;
+	link_id = event.rx_from_unknown.link_id;
 
-	wpa_supplicant_event(bss->ctx, EVENT_RX_FROM_UNKNOWN, &event);
+	if (link_id >= 0) {
+		if (!nl80211_link_valid(bss->valid_links, link_id)) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Ignoring unknown RX event from link_id %d",
+				   link_id);
+			return;
+		}
+
+		mld_link = nl80211_get_link(bss, link_id);
+		if (!mld_link->ctx) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: WDS event on link %d with no ctx",
+				   link_id);
+			return;
+		}
+		ctx = mld_link->ctx;
+		event.rx_from_unknown.bssid = mld_link->addr;
+	}
+
+	wpa_supplicant_event(ctx, EVENT_RX_FROM_UNKNOWN, &event);
 }
 
 
@@ -3886,7 +3910,7 @@ static void nl80211_vendor_event_brcm(struct wpa_driver_nl80211_data *drv,
 	case BRCM_VENDOR_EVENT_PRIV_STR:
 	case BRCM_VENDOR_EVENT_HANGED:
 		/* Dump the event on to the console */
-		wpa_msg(NULL, MSG_INFO, "%s", data);
+		wpa_msg(NULL, MSG_INFO, "%s", data ? (char *) data : "");
 		break;
 	case BRCM_VENDOR_EVENT_ACS:
 		brcm_nl80211_acs_select_ch(drv, data, len);
@@ -4944,6 +4968,28 @@ process_incumbt_intf_event:
 }
 
 
+static void nl80211_start_ap(struct i802_bss *bss, struct nlattr **tb)
+{
+	int link_id;
+
+	if (!tb[NL80211_ATTR_MLO_LINK_ID])
+		return;
+
+	link_id = nla_get_u8(tb[NL80211_ATTR_MLO_LINK_ID]);
+	if (!nl80211_link_valid(bss->valid_links, link_id)) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Ignoring START_AP event for invalid link ID %d (valid: 0x%04x)",
+			   link_id, bss->valid_links);
+		return;
+	}
+
+	wpa_printf(MSG_DEBUG, "nl80211: START_AP event on link %d", link_id);
+
+	/* Update the active link */
+	nl80211_update_active_links(bss, link_id, true);
+}
+
+
 static void do_process_drv_event(struct i802_bss *bss, int cmd,
 				 struct nlattr **tb)
 {
@@ -5249,6 +5295,9 @@ static void do_process_drv_event(struct i802_bss *bss, int cmd,
 		nl80211_peer_measurement_complete_event(bss, tb);
 		break;
 #endif /* CONFIG_PR */
+	case NL80211_CMD_START_AP:
+		nl80211_start_ap(bss, tb);
+		break;
 	default:
 		wpa_dbg(drv->ctx, MSG_DEBUG, "nl80211: Ignored unknown event "
 			"(cmd=%d)", cmd);

@@ -1759,6 +1759,43 @@ wpa_bss_validate_rsne_ml(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 		return false;
 	}
 
+	/*
+	 * Security Profile element preference (IEEE P802.11bn/D2.0, 37.33):
+	 * If this link's AP advertises a Security Profile element whose
+	 * profile number implies an AKM/cipher that matches the STA's
+	 * config, augment wpa_ie.key_mgmt/pairwise_cipher so the checks below
+	 * pass even when the RSNE/RSNOE/RSNO2E does not explicitly list those
+	 * values. Without this, an AP MLD that only advertises CCMP/legacy AKMs
+	 * in its RSNE but supports GCMP-256 via a Security Profile would have
+	 * this link (and potentially all links, since they share the same
+	 * requirement) wrongly excluded from the usable-links bitmap.
+	 */
+	if (wpas_security_profile_active(wpa_s)) {
+		const u8 *sp;
+		int sp_key_mgmt;
+
+		sp = wpa_bss_get_ie_ext(bss, WLAN_EID_EXT_SECURITY_PROFILE);
+
+		sp_key_mgmt = security_profile_get_key_mgmt(sp, ssid->key_mgmt);
+		if (!sp_key_mgmt ||
+		    !(ssid->pairwise_cipher & WPA_CIPHER_GCMP_256))
+			goto no_sp_match;
+
+		if (!(wpa_ie.pairwise_cipher & WPA_CIPHER_GCMP_256)) {
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"MLD: Security Profile element overrides RSNE pairwise cipher (GCMP-256)");
+			wpa_ie.pairwise_cipher |= WPA_CIPHER_GCMP_256;
+		}
+
+		if (!(wpa_ie.key_mgmt & ssid->key_mgmt)) {
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"MLD: Security Profile element overrides RSN element AKM (key_mgmt=0x%x)",
+				sp_key_mgmt);
+			wpa_ie.key_mgmt |= sp_key_mgmt;
+		}
+	no_sp_match:
+	}
+
 	wpa_ie.key_mgmt &= ~(WPA_KEY_MGMT_PSK | WPA_KEY_MGMT_FT_PSK |
 			     WPA_KEY_MGMT_PSK_SHA256);
 	if (!(wpa_ie.key_mgmt & ssid->key_mgmt)) {

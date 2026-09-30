@@ -1556,7 +1556,7 @@ static int wpas_dbus_get_group_obj_path(struct wpa_supplicant *wpa_s,
 {
 	char group_name[3];
 
-	if (!wpa_s->dbus_new_path ||
+	if (!wpa_s->dbus_new_path || !ssid ||
 	    os_memcmp(ssid->ssid, P2P_WILDCARD_SSID, P2P_WILDCARD_SSID_LEN))
 		return -1;
 
@@ -5482,6 +5482,7 @@ void wpas_dbus_signal_hs20_t_c_acceptance(struct wpa_supplicant *wpa_s,
  * @peer_addr: MAC address of the peer device
  * @ssi: Service specific information payload
  * @ssi_len: Length of the SSI field
+ * @orig_addr: The address of the reporter
  *
  * This is used to indicate the NAN DE DiscoveryResult event.
  */
@@ -5492,7 +5493,8 @@ void wpas_dbus_signal_nan_discovery_result(struct wpa_supplicant *wpa_s,
 					   int peer_publish_id,
 					   const u8 *peer_addr,
 					   bool fsd, bool fsd_gas,
-					   const u8 *ssi, size_t ssi_len)
+					   const u8 *ssi, size_t ssi_len,
+					   const u8 *orig_addr)
 {
 	struct wpas_dbus_priv *iface;
 	DBusMessage *msg;
@@ -5528,6 +5530,7 @@ void wpas_dbus_signal_nan_discovery_result(struct wpa_supplicant *wpa_s,
 					      "ssi",
 					      (const char *) ssi,
 					      ssi_len)) ||
+	    !wpa_dbus_dict_append_bool(&dict_iter, "proxied", !!orig_addr) ||
 	    !wpa_dbus_dict_close_write(&iter, &dict_iter))
 		wpa_printf(MSG_ERROR, "dbus: Failed to construct signal");
 	else

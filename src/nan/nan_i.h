@@ -339,6 +339,8 @@ struct nan_peer_sec_info_entry {
  *
  * @last_seen: Timestamp of the last update of the peer info
  * @seq_id: Sequence id of the last availability update
+ * @conn_capa_valid: Whether a Connection Capability attribute was received
+ * @conn_capa: Connection capability bitmap (NAN_CONN_CAPA_* bits)
  * @avail_entries: List of availability entries of the peer
  * @ulw: List of Unaligned Schedule attribute payloads of the peer
  *	(struct nan_ulw_entry::list entries)
@@ -352,6 +354,8 @@ struct nan_peer_sec_info_entry {
 struct nan_peer_info {
 	struct os_reltime last_seen;
 	u8 seq_id;
+	bool conn_capa_valid;
+	u16 conn_capa;
 	struct dl_list avail_entries;
 	struct dl_list ulw;
 	struct dl_list dev_capa;
@@ -478,6 +482,10 @@ struct nan_bootstrap {
 	u8 req_instance_id;
 
 	struct wpabuf *npba;
+
+	u16 extended_pbm;
+	u8 *pairing_setup_info;
+	u16 pairing_setup_info_len;
 };
 
 /**
@@ -536,8 +544,23 @@ struct nan_pairing_peer_data {
 	u8 tag[NAN_NIRA_TAG_LEN];
 	u32 flags;
 	struct wpabuf *pending_auth1;
+	char *psi_locale;
+	char *psi_vendor_name;
+	char *psi_model_name;
+	char *psi_pairing_name;
 	enum nan_cipher_suite_id pairing_csid;
 	int pairing_akmp;
+	u8 npkid[PMKID_LEN];
+	bool npkid_valid;
+	u8 peer_nik[NAN_NIK_LEN];
+	bool peer_nik_valid;
+	u32 peer_nik_lifetime;
+	/* TK from the most recent successful pairing PASN exchange */
+	u8 tk[NAN_TK_MAX_LEN];
+	size_t tk_len;
+	/* True when the NM-TK was installed before M2 transmission. */
+	bool nm_tk_installed;
+	bool auto_nik_exchange;
 };
 
 /**
@@ -560,6 +583,11 @@ struct nan_peer {
 	struct dl_list list;
 	u8 nmi_addr[ETH_ALEN];
 	bool configured;
+	/* true: peer is not in our cluster (USD or different cluster) */
+	bool non_cluster;
+	/* peer's cluster ID (A3 from received SDF) */
+	u8 peer_cluster_id[ETH_ALEN];
+	unsigned int freq; /* last-seen SDF reception frequency in MHz */
 	struct os_reltime last_seen;
 	struct nan_peer_info info;
 
@@ -597,6 +625,9 @@ struct nan_peer {
  * @igtk_id: Key ID of the IGTK
  * @bigtk: BIGTK for NAN secure NDP
  * @bigtk_id: Key ID of the BIGTK
+ * @self_nik_list: List of self NIKs (NAN Identity Keys)
+ * @peer_nik_list: List of peer NIKs (NAN Identity Keys)
+ * @group_nik_list: List of group NIKs (NAN Identity Keys)
  */
 struct nan_data {
 	struct nan_config *cfg;
@@ -621,6 +652,10 @@ struct nan_data {
 
 	struct wpa_bigtk bigtk;
 	u8 bigtk_id;
+
+	struct dl_list self_nik_list;
+	struct dl_list peer_nik_list;
+	struct dl_list group_nik_list;
 };
 
 struct nan_attrs_entry {
@@ -645,7 +680,10 @@ struct nan_attrs {
 	const u8 *shared_key_desc;
 	const u8 *dev_capa_ext;
 	const u8 *npba;
+	const u8 *pbea;
 	const u8 *nira;
+	const u8 *irsa;
+	const u8 *rsia;
 	const u8 *ndpe;
 
 	u16 ndp_len;
@@ -656,8 +694,13 @@ struct nan_attrs {
 	u16 shared_key_desc_len;
 	u16 dev_capa_ext_len;
 	u16 npba_len;
+	u16 pbea_len;
 	u16 nira_len;
+	u16 irsa_len;
+	u16 rsia_len;
 	u16 ndpe_len;
+	u16 conn_capa;
+	bool conn_capa_valid;
 };
 
 struct nan_msg {
@@ -816,6 +859,8 @@ struct wpabuf * nan_crypto_encrypt_key_data(const struct wpabuf *key_data,
 struct wpabuf * nan_crypto_decrypt_key_data(const u8 *kek, size_t kek_len,
 					    const u8 *encrypted_data,
 					    size_t encrypted_len);
+void nan_parse_pbea(struct nan_data *nan, struct nan_peer *peer,
+		    struct nan_attrs *attrs);
 void nan_sec_reset(struct nan_data *nan, struct nan_ndp_sec *ndp_sec);
 int nan_sec_rx(struct nan_data *nan, struct nan_peer *peer,
 	       struct nan_msg *msg);
@@ -848,7 +893,8 @@ void nan_add_kde_hdr(struct wpabuf *buf, u32 kde, size_t data_len);
 int nan_clear_peer_schedule(struct nan_data *nan, struct nan_peer *peer);
 #ifdef CONFIG_PASN
 int nan_nira_get_tag_nonce(const struct nan_config *nan, u8 *nonce, u8 *tag);
-void nan_pairing_deinit_peer(struct nan_peer *peer);
+void nan_pairing_deinit_peer(struct nan_data *nan_data, struct nan_peer *peer,
+			     bool remove_nm_tk);
 bool nan_pairing_followup_rx(struct nan_data *nan_data, const u8 *peer_addr,
 			     const struct nan_shared_key *shared_key_descr,
 			     size_t attr_len);
@@ -859,7 +905,9 @@ int nan_nira_get_tag_nonce(const struct nan_config *nan, u8 *nonce, u8 *tag)
 	return -1;
 }
 
-static inline void nan_pairing_deinit_peer(struct nan_peer *peer)
+static inline void nan_pairing_deinit_peer(struct nan_data *nan_data,
+					   struct nan_peer *peer,
+					   bool remove_nm_tk)
 {
 }
 #endif /* CONFIG_PASN */

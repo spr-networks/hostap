@@ -267,7 +267,8 @@ static int supp_init(struct wpa *wpa)
 		wpa_sm_set_param(wpa->supp, WPA_PARAM_MFP,
 				 MGMT_FRAME_PROTECTION_OPTIONAL);
 	}
-	wpa_sm_set_pmk(wpa->supp, wpa->psk, PMK_LEN, NULL, NULL);
+	wpa_sm_set_pmk(wpa->supp, wpa->psk, PMK_LEN, NULL, NULL,
+		       PASN_GROUP_NOT_SPECIFIED);
 
 	wpa->supp_ie_len = sizeof(wpa->supp_ie);
 	if (wpa_sm_set_assoc_wpa_ie_default(wpa->supp, wpa->supp_ie,

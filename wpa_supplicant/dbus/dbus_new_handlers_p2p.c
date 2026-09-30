@@ -2292,8 +2292,9 @@ DBusMessage * wpas_dbus_handler_remove_persistent_group(
 	int id;
 	struct wpa_ssid *ssid;
 
-	dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &op,
-			      DBUS_TYPE_INVALID);
+	if (!dbus_message_get_args(message, NULL, DBUS_TYPE_OBJECT_PATH, &op,
+				   DBUS_TYPE_INVALID))
+		return wpas_dbus_error_invalid_args(message, NULL);
 
 	wpa_s = wpa_s->global->p2p_init_wpa_s;
 	if (!wpa_s) {

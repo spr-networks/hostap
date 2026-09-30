@@ -650,7 +650,7 @@ int hostapd_notif_assoc(struct hostapd_data *hapd, const u8 *addr,
 					  elems.rsnxe ? elems.rsnxe_len + 2 : 0,
 					  elems.mdie, elems.mdie_len,
 					  elems.owe_dh, elems.owe_dh_len, NULL,
-					  ap_sta_is_mld(hapd, sta));
+					  ap_sta_is_mld(hapd, sta), NULL);
 		reason = WLAN_REASON_INVALID_IE;
 		status = WLAN_STATUS_INVALID_ELEMENT;
 		switch (res) {
@@ -1839,7 +1839,7 @@ static void hostapd_action_rx(struct hostapd_data *hapd,
 	}
 #endif /* CONFIG_DPP */
 #ifdef CONFIG_NAN_USD
-	if (mgmt->u.action.category == WLAN_ACTION_PUBLIC && plen >= 5 &&
+	if (mgmt->u.action.category == WLAN_ACTION_PUBLIC && plen >= 6 &&
 	    mgmt->u.action.u.vs_public_action.action ==
 	    WLAN_PA_VENDOR_SPECIFIC &&
 	    WPA_GET_BE24(mgmt->u.action.u.vs_public_action.oui) ==

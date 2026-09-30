@@ -1016,6 +1016,9 @@ int wpa_config_write(const char *name, struct wpa_config *config)
 	struct wpa_config_blob *blob;
 	int id;
 
+	if (!name)
+		return -1;
+
 	wpa_printf(MSG_DEBUG, "Writing configuration file '%s'", name);
 
 #ifdef UNICODE

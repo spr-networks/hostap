@@ -833,7 +833,7 @@ static int hostapd_parse_chanlist(struct hostapd_config *conf, char *val)
 }
 
 
-static int hostapd_parse_intlist(int **int_list, char *val)
+static int hostapd_parse_intlist_helper(int **int_list, char *val, int delim)
 {
 	int *list;
 	int count;
@@ -865,10 +865,25 @@ static int hostapd_parse_intlist(int **int_list, char *val)
 			break;
 		pos = end + 1;
 	}
-	list[count] = 0;
+	list[count] = delim;
 
 	*int_list = list;
 	return 0;
+}
+
+
+static int hostapd_parse_intlist(int **int_list, char *val)
+{
+	return hostapd_parse_intlist_helper(int_list, val, 0);
+}
+
+
+
+/* Like hostapd_parse_intlist but uses -1 as the list terminator so that 0
+ * remains a valid entry. */
+static int hostapd_parse_intlist_neg1(int **int_list, char *val)
+{
+	return hostapd_parse_intlist_helper(int_list, val, -1);
 }
 
 
@@ -3189,6 +3204,13 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 	} else if (os_strcmp(buf, "peerkey") == 0) {
 		wpa_printf(MSG_INFO,
 			   "Line %d: Obsolete peerkey parameter ignored", line);
+	} else if (os_strcmp(buf, "security_profiles") == 0) {
+		if (hostapd_parse_intlist_neg1(&bss->security_profiles, pos)) {
+			wpa_printf(MSG_ERROR,
+				   "Line %d: Invalid security_profiles value '%s'",
+				   line, pos);
+			return 1;
+		}
 #ifdef CONFIG_IEEE80211R_AP
 	} else if (os_strcmp(buf, "mobility_domain") == 0) {
 		if (os_strlen(pos) != 2 * MOBILITY_DOMAIN_ID_LEN ||
@@ -3601,11 +3623,12 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		bss->wmm_uapsd = atoi(pos);
 	} else if (os_strncmp(buf, "wme_ac_", 7) == 0 ||
 		   os_strncmp(buf, "wmm_ac_", 7) == 0) {
-		if (hostapd_config_wmm_ac(conf->wmm_ac_params, buf, pos)) {
+		if (hostapd_config_wmm_ac(bss->wmm_ac_params, buf, pos)) {
 			wpa_printf(MSG_ERROR, "Line %d: invalid WMM ac item",
 				   line);
 			return 1;
 		}
+		bss->wmm_override = true;
 	} else if (os_strcmp(buf, "bss") == 0) {
 		if (hostapd_config_bss(conf, pos)) {
 			wpa_printf(MSG_ERROR, "Line %d: invalid bss item",
@@ -4529,6 +4552,10 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		if (!get_hexstream(pos, &bss->rsnxoe_override,
 				   "rsnxoe_override", line))
 			return 1;
+	} else if (os_strcmp(buf, "security_profile_override") == 0) {
+		if (!get_hexstream(pos, &bss->security_profile_override,
+				   "security_profile_override", line))
+			return 1;
 	} else if (os_strcmp(buf, "sae_reflection_attack") == 0) {
 		bss->sae_reflection_attack = atoi(pos);
 	} else if (os_strcmp(buf, "sae_commit_status") == 0) {
@@ -4560,6 +4587,12 @@ static int hostapd_config_fill(struct hostapd_config *conf,
 		bss->igtk_rsc_override = wpabuf_parse_bin(pos);
 	} else if (os_strcmp(buf, "no_beacon_rsnxe") == 0) {
 		bss->no_beacon_rsnxe = atoi(pos);
+	} else if (os_strcmp(buf, "rsnxe_capab_mask") == 0) {
+		/* Value is the bits to suppress (complement form):
+		 * rsnxe_capab_mask=20 suppresses SAE-H2E (bit 5 = 0x20).
+		 * Internally stored as the allow-mask (~value).
+		 */
+		bss->rsnxe_capab_mask = (~strtoull(pos, NULL, 16)) | 0x0f ;
 	} else if (os_strcmp(buf, "skip_prune_assoc") == 0) {
 		bss->skip_prune_assoc = atoi(pos);
 	} else if (os_strcmp(buf, "ft_rsnxe_used") == 0) {
@@ -5343,6 +5376,8 @@ struct hostapd_config * hostapd_config_read(const char *fname)
 
 	for (i = 0; i < conf->num_bss; i++)
 		hostapd_set_security_params(conf->bss[i], 1);
+
+	hostapd_config_apply_wmm_override(conf);
 
 	if (hostapd_config_check(conf, 1))
 		errors++;

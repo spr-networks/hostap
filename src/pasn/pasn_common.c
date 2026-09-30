@@ -38,6 +38,7 @@ void pasn_data_deinit(struct pasn_data *pasn)
 	os_free(pasn->pasn_groups);
 	wpabuf_free(pasn->auth1);
 	os_free(pasn->dec_pw_id);
+	wpabuf_free(pasn->security_profile);
 	bin_clear_free(pasn, sizeof(struct pasn_data));
 }
 
@@ -229,6 +230,26 @@ int pasn_set_extra_ies(struct pasn_data *pasn, const u8 *extra_ies,
 		return -1;
 	}
 	pasn->extra_ies_len = extra_ies_len;
+	return 0;
+}
+
+
+int pasn_set_security_profile(struct pasn_data *pasn, const u8 *sp,
+			      size_t sp_len)
+{
+	if (!pasn || !sp || !sp_len)
+		return -1;
+
+	wpabuf_free(pasn->security_profile);
+	pasn->security_profile = wpabuf_alloc_copy(sp, sp_len);
+	if (!pasn->security_profile) {
+		wpa_printf(MSG_ERROR,
+			   "PASN: Security Profile element memory allocation failed");
+		return -1;
+	}
+
+	wpa_printf(MSG_DEBUG,
+		   "PASN: Security Profile element set (len=%zu)", sp_len);
 	return 0;
 }
 

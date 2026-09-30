@@ -36,6 +36,7 @@
 #include "common/version.h"
 #include "rsn_supp/preauth.h"
 #include "rsn_supp/pmksa_cache.h"
+#include "rsn_supp/wpa_ie.h"
 #include "common/wpa_ctrl.h"
 #include "common/ieee802_11_common.h"
 #include "common/ieee802_11_defs.h"
@@ -423,11 +424,15 @@ void wpa_supplicant_set_non_wpa_policy(struct wpa_supplicant *wpa_s,
 	wpa_sm_set_ap_rsne_override(wpa_s->wpa, NULL, 0);
 	wpa_sm_set_ap_rsne_override_2(wpa_s->wpa, NULL, 0);
 	wpa_sm_set_ap_rsnxe_override(wpa_s->wpa, NULL, 0);
+	wpa_sm_set_ap_security_profile(wpa_s->wpa, NULL, 0);
 	wpa_sm_set_assoc_wpa_ie(wpa_s->wpa, NULL, 0);
 #ifndef CONFIG_NO_WPA
 	wpa_sm_set_assoc_rsnxe(wpa_s->wpa, NULL, 0);
 #endif /* CONFIG_NO_WPA */
 	wpa_s->rsnxe_len = 0;
+	wpa_sm_set_security_profile(wpa_s->wpa, NULL);
+	wpa_s->sel_security_profile = NULL;
+	wpa_s->security_profile_len = 0;
 	wpa_s->pairwise_cipher = WPA_CIPHER_NONE;
 	wpa_s->group_cipher = WPA_CIPHER_NONE;
 	wpa_s->mgmt_group_cipher = 0;
@@ -649,6 +654,10 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 	wpa_s->rsnxe_override_assoc = NULL;
 	wpabuf_free(wpa_s->rsnxe_override_eapol);
 	wpa_s->rsnxe_override_eapol = NULL;
+	wpabuf_free(wpa_s->sec_prof_override_auth);
+	wpa_s->sec_prof_override_auth = NULL;
+	wpabuf_free(wpa_s->sec_prof_override_assoc);
+	wpa_s->sec_prof_override_assoc = NULL;
 	wpas_clear_driver_signal_override(wpa_s);
 	for (i = 0; i < MAX_NUM_MLD_LINKS; i++) {
 		wpabuf_free(wpa_s->link_ies[i]);
@@ -780,6 +789,7 @@ static void wpa_supplicant_cleanup(struct wpa_supplicant *wpa_s)
 
 	wnm_bss_keep_alive_deinit(wpa_s);
 	wnm_btm_reset(wpa_s);
+	wnm_sleep_mode_clear(wpa_s);
 
 	ext_password_deinit(wpa_s->ext_pw);
 	wpa_s->ext_pw = NULL;
@@ -1585,20 +1595,255 @@ static int matching_ciphers(struct wpa_ssid *ssid, struct wpa_ie_data *ie,
 }
 
 
-void wpas_set_mgmt_group_cipher(struct wpa_supplicant *wpa_s,
-				struct wpa_ssid *ssid, struct wpa_ie_data *ie)
+static bool sec_prof_stronger(const struct security_profile_entry *a,
+			      const struct security_profile_entry *b)
+{
+	static const int pref[] = {
+		7, 15, 6, 14, 5, 13, 4, 12, 3, 11, 2, 10, 1, 9, 0, 8
+	};
+	int a_pos = -1, b_pos = -1;
+	unsigned int i;
+
+	if (a && !b)
+		return true;
+
+	for (i = 0; i < ARRAY_SIZE(pref); i++) {
+		if (a->number == pref[i]) {
+			a_pos = i;
+			break;
+		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(pref); i++) {
+		if (b->number == pref[i]) {
+			b_pos = i;
+			break;
+		}
+	}
+
+	if (a_pos > 0 && b_pos > 0 && a_pos < b_pos)
+		return true;
+
+	return false;
+}
+
+
+const struct security_profile_entry *
+security_profile_select_best(const u8 *sp, const int *numbers)
+{
+	u8 bitmap_len, num_vendor;
+	const u8 *bitmap;
+	int i;
+	const struct security_profile_entry *best = NULL;
+
+	if (!numbers)
+		return NULL;
+
+	if (!sp || sp[1] < 3)
+		return NULL;
+
+	bitmap_len = sp[4] & 0x0F;
+	num_vendor = (sp[4] & 0xF0) >> 4;
+	if (sp[1] < 3 + bitmap_len + 4 * num_vendor)
+		return NULL;
+
+	bitmap = sp + 5;
+
+	for (i = 0; numbers[i] != -1; i++) {
+		int profile;
+
+		profile = numbers[i];
+		if (profile >= 0 && profile <= SEC_PROF_MAX &&
+		    profile < bitmap_len * 8 &&
+		    (bitmap[profile / 8] & BIT(profile % 8))) {
+			const struct security_profile_entry *e;
+
+			e = sec_prof_get(profile);
+			if (!e)
+				continue;
+			if (sec_prof_stronger(e, best))
+				best = e;
+		}
+	}
+
+	return best;
+}
+
+
+/*
+ * security_profile_get_key_mgmt - Get key_mgmt bitmask implied by any
+ * profile in the AP's Security Profile element that matches ssid->key_mgmt.
+ *
+ * Walks the AP's Security Profile Bitmap and returns a WPA_KEY_MGMT_* bitmask
+ * covering all profiles whose bit is set and whose AKM matches at least one
+ * AKM in ssid->key_mgmt. Returns 0 if no matching profile is found.
+ *
+ * This is used to augment ie.key_mgmt so that the RSNE check in
+ * wpa_supplicant_set_suites() succeeds even when the RSNE/RSNOE/RSNO2E does
+ * not explicitly list the AKM that the security profile implies.
+ */
+int security_profile_get_key_mgmt(const u8 *sp, int ssid_key_mgmt)
+{
+	u8 bitmap_len, num_vendor;
+	const u8 *bitmap;
+	int profile, result = 0;
+	int akm_bit;
+
+	/*
+	 * sp_ie layout (wpa_bss_get_ie_ext returns full element):
+	 *   [0] = 255 (EID_EXTENSION)
+	 *   [1] = Length
+	 *   [2] = 162 (EID_EXT_SECURITY_PROFILE)
+	 *   [3] = Reduced RSN Capabilities
+	 *   [4] = Security Profile Indication (B0-B3 = bitmap_octets)
+	 *   [5..] = Security Profile Bitmap
+	 */
+	if (!sp || sp[1] < 3)
+		return 0;
+
+	bitmap_len = sp[4] & 0x0F;
+	num_vendor = (sp[4] & 0xF0) >> 4;
+	if (sp[1] < 3 + bitmap_len + 4 * num_vendor)
+		return 0;
+
+	bitmap = sp + 5;
+
+	for (profile = 0; profile <= SEC_PROF_MAX && profile < bitmap_len * 8;
+	     profile++) {
+		if (!(bitmap[profile / 8] & BIT(profile % 8)))
+			continue;
+
+		/*
+		 * security_profile_akm_matches() expects a single key_mgmt
+		 * value (not a bitmask), so iterate over each set bit in
+		 * ssid_key_mgmt and test them individually.
+		 */
+		for (akm_bit = 0; akm_bit < 32; akm_bit++) {
+			int akm = ssid_key_mgmt & BIT(akm_bit);
+
+			if (!akm)
+				continue;
+			if (security_profile_akm_matches(profile, akm)) {
+				result |= akm;
+				break;
+			}
+		}
+	}
+
+	return result;
+}
+
+
+/*
+ * security_profile_get_rsnx - Return a pointer to the Extended RSN
+ * Capabilities field inside the AP's Security Profile element, formatted
+ * identically to an RSNXE body (length-prefix in bits 0-3 of the first octet).
+ *
+ * Returns a pointer to the first octet of the Extended RSN Capabilities field
+ * within sp, and sets *rsnx_len to its length. Returns NULL if the element is
+ * too short to contain the field.
+ *
+ * The returned pointer is valid for the lifetime of sp.
+ */
+const u8 * security_profile_get_rsnx(const u8 *sp, size_t *rsnx_len)
+{
+	u8 bitmap_len, num_vendor;
+	size_t offset;
+	const u8 *rsnxe;
+
+	if (!sp || sp[1] < 3)
+		return NULL;
+
+	bitmap_len = sp[4] & 0x0F;
+	num_vendor = (sp[4] & 0xF0) >> 4;
+	if (sp[1] < 3 + bitmap_len + 4 * num_vendor)
+		return NULL;
+
+	/*
+	 * Offset of Extended RSN Capabilities within sp:
+	 *   EID(1) + Len(1) + EID_EXT(1) + ReducedRSNCaps(1) +
+	 *   SecProfInd(1) + bitmap(bitmap_len) + vendor specific security
+	 *   profiles = 5 + bitmap_len + 4 * num_vendor
+	 */
+	offset = 5 + bitmap_len + 4 * num_vendor;
+	if ((size_t) (sp[1] + 2) <= offset)
+		return NULL; /* no room for the full field */
+
+	rsnxe = sp + offset;
+	*rsnx_len = (size_t) (sp[1] + 2) - offset;
+	if (*rsnx_len > 0) {
+		unsigned int capa_len;
+
+		/* Use the Field length bits 0-3 to determine the length of the
+		 * field. */
+		capa_len = (rsnxe[0] & 0x0f) + 1;
+		if (capa_len > *rsnx_len)
+			return NULL; /* no room for the full field */
+		*rsnx_len = capa_len;
+	}
+
+	return rsnxe;
+}
+
+
+/*
+ * security_profile_get_rsn_caps - Derive RSN Capabilities from the AP's
+ * Security Profile element.
+ *
+ * All defined security profiles (0-15) require MFPR=1 and MFPC=1 per IEEE
+ * P802.11bn/D2.0, Table 9-bb18. The Reduced RSN Capabilities field
+ * additionally carries ExtKeyID (bit 0) and OCVC (bit 1).
+ *
+ * Returns a WPA_CAPABILITY_* bitmask suitable for use as ie.capabilities,
+ * or 0 if sp is NULL or too short.
+ */
+int security_profile_get_rsn_caps(const u8 *sp)
+{
+	u8 reduced;
+	int caps;
+
+	if (!sp || sp[1] < 2)
+		return 0;
+
+	/*
+	 * sp[3] = Reduced RSN Capabilities (IEEE P802.11bn/D2.0, Figure
+	 * 9-aa75):
+	 *   B0 = Extended Key ID for Unicast Frames
+	 *   B1 = OCVC
+	 * All defined profiles mandate MFPR=1 (per Table 9-bb18).
+	 */
+	reduced = sp[3];
+
+	caps = WPA_CAPABILITY_MFPC | WPA_CAPABILITY_MFPR;
+	if (reduced & SEC_PROF_REDUCED_RSN_CAPA_EXT_KEY_ID)
+		caps |= WPA_CAPABILITY_EXT_KEY_ID_FOR_UNICAST;
+	if (reduced & SEC_PROF_REDUCED_RSN_CAPA_OCVC)
+		caps |= WPA_CAPABILITY_OCVC;
+
+	return caps;
+}
+
+
+static void
+wpas_set_mgmt_group_cipher(struct wpa_supplicant *wpa_s,
+			   struct wpa_ssid *ssid, struct wpa_ie_data *ie,
+			   const struct security_profile_entry *sel_sp)
 {
 	int sel;
+	int cipher;
 
 	sel = ie->mgmt_group_cipher;
-	if (ssid->group_mgmt_cipher)
-		sel &= ssid->group_mgmt_cipher;
+	cipher = ssid->group_mgmt_cipher;
+	if (sel_sp)
+		cipher |= WPA_CIPHER_BIP_GMAC_256;
+	if (cipher)
+		sel &= cipher;
 	if (wpas_get_ssid_pmf(wpa_s, ssid) == NO_MGMT_FRAME_PROTECTION ||
 	    !(ie->capabilities & WPA_CAPABILITY_MFPC))
 		sel = 0;
 	wpa_dbg(wpa_s, MSG_DEBUG,
 		"WPA: AP mgmt_group_cipher 0x%x network profile mgmt_group_cipher 0x%x; available mgmt_group_cipher 0x%x",
-		ie->mgmt_group_cipher, ssid->group_mgmt_cipher, sel);
+		ie->mgmt_group_cipher, cipher, sel);
 	if (sel & WPA_CIPHER_AES_128_CMAC) {
 		wpa_s->mgmt_group_cipher = WPA_CIPHER_AES_128_CMAC;
 		wpa_dbg(wpa_s, MSG_DEBUG,
@@ -1861,26 +2106,98 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 			      bool skip_default_rsne)
 {
 	struct wpa_ie_data ie;
+	bool rsne_parsed = false;
 	int sel, proto;
 #ifdef CONFIG_SAE
 	enum sae_pwe sae_pwe;
 #endif /* CONFIG_SAE */
 	const u8 *bss_wpa, *bss_rsn, *bss_rsnx;
+	const u8 *bss_sp = NULL; /* AP's Security Profile element */
+	u8 sp_rsnx_buf[2 + 255]; /* Synthetic RSNXE from Security Profile
+				  * element */
 	bool wmm;
 	struct rsn_pmksa_cache_entry *pmksa;
+	const struct security_profile_entry *sel_sp = NULL;
+	int cipher;
 
 	if (bss) {
 		bss_wpa = wpa_bss_get_vendor_ie(bss, WPA_IE_VENDOR_TYPE);
 		bss_rsn = wpa_bss_get_rsne(wpa_s, bss, ssid, false);
 		bss_rsnx = wpa_bss_get_rsnxe(wpa_s, bss, ssid, false);
+
+		/*
+		 * Security Profile element (IEEE P802.11bn/D2.0, 9.4.2.369):
+		 * When the AP advertises this element and the driver and
+		 * wpa_supplicant supports security profile negotiation, the
+		 * security profile number takes precedence over the
+		 * RSNE/RSNOE/RSNO2E/RSNXE/RSNXOE for AKM, pairwise cipher, RSN
+		 * capabilities, and RSNX capabilities selection.
+		 */
+		if (wpas_security_profile_active(wpa_s))
+			bss_sp = wpa_bss_get_ie_ext(
+				bss, WLAN_EID_EXT_SECURITY_PROFILE);
 	} else {
 		bss_wpa = bss_rsn = bss_rsnx = NULL;
 	}
 
-	if (bss_rsn && (ssid->proto & WPA_PROTO_RSN) &&
-	    wpa_parse_wpa_ie(bss_rsn, 2 + bss_rsn[1], &ie) == 0 &&
-	    matching_ciphers(ssid, &ie, bss->freq) &&
-	    (ie.key_mgmt & ssid->key_mgmt)) {
+	if (bss_rsn && wpa_parse_wpa_ie(bss_rsn, 2 + bss_rsn[1], &ie) == 0)
+		rsne_parsed = true;
+
+	if (bss_sp && ssid->security_profiles && rsne_parsed &&
+	    ssid->security_profiles &&
+	    (sel_sp = security_profile_select_best(bss_sp,
+						   ssid->security_profiles))) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"RSN: using Security Profile element");
+		proto = WPA_PROTO_RSN;
+	} else if (bss_rsn && (ssid->proto & WPA_PROTO_RSN) && rsne_parsed &&
+		   (matching_ciphers(ssid, &ie, bss->freq) ||
+		    /*
+		     * Security profile preference (IEEE P802.11bn/D2.0, 37.33):
+		     * All defined profiles use GCMP-256 as pairwise cipher.
+		     * If the AP advertises a security profile that matches the
+		     * STA's configured AKM, treat GCMP-256 as available even if
+		     * the RSNE/RSNOE/RSNO2E does not list it.
+		     */
+		    (bss_sp &&
+		     security_profile_get_key_mgmt(bss_sp, ssid->key_mgmt) &&
+		     (ssid->pairwise_cipher & WPA_CIPHER_GCMP_256))) &&
+		   ((ie.key_mgmt & ssid->key_mgmt) ||
+		    /*
+		     * Security profile preference (IEEE P802.11bn/D2.0, 37.33):
+		     * Consider the AP as supporting the AKM implied by any
+		     * security profile number it advertises, even if the
+		     * RSNE/RSNOE/RSNO2E does not explicitly list that AKM.
+		     * Similarly, all defined profiles use GCMP-256 as pairwise
+		     * cipher, so treat GCMP-256 as available when a matching
+		     * profile exists. */
+		    (bss_sp &&
+		     security_profile_get_key_mgmt(bss_sp, ssid->key_mgmt) &&
+		     (ssid->pairwise_cipher & WPA_CIPHER_GCMP_256)))) {
+		/*
+		 * When the RSNE did not advertise the AKM/cipher but the
+		 * Security Profile element did, augment ie so that the rest of
+		 * wpa_supplicant_set_suites() can proceed normally.
+		 */
+		if (bss_sp &&
+		    security_profile_get_key_mgmt(bss_sp, ssid->key_mgmt)) {
+			int sp_key_mgmt = security_profile_get_key_mgmt(
+				bss_sp, ssid->key_mgmt);
+
+			if (!(ie.pairwise_cipher & WPA_CIPHER_GCMP_256) &&
+			    (ssid->pairwise_cipher & WPA_CIPHER_GCMP_256)) {
+				wpa_dbg(wpa_s, MSG_DEBUG,
+					"RSN: Security Profile element overrides RSNE pairwise cipher (GCMP-256)");
+				ie.pairwise_cipher |= WPA_CIPHER_GCMP_256;
+				ie.has_pairwise = 1;
+			}
+			if (!(ie.key_mgmt & ssid->key_mgmt) && sp_key_mgmt) {
+				wpa_dbg(wpa_s, MSG_DEBUG,
+					"RSN: Security Profile element overrides RSNE AKM (key_mgmt=0x%x)",
+					sp_key_mgmt);
+				ie.key_mgmt |= sp_key_mgmt;
+			}
+		}
 		wpa_dbg(wpa_s, MSG_DEBUG, "RSN: using IEEE 802.11i/D9.0");
 		proto = WPA_PROTO_RSN;
 	} else if (bss_wpa && (ssid->proto & WPA_PROTO_WPA) &&
@@ -1978,6 +2295,61 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 			ie.mgmt_group_cipher);
 	}
 
+	/*
+	 * Security Profile element preference (IEEE P802.11bn/D2.0, 37.33):
+	 *
+	 * 1. RSN Capabilities: The Reduced RSN Capabilities field in the
+	 *    Security Profile element takes precedence over the RSN
+	 *    Capabilities field in the RSNE/RSNOE/RSNO2E.
+	 *    All defined profiles (0-15) mandate MFPR=1 and MFPC=1.
+	 *    ExtKeyID and OCVC are taken from the Reduced RSN Capabilities.
+	 *
+	 * 2. RSNX Capabilities: The Extended RSN Capabilities field in the
+	 *    Security Profile element takes precedence over the RSNXE/RSNXOE.
+	 *
+	 * Apply these overrides now so that all subsequent capability checks
+	 * (MFPC, ExtKeyID, SSID protection, association encryption, SPP A-MSDU,
+	 * etc.) use the security profile values.
+	 */
+	if (bss_sp && proto == WPA_PROTO_RSN) {
+		int sp_rsn_caps = security_profile_get_rsn_caps(bss_sp);
+		size_t ext_rsnx_len;
+		const u8 *ext_rsnx;
+
+		if (sp_rsn_caps && sp_rsn_caps != ie.capabilities) {
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"RSN: Security Profile element overrides RSN capabilities: 0x%x -> 0x%x",
+				ie.capabilities, sp_rsn_caps);
+			ie.capabilities = sp_rsn_caps;
+		}
+
+		/*
+		 * Override bss_rsnx with the Extended RSN Capabilities from
+		 * the Security Profile element. The field is encoded in the
+		 * same wire format as an RSNXE body (length prefix in bits
+		 * 0-3 of the first octet), so ieee802_11_rsnx_capab_len() can
+		 * consume it directly.
+		 *
+		 * We synthesise a minimal two-byte RSNXE header (EID=244,
+		 * Length) so that ieee802_11_rsnx_capab() - which expects a
+		 * full element starting at EID - works without modification.
+		 * The synthetic element is stored in a local buffer and
+		 * bss_rsnx is pointed at it for the remainder of this
+		 * function.
+		 */
+		ext_rsnx = security_profile_get_rsnx(bss_sp, &ext_rsnx_len);
+
+		if (ext_rsnx && ext_rsnx_len > 0 &&
+		    ext_rsnx_len <= sizeof(sp_rsnx_buf) - 2) {
+			sp_rsnx_buf[0] = WLAN_EID_RSNX;
+			sp_rsnx_buf[1] = (u8) ext_rsnx_len;
+			os_memcpy(sp_rsnx_buf + 2, ext_rsnx, ext_rsnx_len);
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"RSN: Security Profile element overrides RSNX capabilities");
+			bss_rsnx = sp_rsnx_buf;
+		}
+	}
+
 	wpa_s->wpa_proto = proto;
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_PROTO, proto);
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_RSN_ENABLED,
@@ -1985,6 +2357,7 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 
 	if (bss || !wpa_s->ap_ies_from_associnfo) {
 		const u8 *rsnoe = NULL, *rsno2e = NULL, *rsnxoe = NULL;
+		const u8 *sec_prof = NULL;
 
 		if (bss) {
 			bss_rsn = wpa_bss_get_ie(bss, WLAN_EID_RSN);
@@ -1995,6 +2368,8 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 				bss, RSNE_OVERRIDE_2_IE_VENDOR_TYPE);
 			rsnxoe = wpa_bss_get_vendor_ie(
 				bss, RSNXE_OVERRIDE_IE_VENDOR_TYPE);
+			sec_prof = wpa_bss_get_ie_ext(
+				bss, WLAN_EID_EXT_SECURITY_PROFILE);
 		}
 
 		if (wpa_sm_set_ap_wpa_ie(wpa_s->wpa, bss_wpa,
@@ -2008,7 +2383,10 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		    wpa_sm_set_ap_rsne_override_2(wpa_s->wpa, rsno2e,
 						  rsno2e ? 2 + rsno2e[1] : 0) ||
 		    wpa_sm_set_ap_rsnxe_override(wpa_s->wpa, rsnxoe,
-						 rsnxoe ? 2 + rsnxoe[1] : 0))
+						 rsnxoe ? 2 + rsnxoe[1] : 0)||
+		    wpa_sm_set_ap_security_profile(wpa_s->wpa, sec_prof,
+						   sec_prof ? 2 + sec_prof[1] :
+						   0))
 			return -1;
 	}
 
@@ -2016,10 +2394,13 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 	wpa_s->group_cipher = WPA_CIPHER_NONE;
 	wpa_s->pairwise_cipher = WPA_CIPHER_NONE;
 #else /* CONFIG_NO_WPA */
-	sel = ie.group_cipher & ssid->group_cipher;
+	cipher = ssid->group_cipher;
+	if (sel_sp)
+		cipher |= WPA_CIPHER_GCMP_256;
+	sel = ie.group_cipher & cipher;
 	wpa_dbg(wpa_s, MSG_DEBUG,
 		"WPA: AP group 0x%x network profile group 0x%x; available group 0x%x",
-		ie.group_cipher, ssid->group_cipher, sel);
+		ie.group_cipher, cipher, sel);
 	wpa_s->group_cipher = wpa_pick_group_cipher(sel);
 	if (wpa_s->group_cipher < 0) {
 		wpa_msg(wpa_s, MSG_WARNING, "WPA: Failed to select group "
@@ -2029,10 +2410,14 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 	wpa_dbg(wpa_s, MSG_DEBUG, "WPA: using GTK %s",
 		wpa_cipher_txt(wpa_s->group_cipher));
 
-	sel = ie.pairwise_cipher & ssid->pairwise_cipher;
+	if (sel_sp)
+		cipher = WPA_CIPHER_GCMP_256;
+	else
+		cipher = ssid->pairwise_cipher;
+	sel = ie.pairwise_cipher & cipher;
 	wpa_dbg(wpa_s, MSG_DEBUG,
 		"WPA: AP pairwise 0x%x network profile pairwise 0x%x; available pairwise 0x%x",
-		ie.pairwise_cipher, ssid->pairwise_cipher, sel);
+		ie.pairwise_cipher, cipher, sel);
 	wpa_s->pairwise_cipher = wpa_pick_pairwise_cipher(sel, 1);
 	if (wpa_s->pairwise_cipher < 0) {
 		wpa_msg(wpa_s, MSG_WARNING, "WPA: Failed to select pairwise "
@@ -2056,6 +2441,8 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 				  WPA_DRIVER_FLAGS_UPDATE_FT_IES)))
 		sel &= ~WPA_KEY_MGMT_FT;
 #endif /* CONFIG_IEEE80211R */
+	if (sel_sp)
+		sel = sel_sp->key_mgmt;
 	wpa_dbg(wpa_s, MSG_DEBUG,
 		"WPA: AP key_mgmt 0x%x network profile key_mgmt 0x%x; available key_mgmt 0x%x",
 		ie.key_mgmt, ssid->key_mgmt, sel);
@@ -2218,7 +2605,7 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		return -1;
 	}
 
-	wpas_set_mgmt_group_cipher(wpa_s, ssid, &ie);
+	wpas_set_mgmt_group_cipher(wpa_s, ssid, &ie, sel_sp);
 #ifdef CONFIG_OCV
 	if ((wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME) ||
 	    (wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_OCV))
@@ -2318,9 +2705,20 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		/* Enable SSID protection based on the AP advertising support
 		 * for it to avoid potential interoperability issues with
 		 * incorrect AP behavior if we were to send an "unexpected"
-		 * RSNXE with multiple octets of payload. */
+		 * RSNXE with multiple octets of payload.
+		 *
+		 * Security Profile element preference (IEEE P802.11bn/D2.0,
+		 * 37.33):
+		 * bss_rsnx was already reassigned back to the AP's RSNXE
+		 * above (for wpa_sm_set_ap_rsnxe()), so also consult the
+		 * Security Profile element's unmasked copy here -- an AP
+		 * that strips this bit from its RSNXE still advertises the true
+		 * capability through the Security Profile element. */
 		ssid_prot = ieee802_11_rsnx_capab(
-			bss_rsnx, WLAN_RSNX_CAPAB_SSID_PROTECTION);
+			bss_rsnx, WLAN_RSNX_CAPAB_SSID_PROTECTION) ||
+			(bss && wpas_eppke_ap_rsnx_capab(
+				wpa_s, bss,
+				WLAN_RSNX_CAPAB_SSID_PROTECTION));
 		if (!skip_default_rsne)
 			wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SSID_PROTECTION,
 					 proto == WPA_PROTO_RSN && ssid_prot);
@@ -2338,9 +2736,20 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		 * advertising support for it to avoid potential
 		 * interoperability issues with incorrect AP behavior if we
 		 * were to send an "unexpected" RSNXE with multiple octets of
-		 * payload. */
+		 * payload.
+		 *
+		 * Security Profile element preference (IEEE P802.11bn/D2.0,
+		 * 37.33):
+		 * bss_rsnx was already reassigned back to the AP's RSNXE above
+		 * (for wpa_sm_set_ap_rsnxe()), so also consult the
+		 * Security Profile element's unmasked copy here -- an AP
+		 * that strips this bit from its RSNXE still advertises the true
+		 * capability through the Security Profile element. */
 		assoc_enc = ieee802_11_rsnx_capab(
-			bss_rsnx, WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION);
+			bss_rsnx, WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION) ||
+			(bss && wpas_eppke_ap_rsnx_capab(
+				wpa_s, bss,
+				WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION));
 		if (!skip_default_rsne)
 			wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_ASSOC_ENC,
 					 assoc_enc);
@@ -2363,8 +2772,136 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 			 ssid->sae_password_id && ssid->sae_password_id_change);
 #ifdef CONFIG_PMKSA_PRIVACY
 	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_PMKSA_CACHING_PRIVACY,
-			 ssid->pmksa_privacy);
+			 ssid->pmksa_privacy || ssid->security_profiles);
 #endif /* CONFIG_PMKSA_PRIVACY */
+
+	wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SECURITY_PROFILE_ACTIVE, false);
+
+	/*
+	 * Security Profile element - profile selection (IEEE P802.11bn/D2.0,
+	 * 37.33, Table 9-bb18).
+	 *
+	 * When the AP advertises the Security Profile element, the STA selects
+	 * a single profile number whose AKM and pairwise cipher match the
+	 * already-negotiated wpa_s->key_mgmt and wpa_s->pairwise_cipher, and
+	 * whose bit is set in the AP's Security Profile Bitmap.
+	 *
+	 * For SME in wpa_supplicant (WPA_DRIVER_FLAGS_SME): always run
+	 * selection.
+	 * For SME in driver: only run when the driver indicates Security
+	 *  Profile element support via WPA_DRIVER_FLAGS2_SECURITY_PROFILE.
+	 *  Without this flag, leave sel_security_profile = NULL so no element
+	 * is* built or sent.
+	 *
+	 * sel_security_profile is set here (or left at -1 if no matching
+	 * profile is found or the AP does not advertise the element).
+	 */
+	wpa_s->sel_security_profile = NULL;
+	wpa_sm_set_security_profile(wpa_s->wpa, NULL);
+	if (sel_sp) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"Security Profile: selected profile %d",
+			sel_sp->number);
+		wpa_s->sel_security_profile = sel_sp;
+		wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_SECURITY_PROFILE_ACTIVE,
+				 true);
+		wpa_sm_set_security_profile(wpa_s->wpa, sel_sp);
+	} else if (bss && wpas_security_profile_active(wpa_s)) {
+		const u8 *sp = wpa_bss_get_ie_ext(
+			bss, WLAN_EID_EXT_SECURITY_PROFILE);
+		u8 bitmap_len;
+		const u8 *bitmap;
+		bool eap_over_auth = false;
+		bool eppke = false;
+
+		if (!sp ||sp[1] < 3)
+			goto no_valid_sp;
+
+		/*
+		 * Element layout (from wpa_bss_get_ie_ext(), which returns
+		 * the full element starting at EID byte):
+		 *   [0] = 255 (EID_EXTENSION)
+		 *   [1] = Length
+		 *   [2] = 162 (EID_EXT_SECURITY_PROFILE)
+		 *   [3] = Reduced RSN Capabilities
+		 *   [4] = Security Profile Indication
+		 *         B0-B3 = Number Of Octets Of Bitmap
+		 *         B4-B7 = Number Of Vendor Profiles
+		 *   [5..] = Security Profile Bitmap
+		 */
+		bitmap_len = sp[4] & 0x0F;
+		bitmap = sp + 5;
+
+		if (sp[1] < 3 + bitmap_len)
+			goto no_valid_sp;
+
+		/*
+		 * Compute eap_over_auth to disambiguate 802.1X _AUTH profiles
+		 * (EAP over Authentication frames, profiles 3-7) from non-_AUTH
+		 * profiles (EAPOL frames, profiles 11-15). Both groups share
+		 * the same AKM, so this flag is the only distinguishing
+		 * parameter available without a new driver attribute. The
+		 * condition mirrors sme_check_802_1x_pmksa_caching() which sets
+		 * auth_1x->derive_ptk using the same three checks.
+		 *
+		 * For EPPKE sub-profiles (0-2), eap_over_auth is irrelevant:
+		 * the akmp field already carries the pre-authentication AKM.
+		 * Per IEEE P802.11bn/D2.0, Table 9-bb18, profiles 1 and 2 use
+		 * the SAE_EXT_KEY (hash-to-element) AKM variants specifically,
+		 * not the legacy SAE/FT-SAE AKMs (WPA_KEY_MGMT_EPPKE for
+		 * profile 0, WPA_KEY_MGMT_SAE_EXT_KEY for profile 1,
+		 * WPA_KEY_MGMT_FT_SAE_EXT_KEY for profile 2), so
+		 * security_profile_akm_matches() resolves the ambiguity without
+		 * any extra parameter.
+		 */
+#ifdef CONFIG_IEEE8021X_AUTH
+		if (ssid && ssid->eap_over_auth_frame) {
+			const u8 *bss_rsnxe =
+				wpa_bss_get_ie(bss, WLAN_EID_RSNX);
+
+			eap_over_auth =
+				ieee802_11_rsnx_capab(
+					bss_rsnxe,
+					WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION) &&
+				(wpa_s->drv_flags2 &
+				 WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION);
+		}
+#endif /* CONFIG_IEEE8021X_AUTH */
+
+#ifdef CONFIG_ENC_ASSOC
+		if (wpa_s->key_mgmt == WPA_KEY_MGMT_EPPKE ||
+		    ((wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_EPPKE) &&
+		     (sel & WPA_KEY_MGMT_EPPKE)))
+			eppke = true;
+#endif /* CONFIG_ENC_ASSOC */
+
+		wpa_s->sel_security_profile =
+			security_profile_select(
+				wpa_s->key_mgmt, wpa_s->pairwise_cipher,
+				eap_over_auth, eppke, bitmap, bitmap_len);
+
+		if (wpa_s->sel_security_profile) {
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"Security Profile: selected profile %d (key_mgmt=0x%x eap_over_auth=%d eppke=%d)",
+				wpa_s->sel_security_profile->number,
+				wpa_s->key_mgmt, eap_over_auth, eppke);
+			wpa_sm_set_param(wpa_s->wpa,
+					 WPA_PARAM_SECURITY_PROFILE_ACTIVE,
+					 true);
+		} else {
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"Security Profile: no matching profile found in AP bitmap (key_mgmt=0x%x pairwise=0x%x eap_over_auth=%d eppke=%d)",
+				wpa_s->key_mgmt, wpa_s->pairwise_cipher,
+				eap_over_auth, eppke);
+			wpas_connection_failed(wpa_s, wpa_s->pending_bssid,
+					       NULL);
+			wpa_supplicant_set_state(wpa_s, WPA_DISCONNECTED);
+			return -1;
+		}
+		wpa_sm_set_security_profile(wpa_s->wpa,
+					    wpa_s->sel_security_profile);
+	no_valid_sp:
+	}
 
 	if (!skip_default_rsne) {
 		if (wpa_sm_set_assoc_wpa_ie_default(wpa_s->wpa, wpa_ie,
@@ -2385,6 +2922,42 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_NO_WPA */
 	}
 
+	/*
+	 * Security Profile element (IEEE P802.11bn/D2.0, 9.4.2.369, 37.33).
+	 *
+	 * Build the element after the RSNE and RSNXE are finalised so that all
+	 * wpa_sm parameters (mfp, ocv, ext_key_id, assoc_encryption, etc.)
+	 * are fully committed before we read them via rsn_supp_capab(sm) and
+	 * wpa_sm_get_rsnxe_capab(sm). This guarantees that the Security Profile
+	 * element's Reduced RSN Capabilities and Extended RSN Capabilities
+	 * fields are identical to the values in the RSNE and RSNXE
+	 * respectively.
+	 *
+	 * The element is stored in wpa_s->security_profile and appended to
+	 * Authentication and (Re)Association Request frames by
+	 * sme_send_authentication() and sme_associate().
+	 */
+	wpa_s->security_profile_len = 0;
+	if (wpa_s->sel_security_profile) {
+		int ret;
+
+		ret = security_profile_build_sta(
+			wpa_s->wpa, wpa_s->sel_security_profile->number,
+			wpa_s->security_profile,
+			sizeof(wpa_s->security_profile));
+		if (ret > 0) {
+			wpa_s->security_profile_len = ret;
+			wpa_dbg(wpa_s, MSG_DEBUG,
+				"Security Profile element built: profile=%d len=%d",
+				wpa_s->sel_security_profile->number, ret);
+		} else {
+			wpa_msg(wpa_s, MSG_WARNING,
+				"Security Profile: failed to build element (profile=%d)",
+				wpa_s->sel_security_profile->number);
+			return -1;
+		}
+	}
+
 	if (0) {
 #ifdef CONFIG_DPP
 	} else if (wpa_s->key_mgmt == WPA_KEY_MGMT_DPP) {
@@ -2394,7 +2967,9 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 		wpa_sm_set_param(wpa_s->wpa, WPA_PARAM_DPP_PFS, ssid->dpp_pfs);
 #endif /* CONFIG_DPP2 */
 #endif /* CONFIG_DPP */
-	} else if (wpa_key_mgmt_wpa_psk(ssid->key_mgmt)) {
+	} else if (wpa_key_mgmt_wpa_psk(ssid->key_mgmt) &&
+		   !(wpas_security_profile_active(wpa_s) &&
+		     ssid->security_profiles)) {
 		int psk_set = 0;
 
 		if (wpa_key_mgmt_wpa_psk_no_sae(ssid->key_mgmt)) {
@@ -2403,7 +2978,7 @@ int wpa_supplicant_set_suites(struct wpa_supplicant *wpa_s,
 			if (wpa_supplicant_get_psk(wpa_s, bss, ssid,
 						   psk) == 0) {
 				wpa_sm_set_pmk(wpa_s->wpa, psk, PMK_LEN, NULL,
-					       NULL);
+					       NULL, PASN_GROUP_NOT_SPECIFIED);
 				psk_set = 1;
 			}
 			forced_memzero(psk, sizeof(psk));
@@ -2754,6 +3329,7 @@ void wpa_s_setup_sae_pt(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 	size_t password_id_len = ssid->sae_password_id ?
 		os_strlen(ssid->sae_password_id) : 0;
 	struct wpabuf_array *ids;
+	bool sec_prof_sae;
 
 	if (!groups || groups[0] <= 0)
 		groups = default_groups;
@@ -2764,10 +3340,13 @@ void wpa_s_setup_sae_pt(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid,
 
 	sae_pwe = wpas_get_ssid_sae_pwe(wpa_s, ssid);
 
+	sec_prof_sae = wpas_security_profile_active(wpa_s) &&
+		sec_prof_list_has_sae(ssid->security_profiles);
+
 	if (!password ||
-	    !wpa_key_mgmt_sae(ssid->key_mgmt) ||
+	    (!wpa_key_mgmt_sae(ssid->key_mgmt) && !sec_prof_sae) ||
 	    (sae_pwe == SAE_PWE_HUNT_AND_PECK && !ssid->sae_password_id &&
-	     !wpa_key_mgmt_sae_ext_key(ssid->key_mgmt) &&
+	     !(wpa_key_mgmt_sae_ext_key(ssid->key_mgmt) || sec_prof_sae) &&
 	     !force &&
 	     !sae_pk_valid_password(password)) ||
 	    sae_pwe == SAE_PWE_FORCE_HUNT_AND_PECK) {
@@ -3828,8 +4407,6 @@ static bool wpas_set_802_1x_auth_alg(struct wpa_supplicant *wpa_s,
 				     struct wpa_ssid *ssid,
 				     struct wpa_driver_associate_params *params)
 {
-	const u8 *rsnxe;
-
 	if (!ssid->eap_over_auth_frame ||
 	    !(wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_802_1X_AUTH) ||
 	    !wpa_key_mgmt_wpa_ieee8021x(ssid->key_mgmt &
@@ -3845,9 +4422,8 @@ static bool wpas_set_802_1x_auth_alg(struct wpa_supplicant *wpa_s,
 					~WPA_KEY_MGMT_IEEE8021X))
 		return false;
 
-	rsnxe = wpa_bss_get_ie(bss, WLAN_EID_RSNX);
-	if (ieee802_11_rsnx_capab(rsnxe,
-				  WLAN_RSNX_CAPAB_802_1X_IN_AUTH_FRAMES)) {
+	if (wpas_eppke_ap_rsnx_capab(wpa_s, bss,
+				     WLAN_RSNX_CAPAB_802_1X_IN_AUTH_FRAMES)) {
 		wpa_dbg(wpa_s, MSG_DEBUG,
 			"Using IEEE 802.1X authentication using Authentication frames");
 		return true;
@@ -3858,13 +4434,48 @@ static bool wpas_set_802_1x_auth_alg(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_IEEE8021X_AUTH */
 
 
+/*
+ * wpas_eppke_ap_rsnx_capab - Check an RSNX capability bit for EPPKE purposes,
+ * consulting both the AP's RSNXE and the (unmasked) Extended RSN
+ * Capabilities embedded in its Security Profile element.
+ *
+ * The AP is expected to build the Security Profile element's Extended RSN
+ * Capabilities field from the full, unmasked RSNXE while it might mask some
+ * capabilities from the RSNXE. So a deployment that intentionally strips a
+ * capability bit from the RSNXE can still advertise the true capability through
+ * the Security Profile element, per IEEE P802.11bn/D2.0, 37.33 where the
+ * Security Profile element takes precedence over the RSNXE. Treat the bit as
+ * present if either source sets it.
+ */
+bool wpas_eppke_ap_rsnx_capab(struct wpa_supplicant *wpa_s,
+			      struct wpa_bss *bss, unsigned int capab)
+{
+	const u8 *ap_rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
+
+	if (ieee802_11_rsnx_capab(ap_rsnxe, capab))
+		return true;
+
+	if (wpas_security_profile_active(wpa_s)) {
+		const u8 *sp_rsnx;
+		size_t sp_rsnx_len;
+		const u8 *sp = wpa_bss_get_ie_ext(
+			bss, WLAN_EID_EXT_SECURITY_PROFILE);
+
+		sp_rsnx = security_profile_get_rsnx(sp, &sp_rsnx_len);
+		if (sp_rsnx &&
+		    ieee802_11_rsnx_capab_len(sp_rsnx, sp_rsnx_len, capab))
+			return true;
+	}
+
+	return false;
+}
+
+
 #ifdef CONFIG_ENC_ASSOC
 
 bool wpas_eppke_ap_capable(struct wpa_supplicant *wpa_s,
 				  struct wpa_bss *bss, bool unauth_eppke)
 {
-	const u8 *ap_rsnxe;
-
 	if (!(wpa_s->drv_flags2 &
 	      WPA_DRIVER_FLAGS2_ASSOCIATION_FRAME_ENCRYPTION)) {
 		wpa_printf(MSG_DEBUG,
@@ -3872,22 +4483,23 @@ bool wpas_eppke_ap_capable(struct wpa_supplicant *wpa_s,
 		return false;
 	}
 
-	ap_rsnxe = wpa_bss_get_rsnxe(wpa_s, bss, NULL, false);
-
-	if (!ieee802_11_rsnx_capab(ap_rsnxe, WLAN_RSNX_CAPAB_KEK_IN_PASN)) {
+	if (!wpas_eppke_ap_rsnx_capab(wpa_s, bss, WLAN_RSNX_CAPAB_KEK_IN_PASN))
+	{
 		wpa_printf(MSG_DEBUG, "EPPKE: AP does not support KEK_IN_PASN");
 		return false;
 	}
 
-	if (!ieee802_11_rsnx_capab(ap_rsnxe,
-				   WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION)) {
+	if (!wpas_eppke_ap_rsnx_capab(wpa_s, bss,
+					WLAN_RSNX_CAPAB_ASSOC_FRAME_ENCRYPTION))
+	{
 		wpa_printf(MSG_DEBUG,
 			   "EPPKE: AP does not support association frame encryption");
 		return false;
 	}
 
 	if (unauth_eppke &&
-	    !ieee802_11_rsnx_capab(ap_rsnxe, WLAN_RSNX_CAPAB_UNAUTH_EPPKE)) {
+	    !wpas_eppke_ap_rsnx_capab(wpa_s, bss, WLAN_RSNX_CAPAB_UNAUTH_EPPKE))
+	{
 		wpa_printf(MSG_DEBUG,
 			   "EPPKE: AP does not support unauthenticated EPPKE");
 		return false;
@@ -3904,6 +4516,24 @@ static bool wpas_set_eppke_auth_alg(struct wpa_supplicant *wpa_s,
 {
 	const u8 *rsn;
 	struct wpa_ie_data ied;
+
+	if (!(wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_EPPKE))
+		return false;
+
+	if (wpas_security_profile_active(wpa_s) && ssid->security_profiles) {
+		const u8 *bss_sp;
+		const struct security_profile_entry *sel_sp = NULL;
+
+		bss_sp = wpa_bss_get_ie_ext(bss, WLAN_EID_EXT_SECURITY_PROFILE);
+
+		if (bss_sp)
+			sel_sp = security_profile_select_best(
+				bss_sp, ssid->security_profiles);
+		if (sel_sp && (sel_sp->key_mgmt & WPA_KEY_MGMT_EPPKE)) {
+			params->eppke_supported = true;
+			return true;
+		}
+	}
 
 	if (!wpa_key_mgmt_eppke(ssid->key_mgmt) ||
 	    !(wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_EPPKE))
@@ -4305,7 +4935,7 @@ static u8 * wpas_populate_assoc_ies(
 	} else
 #endif /* CONFIG_TESTING_OPTIONS */
 	if (algs == WPA_AUTH_ALG_OPEN &&
-	    ssid->key_mgmt == WPA_KEY_MGMT_OWE &&
+	    wpa_s->key_mgmt == WPA_KEY_MGMT_OWE &&
 	    !(wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_OWE_OFFLOAD_STA)) {
 		struct wpabuf *owe_ie;
 		u16 group;
@@ -4415,6 +5045,56 @@ pfs_fail:
 	    wpa_s->rsnxe_len <= max_wpa_ie_len - wpa_ie_len) {
 		os_memcpy(wpa_ie + wpa_ie_len, wpa_s->rsnxe, wpa_s->rsnxe_len);
 		wpa_ie_len += wpa_s->rsnxe_len;
+	}
+
+	/* Security Profile element - driver-SME path */
+#ifdef CONFIG_TESTING_OPTIONS
+	if (wpa_s->sec_prof_override_assoc &&
+	    wpabuf_len(wpa_s->sec_prof_override_assoc) <=
+	    max_wpa_ie_len - wpa_ie_len) {
+		wpa_printf(MSG_DEBUG,
+			   "TESTING: Security Profile element AssocReq override");
+		os_memcpy(wpa_ie + wpa_ie_len,
+			  wpabuf_head(wpa_s->sec_prof_override_assoc),
+			  wpabuf_len(wpa_s->sec_prof_override_assoc));
+		wpa_ie_len += wpabuf_len(wpa_s->sec_prof_override_assoc);
+	} else
+#endif /* CONFIG_TESTING_OPTIONS */
+	if (wpa_s->security_profile_len > 0 &&
+	    wpa_s->sel_security_profile &&
+	    wpas_security_profile_active(wpa_s) &&
+	    wpa_s->security_profile_len <= max_wpa_ie_len - wpa_ie_len) {
+		os_memcpy(wpa_ie + wpa_ie_len,
+			  wpa_s->security_profile,
+			  wpa_s->security_profile_len);
+		wpa_ie_len += wpa_s->security_profile_len;
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"Security Profile element appended to connect elements (profile=%d)",
+			wpa_s->sel_security_profile->number);
+	} else if (wpa_s->security_profile_len > 0 &&
+		   !wpas_security_profile_active(wpa_s)) {
+		wpa_dbg(wpa_s, MSG_DEBUG,
+			"Security Profile: driver does not support element - omitting from connect elements");
+	} else if (wpas_security_profile_active(wpa_s)) {
+		u8 sp_elem[10];
+		int sp_len;
+
+		if (bss &&
+		    wpa_bss_get_ie_ext(bss, WLAN_EID_EXT_SECURITY_PROFILE)) {
+			wpa_printf(MSG_INFO,
+				   "Both STA and AP enables security profiles, but no matching security profile - do not try to connect with this AP");
+			os_free(wpa_ie);
+			return NULL;
+		}
+
+		sp_len = security_profile_build_empty(sp_elem, sizeof(sp_elem));
+		if (sp_len > 0 &&
+		    (size_t) sp_len <= max_wpa_ie_len - wpa_ie_len) {
+			os_memcpy(wpa_ie + wpa_ie_len, sp_elem, sp_len);
+			wpa_ie_len += sp_len;
+			wpa_printf(MSG_DEBUG,
+				   "An empty Security Profile element appended to connect elements");
+		}
 	}
 
 #ifndef CONFIG_NO_ROBUST_AV
@@ -4786,6 +5466,9 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 	wpa_sm_set_assoc_rsnxe(wpa_s->wpa, NULL, 0);
 #endif /* CONFIG_NO_WPA */
 	wpa_s->rsnxe_len = 0;
+	wpa_s->sel_security_profile = NULL;
+	wpa_sm_set_security_profile(wpa_s->wpa, NULL);
+	wpa_s->security_profile_len = 0;
 #ifndef CONFIG_NO_ROBUST_AV
 	wpa_s->mscs_setup_done = false;
 #endif /* CONFIG_NO_ROBUST_AV */
@@ -5159,6 +5842,8 @@ static void wpas_start_assoc_cb(struct wpa_radio_work *work, int deinit)
 #ifdef CONFIG_SAE
 	params.sae_pwe = wpas_get_ssid_sae_pwe(wpa_s, ssid);
 #endif /* CONFIG_SAE */
+
+	params.security_profile_active = wpas_security_profile_active(wpa_s);
 
 	ret = wpa_drv_associate(wpa_s, &params);
 	forced_memzero(psk, sizeof(psk));
@@ -6086,6 +6771,30 @@ static int owe_trans_ssid_match(struct wpa_supplicant *wpa_s, const u8 *bssid,
 #endif /* CONFIG_OWE */
 
 
+static bool wpas_get_ssid_match_bssid(const struct wpa_supplicant *wpa_s,
+				      const struct wpa_ssid *ssid,
+				      const u8 *assoc_bssid)
+{
+	int link_id;
+
+	if (!ssid->bssid_set)
+		return true;
+
+	if (ether_addr_equal(assoc_bssid, ssid->bssid))
+		return true;
+
+	if (!wpa_s->valid_links)
+		return false;
+
+	for_each_link(wpa_s->valid_links, link_id) {
+		if (ether_addr_equal(wpa_s->links[link_id].bssid,
+				     ssid->bssid))
+			return true;
+	}
+
+	return false;
+}
+
 /**
  * wpa_supplicant_get_ssid - Get a pointer to the current network structure
  * @wpa_s: Pointer to wpa_supplicant data
@@ -6124,15 +6833,13 @@ struct wpa_ssid * wpa_supplicant_get_ssid(struct wpa_supplicant *wpa_s)
 		      (!entry->ssid ||
 		       os_memcmp(ssid, entry->ssid, ssid_len) == 0)) ||
 		     wired) &&
-		    (wpa_s->valid_links || !entry->bssid_set ||
-		     ether_addr_equal(bssid, entry->bssid)))
+		    wpas_get_ssid_match_bssid(wpa_s, entry, bssid))
 			return entry;
 #ifdef CONFIG_WPS
 		if (!wpas_network_disabled(wpa_s, entry) &&
 		    (entry->key_mgmt & WPA_KEY_MGMT_WPS) &&
 		    (entry->ssid == NULL || entry->ssid_len == 0) &&
-		    (wpa_s->valid_links || !entry->bssid_set ||
-		     ether_addr_equal(bssid, entry->bssid)))
+		    wpas_get_ssid_match_bssid(wpa_s, entry, bssid))
 			return entry;
 #endif /* CONFIG_WPS */
 
@@ -6141,14 +6848,13 @@ struct wpa_ssid * wpa_supplicant_get_ssid(struct wpa_supplicant *wpa_s)
 		    (entry->ssid &&
 		     owe_trans_ssid_match(wpa_s, bssid, entry->ssid,
 					  entry->ssid_len)) &&
-		    (wpa_s->valid_links || !entry->bssid_set ||
-		     ether_addr_equal(bssid, entry->bssid)))
+		    wpas_get_ssid_match_bssid(wpa_s, entry, bssid))
 			return entry;
 #endif /* CONFIG_OWE */
 
 		if (!wpas_network_disabled(wpa_s, entry) && entry->bssid_set &&
 		    entry->ssid_len == 0 &&
-		    ether_addr_equal(bssid, entry->bssid))
+		    wpas_get_ssid_match_bssid(wpa_s, entry, bssid))
 			return entry;
 
 		entry = entry->next;
@@ -7582,6 +8288,17 @@ static void radio_start_next_work(void *eloop_ctx, void *timeout_ctx)
 }
 
 
+void radio_remove_work(struct wpa_supplicant *wpa_s,
+		       struct wpa_radio_work *work)
+{
+	wpa_dbg(wpa_s, MSG_DEBUG, "Remove radio work '%s'@%p%s",
+		work->type, work, work->started ? " (started)" : "");
+	dl_list_del(&work->list);
+	work->cb(work, 1);
+	radio_work_free(work);
+}
+
+
 /*
  * This function removes both started and pending radio works running on
  * the provided interface's radio.
@@ -7608,11 +8325,7 @@ void radio_remove_works(struct wpa_supplicant *wpa_s,
 		if (!remove_all && work->wpa_s != wpa_s)
 			continue;
 
-		wpa_dbg(wpa_s, MSG_DEBUG, "Remove radio work '%s'@%p%s",
-			work->type, work, work->started ? " (started)" : "");
-		dl_list_del(&work->list);
-		work->cb(work, 1);
-		radio_work_free(work);
+		radio_remove_work(wpa_s, work);
 	}
 
 	/* in case we removed the started work */
@@ -7916,6 +8629,8 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 
 	if (iface->confname) {
 #ifdef CONFIG_BACKEND_FILE
+		const char *prefix = wpa_s->global->params.conf_file_prefix;
+
 		wpa_s->confname = os_rel2abs_path(iface->confname);
 		if (wpa_s->confname == NULL) {
 			wpa_printf(MSG_ERROR, "Failed to get absolute path "
@@ -7925,6 +8640,20 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		}
 		wpa_printf(MSG_DEBUG, "Configuration file '%s' -> '%s'",
 			   iface->confname, wpa_s->confname);
+		if (prefix &&
+		    os_strncmp(wpa_s->confname, prefix,
+			       os_strlen(prefix)) != 0)	{
+			wpa_printf(MSG_ERROR,
+				   "Specified configuration file (%s) does not start with the required prefix (%s)",
+				   wpa_s->confname, prefix);
+			return -1;
+		}
+		if (prefix && os_strstr(wpa_s->confname, "/../")) {
+			wpa_printf(MSG_ERROR,
+				   "Specified configuration file (%s) has /../ in it",
+				   wpa_s->confname);
+			return -1;
+		}
 #else /* CONFIG_BACKEND_FILE */
 		wpa_s->confname = os_strdup(iface->confname);
 #endif /* CONFIG_BACKEND_FILE */
@@ -8339,6 +9068,14 @@ static int wpa_supplicant_init_iface(struct wpa_supplicant *wpa_s,
 		wpa_msg(wpa_s, MSG_ERROR, "Failed to init NAN");
 		return -1;
 	}
+
+	/* Initialize NAN pairing stack for non-management interfaces.
+	 * NAN discovery (nan_de) is initialized separately on NAN enable.
+	 */
+#ifdef CONFIG_NAN
+	if (!wpa_s->nan_mgmt && !wpa_s->nan)
+		wpas_nan_init(wpa_s);
+#endif /* CONFIG_NAN */
 
 	return 0;
 }
@@ -8797,6 +9534,7 @@ struct wpa_global * wpa_supplicant_init(struct wpa_params *params)
 	global->params.wait_for_monitor = params->wait_for_monitor;
 	global->params.dbus_ctrl_interface = params->dbus_ctrl_interface;
 	global->params.show_details = params->show_details;
+	global->params.conf_file_prefix = params->conf_file_prefix;
 
 	if (params->pid_file) {
 		global->params.pid_file = os_strdup(params->pid_file);
@@ -9476,6 +10214,7 @@ int wpas_network_disabled(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid)
 #endif /* CONFIG_WEP */
 
 	if (wpa_key_mgmt_wpa_psk(ssid->key_mgmt) && !ssid->psk_set &&
+	    !(wpas_security_profile_active(wpa_s) && ssid->security_profiles) &&
 	    (!ssid->passphrase || ssid->ssid_len != 0) && !ssid->ext_psk &&
 	    !(wpa_key_mgmt_sae(ssid->key_mgmt) &&
 	      (ssid->passphrase || ssid->sae_password || ssid->pmk_valid)) &&
@@ -9519,6 +10258,10 @@ int wpas_get_ssid_pmf(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid)
 			return NO_MGMT_FRAME_PROTECTION;
 		}
 
+		if (ssid && ssid->security_profiles &&
+		    wpas_security_profile_active(wpa_s))
+			return MGMT_FRAME_PROTECTION_OPTIONAL;
+
 		if (ssid &&
 		    (ssid->key_mgmt &
 		     ~(WPA_KEY_MGMT_NONE | WPA_KEY_MGMT_WPS |
@@ -9546,13 +10289,64 @@ int wpas_get_ssid_pmf(struct wpa_supplicant *wpa_s, struct wpa_ssid *ssid)
 }
 
 
+bool sec_prof_list_has_epp(const int *numbers)
+{
+	int i;
+
+	if (!numbers)
+		return false;
+
+	for (i = 0; numbers[i] != -1; i++) {
+		const struct security_profile_entry *e;
+
+		e = sec_prof_get(numbers[i]);
+		if (e)
+			return e->pmksa_caching_privacy;
+	}
+
+	return false;
+}
+
+
 #ifdef CONFIG_SAE
+
+bool sec_prof_list_has_sae(const int *numbers)
+{
+	int i;
+
+	if (!numbers)
+		return false;
+
+	for (i = 0; numbers[i] != -1; i++) {
+		const struct security_profile_entry *e;
+
+		e = sec_prof_get(numbers[i]);
+		if (e && wpa_key_mgmt_sae_ext_key(e->key_mgmt))
+			return true;
+	}
+
+	return false;
+}
+
 
 enum sae_pwe wpas_get_ssid_sae_pwe(struct wpa_supplicant *wpa_s,
 				   struct wpa_ssid *ssid)
 {
-	if (!ssid || ssid->sae_pwe == DEFAULT_SAE_PWE)
+	if (!ssid)
 		return wpa_s->conf->sae_pwe;
+	if ((!wpas_security_profile_active(wpa_s) ||
+	     !sec_prof_list_has_sae(ssid->security_profiles)) &&
+	    ssid->sae_pwe == DEFAULT_SAE_PWE)
+		return wpa_s->conf->sae_pwe;
+
+	if (ssid->sae_pwe != SAE_PWE_FORCE_HUNT_AND_PECK &&
+	    wpas_security_profile_active(wpa_s) &&
+	    sec_prof_list_has_sae(ssid->security_profiles)) {
+		if (ssid->sae_pwe == SAE_PWE_HUNT_AND_PECK)
+			return SAE_PWE_BOTH;
+		return SAE_PWE_HASH_TO_ELEMENT;
+	}
+
 	return ssid->sae_pwe;
 }
 
@@ -10497,4 +11291,51 @@ void wpas_configure_frame_filters(struct wpa_supplicant *wpa_s)
 			WPA_DATA_FRAME_FILTER_FLAG_NA;
 
 	wpa_drv_configure_frame_filters(wpa_s, filter);
+}
+
+
+/**
+ * wpas_security_profile_active - Is Security Profile element active?
+ * @wpa_s: Pointer to wpa_supplicant data
+ *
+ * Returns true when Security Profile element functionality is enabled:
+ *   - wpa_supplicant-SME path (WPA_DRIVER_FLAGS_SME): always active when the
+ *     AP
+ *     advertises the element.
+ *   - Driver-SME path: only active when the driver explicitly indicates
+ *     support via WPA_DRIVER_FLAGS2_SECURITY_PROFILE.
+ *     Without this flag the feature is fully disabled even if the AP
+ *     advertises the Security Profile element.
+ *
+ * Use this helper as the single gate for all Security Profile element parsing,
+ * override, and validation logic so that the driver-SME path without driver
+ * support behaves identically to a legacy STA.
+ */
+bool wpas_security_profile_active(struct wpa_supplicant *wpa_s)
+{
+	if (!wpa_s->conf->security_profiles)
+		return false;
+	if (wpa_s->drv_flags & WPA_DRIVER_FLAGS_SME)
+		return true; /* wpa_supplicant-SME: always active */
+	/* driver-SME: only when driver advertises support */
+	return !!(wpa_s->drv_flags2 & WPA_DRIVER_FLAGS2_SECURITY_PROFILE);
+}
+
+
+bool sec_prof_list_has_eap_over_auth(const int *numbers)
+{
+	int i;
+
+	if (!numbers)
+		return false;
+
+	for (i = 0; numbers[i] != -1; i++) {
+		const struct security_profile_entry *e;
+
+		e = sec_prof_get(numbers[i]);
+		if (e && e->ieee8021x_auth_frame)
+			return true;
+	}
+
+	return false;
 }

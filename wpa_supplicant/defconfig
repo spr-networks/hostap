@@ -711,3 +711,8 @@ CONFIG_DPP2=y
 # affecting deployments that run wpa_supplicant as a non-root user with shared
 # libraries in a custom directory owned by that user.
 #CONFIG_TLS_ENGINE_TRUSTED_PATH=y
+
+# Post quantum cryptography (IEEE P802.11bt)
+# Note: These features are experimental and still changing; do not enable for
+# production use.
+#CONFIG_PQC=y

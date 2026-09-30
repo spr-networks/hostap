@@ -121,6 +121,17 @@ struct wpa_sm {
 	unsigned int pmksa_privacy:1;
 	unsigned int eap_over_auth_frame:1;
 
+	/*
+	 * Security Profile element state (IEEE P802.11bn/D2.0, 9.4.2.369,
+	 * 37.33).
+	 *
+	 * security_profile_active: mirrors wpas_security_profile_active().
+	 * Set to 1 for wpa_supplicant-SME always, or for driver-SME only
+	 * when the driver indicates support for it. When 0, all Security
+	 * Profile element parsing and validation is skipped in wpa.c.
+	 */
+	unsigned int security_profile_active:1;
+
 	u8 *assoc_wpa_ie; /* Own WPA/RSN IE from (Re)AssocReq */
 	size_t assoc_wpa_ie_len;
 	u8 *assoc_rsnxe; /* Own RSNXE from (Re)AssocReq */
@@ -130,6 +141,15 @@ struct wpa_sm {
 	u8 *ap_rsne_override, *ap_rsne_override_2, *ap_rsnxe_override;
 	size_t ap_rsne_override_len, ap_rsne_override_2_len,
 		ap_rsnxe_override_len;
+
+	/*
+	 * ap_security_profile / ap_security_profile_len: copy of the
+	 * Security Profile element from the AP's Beacon/Probe Response frame
+	 * stored for EAPOL-Key msg 3/4 or encrypted (Re)Association Response
+	 * frame comparison.
+	 */
+	u8 *ap_security_profile;
+	size_t ap_security_profile_len;
 
 #ifdef CONFIG_TDLS
 	struct wpa_tdls_peer *tdls;
@@ -184,6 +204,7 @@ struct wpa_sm {
 	 */
 	struct pasn_ft_r1kh *pasn_r1kh;
 	unsigned int n_pasn_r1kh;
+	u16 pasn_group;
 #endif /* CONFIG_PASN */
 #endif /* CONFIG_IEEE80211R */
 
@@ -206,6 +227,11 @@ struct wpa_sm {
 	unsigned int eapol_2_key_info_set_mask;
 	bool encrypt_eapol_m2;
 	bool encrypt_eapol_m4;
+	/*
+	 * Number of random PMKIDs to inject into the RSNE when no valid
+	 * PMKSA is available.
+	 */
+	unsigned int test_random_pmkid_count;
 #endif /* CONFIG_TESTING_OPTIONS */
 
 #ifdef CONFIG_FILS
@@ -257,8 +283,22 @@ struct wpa_sm {
 	int last_kck_eapol_key_ver;
 	u8 last_kck_aa[ETH_ALEN];
 	int last_eapol_key_ver;
+
+	bool wnm_sleep_mode;
+
+	const struct security_profile_entry *security_profile;
 };
 
+
+static inline unsigned int
+wpa_sm_test_random_pmkid_count(const struct wpa_sm *sm)
+{
+#ifdef CONFIG_TESTING_OPTIONS
+	return sm ? sm->test_random_pmkid_count : 0;
+#else /* CONFIG_TESTING_OPTIONS */
+	return 0;
+#endif /* CONFIG_TESTING_OPTIONS */
+}
 
 static inline void wpa_sm_set_state(struct wpa_sm *sm, enum wpa_states state)
 {

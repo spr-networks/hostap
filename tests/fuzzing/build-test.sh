@@ -16,6 +16,7 @@ for i in *; do
 	cd $i
 	make clean
 	make QUIET=1 -j$JOBS || error
+	make test || error
 	make clean
 	cd ..
     fi

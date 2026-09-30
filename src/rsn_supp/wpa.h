@@ -147,6 +147,7 @@ enum wpa_sm_conf_params {
 	WPA_PARAM_SAE_PW_ID_CHANGE,
 	WPA_PARAM_ASSOC_ENC,
 	WPA_PARAM_PMKSA_CACHING_PRIVACY,
+	WPA_PARAM_SECURITY_PROFILE_ACTIVE,
 };
 
 enum wpa_rsn_override {
@@ -202,8 +203,9 @@ struct wpa_sm * wpa_sm_init(struct wpa_sm_ctx *ctx);
 void wpa_sm_deinit(struct wpa_sm *sm);
 void wpa_sm_notify_assoc(struct wpa_sm *sm, const u8 *bssid);
 void wpa_sm_notify_disassoc(struct wpa_sm *sm);
+void wpa_sm_notify_wnm_sleep_mode(struct wpa_sm *sm, bool active);
 void wpa_sm_set_pmk(struct wpa_sm *sm, const u8 *pmk, size_t pmk_len,
-		    const u8 *pmkid, const u8 *bssid);
+		    const u8 *pmkid, const u8 *bssid, u16 pasn_group);
 void wpa_sm_set_pmk_from_pmksa(struct wpa_sm *sm);
 void wpa_sm_set_fast_reauth(struct wpa_sm *sm, int fast_reauth);
 void wpa_sm_set_scard_ctx(struct wpa_sm *sm, void *scard_ctx);
@@ -219,12 +221,16 @@ int wpa_sm_set_assoc_wpa_ie_default(struct wpa_sm *sm, u8 *wpa_ie,
 int wpa_sm_set_assoc_rsnxe_default(struct wpa_sm *sm, u8 *rsnxe,
 				   size_t *rsnxe_len);
 int wpa_sm_set_assoc_rsnxe(struct wpa_sm *sm, const u8 *ie, size_t len);
+int wpa_sm_set_security_profile(struct wpa_sm *sm,
+				const struct security_profile_entry *sp);
 int wpa_sm_set_ap_wpa_ie(struct wpa_sm *sm, const u8 *ie, size_t len);
 int wpa_sm_set_ap_rsn_ie(struct wpa_sm *sm, const u8 *ie, size_t len);
 int wpa_sm_set_ap_rsnxe(struct wpa_sm *sm, const u8 *ie, size_t len);
 int wpa_sm_set_ap_rsne_override(struct wpa_sm *sm, const u8 *ie, size_t len);
 int wpa_sm_set_ap_rsne_override_2(struct wpa_sm *sm, const u8 *ie, size_t len);
 int wpa_sm_set_ap_rsnxe_override(struct wpa_sm *sm, const u8 *ie, size_t len);
+int wpa_sm_set_ap_security_profile(struct wpa_sm *sm, const u8 *elem,
+				   size_t len);
 int wpa_sm_get_mib(struct wpa_sm *sm, char *buf, size_t buflen);
 
 int wpa_sm_set_param(struct wpa_sm *sm, enum wpa_sm_conf_params param,
@@ -313,9 +319,13 @@ static inline void wpa_sm_notify_disassoc(struct wpa_sm *sm)
 {
 }
 
+static inline void wpa_sm_notify_wnm_sleep_mode(struct wpa_sm *sm, bool active)
+{
+}
+
 static inline void wpa_sm_set_pmk(struct wpa_sm *sm, const u8 *pmk,
 				  size_t pmk_len, const u8 *pmkid,
-				  const u8 *bssid)
+				  const u8 *bssid, u16 pasn_group)
 {
 }
 
@@ -367,6 +377,13 @@ static inline int wpa_sm_set_assoc_wpa_ie_default(struct wpa_sm *sm,
 	return -1;
 }
 
+static inline int
+wpa_sm_set_assoc_security_profile(struct wpa_sm *sm,
+				  const struct security_profile_entry *sp)
+{
+	return -1;
+}
+
 static inline int wpa_sm_set_ap_wpa_ie(struct wpa_sm *sm, const u8 *ie,
 				       size_t len)
 {
@@ -399,6 +416,13 @@ static inline int wpa_sm_set_ap_rsne_override_2(struct wpa_sm *sm, const u8 *ie,
 
 static inline int wpa_sm_set_ap_rsnxe_override(struct wpa_sm *sm, const u8 *ie,
 					       size_t len)
+{
+	return -1;
+}
+
+static inline int wpa_sm_set_ap_security_profile(struct wpa_sm *sm,
+						 const u8 *elem,
+						 size_t len)
 {
 	return -1;
 }
@@ -675,6 +699,7 @@ void wpa_sm_set_test_assoc_ie(struct wpa_sm *sm, struct wpabuf *buf);
 void wpa_sm_set_test_eapol_m2_elems(struct wpa_sm *sm, struct wpabuf *buf);
 void wpa_sm_set_test_eapol_m4_elems(struct wpa_sm *sm, struct wpabuf *buf);
 const u8 * wpa_sm_get_anonce(struct wpa_sm *sm);
+void wpa_sm_set_test_random_pmkid_count(struct wpa_sm *sm, unsigned int count);
 int wpa_sm_set_test_rsnxe_data(struct wpa_sm *sm, struct wpabuf *data,
 			       struct wpabuf *mask);
 unsigned int wpa_sm_get_key_mgmt(struct wpa_sm *sm);

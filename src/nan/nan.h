@@ -17,9 +17,23 @@ struct nan_cluster_config;
 enum nan_reason;
 struct ieee80211_mgmt;
 
+enum nan_nik_type {
+	NAN_NIK_TYPE_PEER,
+	NAN_NIK_TYPE_SELF,
+	NAN_NIK_TYPE_GROUP,
+};
+
 struct nan_de_pmkid {
 	struct dl_list list;
 	u8 pmkid[PMKID_LEN];
+};
+
+
+enum nan_tag_type {
+	NAN_TAG_TYPE_SN,  /* Source Nonce Tag      - self NIK */
+	NAN_TAG_TYPE_DN,  /* Destination Nonce Tag - peer NIK */
+	NAN_TAG_TYPE_GN,  /* Group Nonce Tag       - GIK */
+	NAN_TAG_TYPE_PN,  /* Pairing Nonce Tag     - PIK-based rediscovery */
 };
 
 /*
@@ -631,9 +645,30 @@ struct nan_config {
 	 *     Wi-Fi Aware spec v4.0, Table 128 (NPBA format).
 	 * @handle: Service handle
 	 * @requestor_instance_id: Requestor instance ID
+	 * @locale: Pairing Setup Info 'locale' value from the PBEA (or NULL)
+	 * @vendor_name: Pairing Setup Info 'vendorName' value (or NULL)
+	 * @model_name: Pairing Setup Info 'modelName' value (or NULL)
+	 * @pairing_name: Pairing Setup Info 'pairingName' value (or NULL)
 	 */
 	void (*bootstrap_request)(void *ctx, const u8 *peer_nmi, u16 pbm,
-				  int handle, u8 requestor_instance_id);
+				  int handle, u8 requestor_instance_id,
+				  const char *locale, const char *vendor_name,
+				  const char *model_name,
+				  const char *pairing_name);
+
+	/**
+	 * get_pbea_info - Get PBEA fields for a service
+	 * @ctx: Callback context from cb_ctx
+	 * @handle: Service handle for which to retrieve PBEA fields
+	 * @extended_pbm: On success, extended PBM value
+	 * @pairing_setup_info: On success, pointer to pairing setup info data
+	 *	(may be NULL)
+	 * @pairing_setup_info_len: On success, length of pairing setup info
+	 * Returns: 0 on success, -1 on failure
+	 */
+	int (*get_pbea_info)(void *ctx, int handle, u16 *extended_pbm,
+			     const u8 **pairing_setup_info,
+			     u16 *pairing_setup_info_len);
 
 	/**
 	 * bootstrap_completed - Notify about completed bootstrap
@@ -657,10 +692,12 @@ struct nan_config {
 	 * @attrs: Attributes to include in the Follow-up message
 	 * @handle: Service handle for which the follow-up is sent
 	 * @req_instance_id: Peer's service instance ID
+	 * @peer_freq: Peer's discovery frequency; non-zero to send the
+	 *             follow-up off-channel, 0 to use the sync/DW path
 	 */
 	int (*transmit_followup)(void *ctx, const u8 *peer_nmi,
 				 const struct wpabuf *attrs, int handle,
-				 u8 req_instance_id);
+				 u8 req_instance_id, unsigned int peer_freq);
 
 	/**
 	 * get_supported_bootstrap_methods - Get supported bootstrap methods
@@ -672,13 +709,23 @@ struct nan_config {
 	u16 (*get_supported_bootstrap_methods)(void *ctx, int handle);
 
 	/**
+	 * get_cipher_suites_list - Get cipher suite list for a service
+	 * @ctx: Callback context from cb_ctx
+	 * @handle: Service handle
+	 * Returns: Cipher suite list configured for the service, or NULL
+	 */
+	const int * (*get_cipher_suites_list)(void *ctx, int handle);
+
+	/**
 	 * send_pasn - Transmit a PASN Authentication frame
 	 * @ctx: Callback context from cb_ctx
 	 * @data: Frame to transmit
 	 * @data_len: Length of frame to transmit
+	 * @freq: Frequency in MHz to transmit on (0 = current channel)
 	 * Returns: 0 on success, -1 on failure
 	 */
-	int (*send_pasn)(void *ctx, const u8 *data, size_t data_len);
+	int (*send_pasn)(void *ctx, const u8 *data, size_t data_len,
+			 unsigned int freq);
 
 	/**
 	 * pairing_status_cb - Callback for reporting NAN pairing result
@@ -695,7 +742,30 @@ struct nan_config {
 	 */
 	int (*pairing_result_cb)(void *ctx, const u8 *peer_addr, int akmp,
 				 int cipher, u16 status, struct wpa_ptk *ptk,
-				 const u8 *nd_pmk);
+				 const u8 *nd_pmk,
+				 const char *psi_locale,
+				 const char *psi_vendor_name,
+				 const char *psi_model_name,
+				 const char *psi_pairing_name);
+
+	/**
+	 * install_nm_tk - Install the NM-TK in the driver before M2 TX
+	 * @ctx: Callback context from cb_ctx
+	 * @peer_addr: Peer NMI address
+	 * @cipher: Cipher suite (WPA_CIPHER_CCMP or WPA_CIPHER_GCMP_256)
+	 * @tk: Temporal key material
+	 * @tk_len: Length of tk in octets
+	 * Returns: 0 on success or when installation is skipped, -1 on failure
+	 *
+	 * Called by the pairing responder inside prepare_data_element(), which
+	 * fires after pasn_derive_keys() but before M2 is transmitted. This
+	 * gives the driver the pairwise key entry before the peer sends M3,
+	 * which some firmware require to accept the subsequent NAN management
+	 * frames. The responder's early-install path may continue after a
+	 * failure; the pairing status callback handles the final result.
+	 */
+	int (*install_nm_tk)(void *ctx, const u8 *peer_addr, int cipher,
+			     const u8 *tk, size_t tk_len);
 
 	/**
 	 * update_pairing_credentials - Report received NIK and NPK for a peer
@@ -798,8 +868,16 @@ void nan_set_cdw_overwrite(struct nan_data *nan, int map_id_2g, int map_id_5g);
 void nan_stop(struct nan_data *nan);
 void nan_flush(struct nan_data *nan);
 
+int siphash_2_4(const u8 *key, const u8 *data, size_t data_len, u8 *tag);
+struct wpabuf * nan_crypto_derive_irsa_tag(const u8 *nik, size_t nik_len,
+					  const u8 *nmi_addr,
+					  const u8 *nira_nonce);
+
 int nan_add_peer(struct nan_data *nan, const u8 *addr,
+		 const u8 *a3, unsigned int freq,
 		 const u8 *device_attrs, size_t device_attrs_len);
+bool nan_peer_no_shared_cluster(struct nan_data *nan, const u8 *addr);
+bool nan_peer_nm_tk_installed(struct nan_data *nan, const u8 *addr);
 bool nan_process_followup(struct nan_data *nan, const u8 *addr, const u8 *buf,
 			  size_t len, u8 req_instance_id, int handle);
 int nan_bootstrap_request(struct nan_data *nan, int handle,
@@ -824,6 +902,17 @@ nan_peer_get_device_capabilities(struct nan_data *nan, const u8 *addr,
 int nan_peer_get_tk(struct nan_data *nan, const u8 *addr,
 		    const u8 *peer_ndi, const u8 *local_ndi,
 		    u8 *tk, size_t *tk_len, enum nan_cipher_suite_id *csid);
+int nan_peer_get_pairing_tk(struct nan_data *nan, const u8 *addr,
+			    u8 *tk, size_t *tk_len);
+int nan_peer_store_pairing_tk(struct nan_data *nan, const u8 *addr,
+			      const u8 *tk, size_t tk_len);
+int nan_peer_get_pairing_pmkid(struct nan_data *nan, const u8 *addr,
+			       u8 *pmkid);
+int nan_peer_store_pairing_pmkid(struct nan_data *nan, const u8 *addr,
+				 const u8 *pmkid);
+void nan_pairing_store_sae_pmkid(struct nan_data *nan_data, const u8 *addr);
+int nan_peer_get_conn_capa(struct nan_data *nan, const u8 *addr,
+			   u16 *capa, bool *valid);
 int nan_peer_get_schedule_info(struct nan_data *nan, const u8 *addr,
 			       struct nan_peer_schedule *sched);
 int nan_peer_dump_sched_to_buf(struct nan_peer_schedule *sched,
@@ -844,6 +933,8 @@ int nan_convert_sched_to_avail_attrs(struct nan_data *nan, u8 sequence_id,
 				     bool include_potential);
 void nan_local_sched_update(struct nan_data *nan, struct nan_schedule *sched);
 void nan_set_sched_update_pending(struct nan_data *nan, bool pending);
+void nan_set_supported_bands(struct nan_data *nan, u8 supported_bands);
+void nan_set_ndpe_support(struct nan_data *nan, bool enable);
 bool nan_peer_pairing_supported(struct nan_data *nan, const u8 *addr);
 bool nan_peer_npk_nik_caching_supported(struct nan_data *nan, const u8 *addr);
 int nan_get_peer_ndc_freq(struct nan_data *nan,
@@ -857,6 +948,7 @@ int nan_crypto_pmkid_list(struct dl_list *pmkid_list, const u8 *raddr,
 			  const u8 *pmk);
 void nan_crypto_clear_pmkid_list(struct dl_list *pmkid_list);
 void nan_add_dev_capa_attr(struct nan_data *nan, struct wpabuf *buf);
+void nan_add_conn_capa_attr(struct wpabuf *buf, u16 capa_bitmap);
 int nan_peer_del_all_ndps(struct nan_data *nan, const u8 *addr);
 int nan_get_chan_entry(struct nan_data *nan, const struct nan_sched_chan *chan,
 		       struct nan_chan_entry *chan_entry);
@@ -885,11 +977,14 @@ int nan_pairing_initiate_pasn_auth(struct nan_data *nan_data, const u8 *addr,
 				   u8 auth_mode, int cipher, int handle,
 				   u8 peer_instance_id, bool responder,
 				   const char *password,
-				   const struct nan_schedule *sched);
+				   const struct nan_schedule *sched,
+				   bool auto_nik_exchange);
+int nan_send_nik_for_peer(struct nan_data *nan_data, const u8 *peer_addr);
 int nan_pairing_pasn_auth_tx_status(struct nan_data *nan, const u8 *data,
 				    size_t data_len, bool acked);
 int nan_pairing_auth_rx(struct nan_data *nan_data,
-			const struct ieee80211_mgmt *mgmt, size_t len);
+			const struct ieee80211_mgmt *mgmt, size_t len,
+			int freq);
 int nan_pairing_set_pairing_setup(struct nan_data *nan_data, bool value);
 int nan_pairing_set_npk_caching(struct nan_data *nan_data, bool value);
 int nan_pairing_set_pairing_verification(struct nan_data *nan_data, bool value);
@@ -911,7 +1006,14 @@ int nan_pairing_initiate_pasn_auth(struct nan_data *nan_data, const u8 *addr,
 				   u8 auth_mode, int cipher, int handle,
 				   u8 peer_instance_id, bool responder,
 				   const char *password,
-				   const struct nan_schedule *sched)
+				   const struct nan_schedule *sched,
+				   bool auto_nik_exchange)
+{
+	return -1;
+}
+
+static inline int nan_send_nik_for_peer(struct nan_data *nan_data,
+					const u8 *peer_addr)
 {
 	return -1;
 }
@@ -925,7 +1027,7 @@ static inline int nan_pairing_pasn_auth_tx_status(struct nan_data *nan,
 
 static inline int nan_pairing_auth_rx(struct nan_data *nan_data,
 				      const struct ieee80211_mgmt *mgmt,
-				      size_t len)
+				      size_t len, int freq)
 {
 	return -1;
 }
@@ -942,5 +1044,19 @@ void nan_pairing_unpair_peer(struct nan_data *nan_data, const u8 *peer_addr)
 }
 
 #endif /* CONFIG_PASN */
+
+int nan_add_nik(struct nan_data *nan, const u8 *nik, enum nan_nik_type type,
+		bool possessed_nik);
+void nan_flush_niks(struct nan_data *nan);
+int nan_add_assoc_self_nik(struct nan_data *nan, enum nan_nik_type type,
+			   const u8 *nik, const u8 *self_nik);
+int nan_irsa_get_nonce_tag_tlv(struct nan_data *nan, u8 *irsa_nonce,
+			       u8 **irsa_tag_tlv, u16 *irsa_tag_tlv_len);
+void nan_rsia_get_rsids(struct nan_data *nan, const u8 *service_id,
+			const u8 *irsa_tag_tlv,
+			u16 irsa_tag_tlv_len, u8 *rsid_num,
+			u8 **rsid_list, u8 *rsid_list_len, bool is_unicast,
+			bool *has_zero_rsid);
+struct dl_list * nan_get_nik_list(struct nan_data *nan, enum nan_nik_type type);
 
 #endif /* NAN_H */

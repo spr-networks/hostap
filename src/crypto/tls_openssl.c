@@ -2782,6 +2782,34 @@ static void debug_print_cert(X509 *cert, const char *title)
 }
 
 
+/*
+ * OpenSSL 4.0 deprecated X509_cmp_current_time() in favor of an API that
+ * reports the reason as an X509_V_ERR_* code. Returns 0 if @cert is valid.
+ */
+static int tls_cert_time_error(const X509 *cert)
+{
+#if OPENSSL_VERSION_NUMBER >= 0x40000000L
+	int err;
+
+	if (X509_check_certificate_times(NULL, cert, &err))
+		return 0;
+
+	/* The caller can act only on the two validity window errors */
+	if (err == X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD)
+		return X509_V_ERR_CERT_HAS_EXPIRED;
+	if (err == X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD)
+		return X509_V_ERR_CERT_NOT_YET_VALID;
+	return err;
+#else /* OpenSSL < 4.0 */
+	if (X509_cmp_current_time(X509_get_notBefore(cert)) > 0)
+		return X509_V_ERR_CERT_NOT_YET_VALID;
+	if (X509_cmp_current_time(X509_get_notAfter(cert)) < 0)
+		return X509_V_ERR_CERT_HAS_EXPIRED;
+	return 0;
+#endif /* OpenSSL < 4.0 */
+}
+
+
 static int tls_verify_cb(int preverify_ok, X509_STORE_CTX *x509_ctx)
 {
 	char buf[256];
@@ -2825,17 +2853,18 @@ static int tls_verify_cb(int preverify_ok, X509_STORE_CTX *x509_ctx)
 
 	if (!conn->ca_cert_verify && depth == 0 &&
 	    !(conn->flags & TLS_CONN_DISABLE_TIME_CHECKS)) {
-		if (X509_cmp_current_time(X509_get_notBefore(err_cert)) > 0) {
+		int terr = tls_cert_time_error(err_cert);
+
+		if (terr == X509_V_ERR_CERT_NOT_YET_VALID) {
 			wpa_printf(MSG_INFO,
 				   "OpenSSL: Server certificate is not valid at the current time");
-			err = X509_V_ERR_CERT_NOT_YET_VALID;
+			err = terr;
 			X509_STORE_CTX_set_error(x509_ctx, err);
 			preverify_ok = 0;
-		} else if (X509_cmp_current_time(X509_get_notAfter(err_cert)) <
-			   0) {
+		} else if (terr == X509_V_ERR_CERT_HAS_EXPIRED) {
 			wpa_printf(MSG_INFO,
 				   "TLS: Server certificate has expired");
-			err = X509_V_ERR_CERT_HAS_EXPIRED;
+			err = terr;
 			X509_STORE_CTX_set_error(x509_ctx, err);
 			preverify_ok = 0;
 		}

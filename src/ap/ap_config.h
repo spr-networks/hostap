@@ -492,6 +492,16 @@ struct hostapd_bss_config {
 
 	int wmm_enabled;
 	int wmm_uapsd;
+	bool wmm_override;
+
+	/*
+	 * WMM AC parameters, in same order as 802.1D, i.e.
+	 * 0 = BE (best effort)
+	 * 1 = BK (background)
+	 * 2 = VI (video)
+	 * 3 = VO (voice)
+	 */
+	struct hostapd_wmm_ac_params wmm_ac_params[4];
 
 	struct hostapd_vlan *vlan;
 
@@ -696,6 +706,7 @@ struct hostapd_bss_config {
 	struct wpabuf *rsno2e_override;
 	struct wpabuf *rsnxe_override;
 	struct wpabuf *rsnxoe_override;
+	struct wpabuf *security_profile_override;
 	int sae_reflection_attack;
 	int sae_commit_status;
 	int sae_pk_omit;
@@ -1026,6 +1037,10 @@ struct hostapd_bss_config {
 #endif /* CONFIG_ROBUST_AV */
 
 	unsigned int gas_max_peers;
+
+	int *security_profiles; /* -1 terminated array of enabled security
+				 * profiles */
+	u64 rsnxe_capab_mask;
 };
 
 /**
@@ -1136,15 +1151,6 @@ struct hostapd_config {
 	int spectrum_mgmt_required;
 
 	struct hostapd_tx_queue_params tx_queue[NUM_TX_QUEUES];
-
-	/*
-	 * WMM AC parameters, in same order as 802.1D, i.e.
-	 * 0 = BE (best effort)
-	 * 1 = BK (background)
-	 * 2 = VI (video)
-	 * 3 = VO (voice)
-	 */
-	struct hostapd_wmm_ac_params wmm_ac_params[4];
 
 	int ht_op_mode_fixed;
 	u16 ht_capab;
@@ -1464,6 +1470,7 @@ hostapd_set_and_check_bw320_offset(struct hostapd_config *conf,
 int hostapd_mac_comp(const void *a, const void *b);
 struct hostapd_config * hostapd_config_defaults(void);
 void hostapd_config_defaults_bss(struct hostapd_bss_config *bss);
+void hostapd_config_apply_wmm_override(struct hostapd_config *conf);
 void hostapd_config_free_radius_attr(struct hostapd_radius_attr *attr);
 void hostapd_config_free_eap_user(struct hostapd_eap_user *user);
 void hostapd_config_free_eap_users(struct hostapd_eap_user *user);
@@ -1499,5 +1506,8 @@ void hostapd_remove_acl_mac(struct mac_acl_entry **acl, int *num,
 			    const u8 *addr);
 bool hostapd_config_check_bss_6g(struct hostapd_bss_config *bss);
 void hostapd_config_free_afc_cert_ids(struct hostapd_config *conf);
+int hostapd_config_sp_key_mgmt(const struct hostapd_bss_config *conf);
+int hostapd_config_all_key_mgmt(const struct hostapd_bss_config *conf);
+bool hostapd_config_sae_ext_key(const struct hostapd_bss_config *conf);
 
 #endif /* HOSTAPD_CONFIG_H */

@@ -88,6 +88,9 @@ struct pasn_data {
 	const u8 *extra_ies;
 	size_t extra_ies_len;
 
+	/* Security Profile element to include in PASN Auth frame 1 only. */
+	struct wpabuf *security_profile;
+
 	/* External modules do not access below variables */
 	bool derive_kek;
 	size_t kek_len;
@@ -145,6 +148,12 @@ struct pasn_data {
 	 * frame for group negotiation testing.
 	 */
 	const int *pasn_test_groups;
+
+	/*
+	 * Number of random PMKIDs to inject into the RSNE when no valid
+	 * PMKSA is available.
+	 */
+	unsigned int test_random_pmkid_count;
 #endif /* CONFIG_TESTING_OPTIONS */
 	int network_id;
 	void *network_ctx;
@@ -176,6 +185,9 @@ struct pasn_data {
 	bool pmksa_caching_privacy;
 	u8 epp_pmkid_cur[PMKID_LEN];
 #endif /* CONFIG_PMKSA_PRIVACY */
+
+	bool sec_prof_enabled;
+	bool sec_prof_used;
 
 	/**
 	 * send_mgmt - Function handler to transmit a Management frame
@@ -335,6 +347,8 @@ void pasn_set_rsnxe_ie(struct pasn_data *pasn, const u8 *rsnxe_ie);
 void pasn_set_custom_pmkid(struct pasn_data *pasn, const u8 *pmkid);
 int pasn_set_extra_ies(struct pasn_data *pasn, const u8 *extra_ies,
 		       size_t extra_ies_len);
+int pasn_set_security_profile(struct pasn_data *pasn, const u8 *sp,
+			      size_t sp_len);
 void pasn_set_mfp(struct pasn_data *pasn, enum mfp_options mfp);
 
 struct rsn_pmksa_cache * pasn_responder_pmksa_cache_init(void);
@@ -359,6 +373,15 @@ int pasn_add_encrypted_data(struct pasn_data *pasn, struct wpabuf *buf,
 			    const u8 *data, size_t data_len);
 int pasn_parse_encrypted_data(struct pasn_data *pasn, const u8 *data,
 			      size_t len);
+
+static inline unsigned int pasn_get_test_random_pmkid(struct pasn_data *pasn)
+{
+#ifdef CONFIG_TESTING_OPTIONS
+	return pasn ? pasn->test_random_pmkid_count : 0;
+#else /* CONFIG_TESTING_OPTIONS */
+	return 0;
+#endif /* CONFIG_TESTING_OPTIONS */
+}
 
 #ifdef __cplusplus
 }

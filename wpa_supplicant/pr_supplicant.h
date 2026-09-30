@@ -47,6 +47,7 @@ void wpas_pr_measurement_complete(struct wpa_supplicant *wpa_s,
 				  struct peer_measurement_complete *complete);
 void wpas_pr_measurement_result(struct wpa_supplicant *wpa_s,
 				struct peer_measurement_result *result);
+void wpas_pr_update_channel_list(struct wpa_supplicant *wpa_s);
 
 #else /* CONFIG_PR */
 
@@ -140,6 +141,10 @@ wpas_pr_measurement_complete(struct wpa_supplicant *wpa_s,
 static inline void
 wpas_pr_measurement_result(struct wpa_supplicant *wpa_s,
 			   struct peer_measurement_result *result)
+{
+}
+
+static inline void wpas_pr_update_channel_list(struct wpa_supplicant *wpa_s)
 {
 }
 

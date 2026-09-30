@@ -304,7 +304,7 @@ static struct wpabuf * wpas_pasn_fils_build_auth(struct pasn_data *pasn)
 	wpabuf_put_le16(buf, WLAN_STATUS_SUCCESS);
 
 	/* Own RSNE */
-	wpa_pasn_add_rsne(buf, NULL, pasn->akmp, pasn->cipher);
+	wpa_pasn_add_rsne(buf, NULL, pasn->akmp, pasn->cipher, 0);
 
 	/* FILS Nonce */
 	wpabuf_put_u8(buf, WLAN_EID_EXTENSION);
@@ -534,6 +534,7 @@ static struct wpabuf * wpas_pasn_get_wrapped_data(struct pasn_data *pasn)
 #endif /* CONFIG_ENC_ASSOC */
 	case WPA_KEY_MGMT_SAE:
 	case WPA_KEY_MGMT_SAE_EXT_KEY:
+	case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
 #ifdef CONFIG_SAE
 		if (pasn->trans_seq == 0)
 			return wpas_pasn_wd_sae_commit(pasn);
@@ -575,6 +576,7 @@ static u8 wpas_pasn_get_wrapped_data_format(struct pasn_data *pasn)
 	switch (pasn->akmp) {
 	case WPA_KEY_MGMT_SAE:
 	case WPA_KEY_MGMT_SAE_EXT_KEY:
+	case WPA_KEY_MGMT_FT_SAE_EXT_KEY:
 		return WPA_PASN_WRAPPED_DATA_SAE;
 	case WPA_KEY_MGMT_FILS_SHA256:
 	case WPA_KEY_MGMT_FILS_SHA384:
@@ -670,6 +672,12 @@ struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
 	if (wpa_key_mgmt_ft(pasn->akmp)) {
 #ifdef CONFIG_IEEE80211R
 		pmkid = pasn->pmk_r1_name;
+		/*
+		 * Note: Even when PMKSA is available, also add wrapped data as
+		 * it is possible that the PMKID is no longer valid at the AP.
+		 */
+		if (wrapped_data != WPA_PASN_WRAPPED_DATA_NO && !verify)
+			wrapped_data_buf = wpas_pasn_get_wrapped_data(pasn);
 #else /* CONFIG_IEEE80211R */
 		goto fail;
 #endif /* CONFIG_IEEE80211R */
@@ -697,7 +705,8 @@ struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
 
 	if (pasn->rsn_ie && pasn->rsn_ie_len)
 		wpabuf_put_data(buf, pasn->rsn_ie, pasn->rsn_ie_len);
-	else if (wpa_pasn_add_rsne(buf, pmkid, pasn->akmp, pasn->cipher) < 0)
+	else if (wpa_pasn_add_rsne(buf, pmkid, pasn->akmp, pasn->cipher,
+				   pasn_get_test_random_pmkid(pasn)) < 0)
 		goto fail;
 
 	if (!wrapped_data_buf)
@@ -715,6 +724,9 @@ struct wpabuf * wpas_pasn_build_auth_1(struct pasn_data *pasn,
 				  pubkey, true, comeback, -1);
 
 	wpa_pasn_add_extra_ies(buf, pasn->extra_ies, pasn->extra_ies_len);
+
+	if (pasn->security_profile)
+		wpabuf_put_buf(buf, pasn->security_profile);
 
 	wpas_pasn_add_mle(pasn, buf);
 
@@ -943,6 +955,9 @@ void wpa_pasn_reset(struct pasn_data *pasn)
 		pasn->extra_ies = NULL;
 	}
 
+	wpabuf_free(pasn->security_profile);
+	pasn->security_profile = NULL;
+
 	wpabuf_free(pasn->frame);
 	pasn->frame = NULL;
 }
@@ -968,7 +983,7 @@ static int wpas_pasn_set_pmk(struct pasn_data *pasn,
 		return 0;
 	}
 
-	if (wpa_key_mgmt_ft(pasn->akmp)) {
+	if (wpa_key_mgmt_ft(pasn->akmp) && pasn->pmk_r1_len > 0) {
 #ifdef CONFIG_IEEE80211R
 		wpa_printf(MSG_DEBUG, "PASN: FT: Using PMK-R1");
 		pasn->pmk_len = pasn->pmk_r1_len;
@@ -1015,6 +1030,7 @@ static int wpas_pasn_set_pmk(struct pasn_data *pasn,
 
 #ifdef CONFIG_SAE
 	if (pasn->akmp == WPA_KEY_MGMT_SAE ||
+	    pasn->akmp == WPA_KEY_MGMT_FT_SAE_EXT_KEY ||
 	    pasn->akmp == WPA_KEY_MGMT_SAE_EXT_KEY) {
 		int ret;
 
@@ -1528,7 +1544,8 @@ int wpas_parse_pasn_frame(struct pasn_data *pasn, u16 auth_type,
 		wpa_printf(MSG_DEBUG, "PASN: Derive PTK-KEK");
 		if (!pasn->kek_len)
 			pasn->kek_len = wpa_kek_len(pasn->akmp,
-						    pasn->pmk_len);
+						    pasn->pmk_len,
+						    pasn->group);
 		wpa_printf(MSG_DEBUG, "PASN: kek_len=%zu", pasn->kek_len);
 	}
 
