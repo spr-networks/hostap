@@ -9089,11 +9089,14 @@ static int i802_read_sta_data(struct i802_bss *bss,
 			      const u8 *addr)
 {
 	struct nl_msg *msg;
+	bool link_stats = nl80211_attr_supported(bss->drv,
+					       NL80211_ATTR_STA_DUMP_LINK_STATS);
 
-	if (!(msg = nl80211_bss_msg(bss, NLM_F_DUMP,
+	if (!(msg = nl80211_bss_msg(bss, link_stats ? NLM_F_DUMP : 0,
 				    NL80211_CMD_GET_STATION)) ||
 	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, addr) ||
-	    nla_put_flag(msg, NL80211_ATTR_STA_DUMP_LINK_STATS)) {
+	    (link_stats &&
+	     nla_put_flag(msg, NL80211_ATTR_STA_DUMP_LINK_STATS))) {
 		nlmsg_free(msg);
 		return -ENOBUFS;
 	}
