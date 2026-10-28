@@ -357,6 +357,7 @@ static int hostapd_config_read_sae_psk(const char *fname,
 #ifdef CONFIG_SAE
 	FILE *f;
 	char buf[128];
+	int ret = 0;
 
 	if (!fname)
 		return 0;
@@ -377,12 +378,17 @@ static int hostapd_config_read_sae_psk(const char *fname,
 
 		if (parse_sae_password(bss, buf) < 0) {
 			wpa_printf(MSG_ERROR, "SAE failed to parse sae entry");
-			return -1;
+			ret = -1;
+			break;
 		}
 	}
 
-#endif
+	fclose(f);
+
+	return ret;
+#else /* CONFIG_SAE */
 	return 0;
+#endif /* CONFIG_SAE */
 }
 
 static int hostapd_config_read_wpa_psk(const char *fname,
